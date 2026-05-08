@@ -6046,8 +6046,9 @@ async def list_group_push_configs(group_id: str, fb_user_id: Optional[str] = Non
     receives X campaigns" without making the user open every campaign.
 
     Scoped to the caller: refuses to list configs on a group whose
-    channel is owned by another user (matches the channel/group
-    visibility rule).
+    channel is owned by another user AND not shared with the caller.
+    Accepted-grant users see the same configs as the owner so they
+    can co-manage the OA's push schedule.
     """
     if _db_pool is None:
         return {"data": []}
@@ -6057,18 +6058,24 @@ async def list_group_push_configs(group_id: str, fb_user_id: Optional[str] = Non
     async with _db_pool.acquire() as conn:
         owner_row = await conn.fetchrow(
             """
-            SELECT c.owner_fb_user_id
+            SELECT c.owner_fb_user_id,
+                   COALESCE(gr.status, '') AS my_grant_status
             FROM line_groups g
             LEFT JOIN line_channels c ON c.id = g.channel_id
+            LEFT JOIN line_channel_grants gr
+                ON gr.channel_id = c.id AND gr.fb_user_id = $2
             WHERE g.group_id = $1
             """,
             group_id,
+            uid,
         )
         if owner_row is None:
             raise HTTPException(status_code=404, detail="Group not found")
         owner = owner_row["owner_fb_user_id"]
-        # Visible if caller owns the channel OR channel is orphan.
-        if owner is not None and owner != uid:
+        is_owner = owner == uid
+        is_shared = owner_row["my_grant_status"] == "accepted"
+        is_orphan = owner is None
+        if not (is_owner or is_shared or is_orphan):
             raise HTTPException(status_code=403, detail="無權限檢視此群組的推播設定")
         rows = await conn.fetch(
             """
@@ -6328,18 +6335,23 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
     _validate_push_payload(payload)
     # Tier limit gate — only on create (payload.id == None). Edits
     # to an existing config don't grow the count, so they're free.
-    if not payload.id and fb_user_id:
-        limits = await _get_user_limits(fb_user_id)
-        cap = limits["line_groups"]
-        if not _is_unlimited(cap):
-            current = await _count_user_push_configs(fb_user_id)
-            if current >= cap:
-                raise _tier_limit_error(
-                    "line_groups",
-                    cap,
-                    limits["tier"],
-                    f"目前方案最多可設定 {cap} 個 LINE 群組推播,請升級方案",
-                )
+    # Charged against the CHANNEL OWNER's tier, not the caller's.
+    # The OA owner paid for the channel; granted users can manage
+    # configs without burning their own personal tier quota.
+    if not payload.id:
+        owner_uid = await _get_group_owner(payload.group_id) or fb_user_id
+        if owner_uid:
+            limits = await _get_user_limits(owner_uid)
+            cap = limits["line_groups"]
+            if not _is_unlimited(cap):
+                current = await _count_user_push_configs(owner_uid)
+                if current >= cap:
+                    raise _tier_limit_error(
+                        "line_groups",
+                        cap,
+                        limits["tier"],
+                        f"此官方帳號擁有者方案最多 {cap} 個 LINE 群組推播,需擁有者升級",
+                    )
     next_run = _compute_next_run(
         payload.frequency,
         payload.weekdays,

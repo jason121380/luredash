@@ -718,6 +718,8 @@ export const api = {
           channel_id: string | null;
           channel_name: string;
           channel_owner_fb_user_id: string | null;
+          is_owner: boolean;
+          is_shared: boolean;
           joined_at: string | null;
           left_at: string | null;
         }>;
