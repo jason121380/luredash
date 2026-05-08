@@ -5405,6 +5405,64 @@ async def get_line_channel_quota(channel_id: str, fb_user_id: Optional[str] = No
         raise HTTPException(status_code=502, detail=e.friendly_message)
 
 
+@app.post("/api/line-channels/refresh-all")
+async def refresh_all_line_channels(fb_user_id: Optional[str] = None):
+    """For each user-owned channel, re-pull the bot's displayName from
+    LINE's /v2/bot/info and update line_channels.name when it differs.
+    Lets operators sync after renaming the LINE OA inside LINE
+    Official Account Manager — paired with the existing
+    `/api/line-groups/refresh-all` endpoint, the LINE 推播設定 page's
+    top-right refresh button now keeps both channel names AND group
+    names in sync with their LINE-side state."""
+    pool = _require_db()
+    if _http_client is None:
+        raise HTTPException(status_code=503, detail="HTTP client not ready")
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, name, access_token
+            FROM line_channels
+            WHERE owner_fb_user_id = $1 AND enabled
+            """,
+            uid,
+        )
+    if not rows:
+        return {"ok": True, "refreshed": 0}
+
+    sem = asyncio.Semaphore(4)
+    refreshed = 0
+
+    async def _one(channel_id: str, current_name: str, token: str) -> Optional[tuple[str, str]]:
+        async with sem:
+            info = await line_client.get_bot_info(_http_client, access_token=token)
+        if info is None:
+            return None
+        new_name = (info.get("displayName") or "").strip()
+        if not new_name or new_name == (current_name or "").strip():
+            return None
+        return str(channel_id), new_name
+
+    results = await asyncio.gather(
+        *(_one(str(r["id"]), r["name"], r["access_token"] or "") for r in rows),
+        return_exceptions=True,
+    )
+    async with pool.acquire() as conn:
+        for r in results:
+            if isinstance(r, Exception) or r is None:
+                continue
+            channel_id, new_name = r
+            await conn.execute(
+                "UPDATE line_channels SET name = $1, updated_at = NOW() WHERE id = $2::uuid",
+                new_name,
+                channel_id,
+            )
+            refreshed += 1
+    return {"ok": True, "refreshed": refreshed}
+
+
 # ── LINE group management ─────────────────────────────────────
 
 

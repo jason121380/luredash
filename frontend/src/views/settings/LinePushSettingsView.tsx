@@ -24,17 +24,28 @@ export function LinePushSettingsView() {
     if (refreshing) return;
     setRefreshing(true);
     try {
-      // Bulk refresh first — re-pulls each group's display name from
-      // LINE AND auto-marks groups the bot can't see anymore (kicked
-      // / 404) as left, so they drop out of the next GET. Then
-      // refetch the local queries to reflect the new DB state.
-      const result = await api.linePush.refreshAllGroups(user?.id ?? "");
+      // Run the two refresh endpoints in parallel:
+      //   - groups: re-pulls each group's display name + auto-marks
+      //     groups the bot can't see anymore (kicked / 404) as left
+      //   - channels: re-pulls each OA's displayName from LINE's
+      //     /v2/bot/info so renames in LINE Manager surface here
+      // Then refetch all three local queries (channels need it for
+      // the「綁定 N 群組」 count + last_webhook_at relative time too).
+      const uid = user?.id ?? "";
+      const [groupsResult, channelsResult] = await Promise.all([
+        api.linePush.refreshAllGroups(uid),
+        api.lineChannels.refreshAll(uid),
+      ]);
       await Promise.all([
         qc.refetchQueries({ queryKey: ["lineGroups"] }),
         qc.refetchQueries({ queryKey: ["lineGroupConfigs"] }),
+        qc.refetchQueries({ queryKey: ["lineChannels"] }),
       ]);
-      const parts = [`已更新 ${result.refreshed} 個群組名稱`];
-      if (result.marked_left > 0) parts.push(`移除 ${result.marked_left} 個已退出群組`);
+      const parts = [`已更新 ${groupsResult.refreshed} 個群組名稱`];
+      if (groupsResult.marked_left > 0)
+        parts.push(`移除 ${groupsResult.marked_left} 個已退出群組`);
+      if (channelsResult.refreshed > 0)
+        parts.push(`更新 ${channelsResult.refreshed} 個官方帳號名稱`);
       toast(parts.join("、"), "success");
     } catch (e) {
       toast(`重新整理失敗:${e instanceof Error ? e.message : String(e)}`, "error", 4500);
@@ -110,7 +121,7 @@ export function LinePushSettingsView() {
               </a>
               <span className="text-gray-500">調整方案。詳細規則請參考</span>{" "}
               <a
-                href="https://www.linebiz.com/tw/service/line-official-account/plan/"
+                href="https://tw.linebiz.com/faq/oa-price/message-price-list/"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="font-semibold text-orange hover:underline"

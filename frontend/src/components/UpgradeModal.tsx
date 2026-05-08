@@ -20,8 +20,8 @@ import { useNavigate } from "react-router-dom";
 
 const RESOURCE_LABEL: Record<LimitResource, string> = {
   ad_accounts: "廣告帳戶",
-  line_channels: "LINE 官方帳號",
-  line_groups: "LINE 群組推播",
+  line_channels: "可串接 Line 官方帳號數",
+  line_groups: "可被加入 Line 群組數量",
   monthly_push: "本月推播次數",
   agent_advice: "AI 幕僚分析",
 };
