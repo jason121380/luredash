@@ -110,7 +110,7 @@ export function LinePushSettingsView() {
               </a>
               <span className="text-gray-500">調整方案。詳細規則請參考</span>{" "}
               <a
-                href="https://www.linebiz.com/tw/service/line-official-account/plan/"
+                href="https://tw.linebiz.com/faq/oa-price/message-price-list/"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="font-semibold text-orange hover:underline"
