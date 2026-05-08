@@ -1,3 +1,6 @@
+import { api } from "@/api/client";
+import { useFbAuth } from "@/auth/FbAuthProvider";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   useClaimLineChannel,
   useCreateLineChannel,
@@ -24,8 +27,12 @@ interface ChannelRow {
   enabled: boolean;
   is_default: boolean;
   is_orphan: boolean;
+  is_owner: boolean;
+  is_shared: boolean;
   editable: boolean;
   bound_groups_count: number;
+  shared_count: number;
+  pending_count: number;
   last_webhook_at: string | null;
   webhook_url: string;
 }
@@ -56,6 +63,7 @@ export function LineChannelsContent() {
   const channels = channelsQuery.data ?? [];
   const [editing, setEditing] = useState<ChannelRow | null>(null);
   const [creating, setCreating] = useState(false);
+  const [sharing, setSharing] = useState<ChannelRow | null>(null);
   const usageQuery = useBillingUsage();
   const channelCap = usageQuery.data?.limits.line_channels ?? -1;
   const isUnlimited = channelCap < 0 || channelCap >= 999_000;
@@ -110,7 +118,12 @@ export function LineChannelsContent() {
       ) : (
         <ul className="divide-y divide-border">
           {channels.map((c) => (
-            <ChannelRow key={c.id} channel={c} onEdit={() => setEditing(c)} />
+            <ChannelRow
+              key={c.id}
+              channel={c}
+              onEdit={() => setEditing(c)}
+              onShare={() => setSharing(c)}
+            />
           ))}
         </ul>
       )}
@@ -119,12 +132,21 @@ export function LineChannelsContent() {
       {editing && (
         <ChannelEditModal mode="edit" channel={editing} onClose={() => setEditing(null)} />
       )}
+      {sharing && <ChannelShareModal channel={sharing} onClose={() => setSharing(null)} />}
       </div>
     </>
   );
 }
 
-function ChannelRow({ channel, onEdit }: { channel: ChannelRow; onEdit: () => void }) {
+function ChannelRow({
+  channel,
+  onEdit,
+  onShare,
+}: {
+  channel: ChannelRow;
+  onEdit: () => void;
+  onShare: () => void;
+}) {
   const deleteMutation = useDeleteLineChannel();
   const claimMutation = useClaimLineChannel();
   const quotaQuery = useLineChannelQuota(channel.id);
@@ -213,6 +235,30 @@ function ChannelRow({ channel, onEdit }: { channel: ChannelRow; onEdit: () => vo
               綁定 {channel.bound_groups_count} 群組
             </span>
           )}
+          {channel.is_shared && (
+            <span
+              className="shrink-0 whitespace-nowrap rounded-full bg-emerald-50 px-1.5 py-[1px] text-[10px] font-semibold text-emerald-600"
+              title="此官方帳號是別的使用者邀請你共同管理的"
+            >
+              共享中
+            </span>
+          )}
+          {channel.is_owner && channel.shared_count > 0 && (
+            <span
+              className="shrink-0 whitespace-nowrap rounded-full bg-blue-50 px-1.5 py-[1px] text-[10px] font-semibold text-blue-600"
+              title="此官方帳號已共享給其他使用者"
+            >
+              已共享 {channel.shared_count} 人
+            </span>
+          )}
+          {channel.is_owner && channel.pending_count > 0 && (
+            <span
+              className="shrink-0 whitespace-nowrap rounded-full bg-amber-50 px-1.5 py-[1px] text-[10px] font-semibold text-amber-600"
+              title="尚有受邀者未確認加入"
+            >
+              {channel.pending_count} 待確認
+            </span>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {channel.is_orphan ? (
@@ -235,31 +281,45 @@ function ChannelRow({ channel, onEdit }: { channel: ChannelRow; onEdit: () => vo
               >
                 {quotaQuery.isFetching ? "查詢中..." : "本月用量"}
               </button>
-              <button
-                type="button"
-                onClick={onEdit}
-                className="rounded border border-border px-1.5 py-0.5 text-[10px] text-gray-500 hover:border-orange hover:text-orange"
-              >
-                編輯
-              </button>
-              <button
-                type="button"
-                onClick={onDelete}
-                disabled={deleteMutation.isPending}
-                title={
-                  channel.bound_groups_count > 0
-                    ? "尚有群組綁定,無法刪除"
-                    : "刪除此官方帳號"
-                }
-                className={cn(
-                  "rounded border px-1.5 py-0.5 text-[10px] disabled:opacity-50",
-                  channel.bound_groups_count > 0
-                    ? "border-border text-gray-300 hover:border-gray-300"
-                    : "border-border text-red hover:border-red hover:bg-red-bg",
-                )}
-              >
-                {deleteMutation.isPending ? "刪除中" : "刪除"}
-              </button>
+              {channel.is_owner && (
+                <button
+                  type="button"
+                  onClick={onShare}
+                  title="共享此官方帳號給其他使用者(他們可以一起管理底下的群組與推播設定)"
+                  className="rounded border border-border px-1.5 py-0.5 text-[10px] text-gray-500 hover:border-orange hover:text-orange"
+                >
+                  共享
+                </button>
+              )}
+              {channel.is_owner && (
+                <button
+                  type="button"
+                  onClick={onEdit}
+                  className="rounded border border-border px-1.5 py-0.5 text-[10px] text-gray-500 hover:border-orange hover:text-orange"
+                >
+                  編輯
+                </button>
+              )}
+              {channel.is_owner && (
+                <button
+                  type="button"
+                  onClick={onDelete}
+                  disabled={deleteMutation.isPending}
+                  title={
+                    channel.bound_groups_count > 0
+                      ? "尚有群組綁定,無法刪除"
+                      : "刪除此官方帳號"
+                  }
+                  className={cn(
+                    "rounded border px-1.5 py-0.5 text-[10px] disabled:opacity-50",
+                    channel.bound_groups_count > 0
+                      ? "border-border text-gray-300 hover:border-gray-300"
+                      : "border-border text-red hover:border-red hover:bg-red-bg",
+                  )}
+                >
+                  {deleteMutation.isPending ? "刪除中" : "刪除"}
+                </button>
+              )}
             </>
           )}
         </div>
@@ -481,5 +541,155 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-[11px] font-semibold text-gray-500">{label}</span>
       {children}
     </label>
+  );
+}
+
+function ChannelShareModal({
+  channel,
+  onClose,
+}: {
+  channel: ChannelRow;
+  onClose: () => void;
+}) {
+  const { user } = useFbAuth();
+  const uid = user?.id ?? "";
+  const qc = useQueryClient();
+  const grantsQuery = useQuery({
+    queryKey: ["lineChannelGrants", uid, channel.id] as const,
+    queryFn: async () => (await api.lineChannels.listGrants(uid, channel.id)).data,
+    enabled: !!uid,
+    staleTime: 30_000,
+  });
+  const inviteMutation = useMutation({
+    mutationFn: (invitee: string) => api.lineChannels.invite(uid, channel.id, invitee),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["lineChannelGrants", uid, channel.id] });
+      qc.invalidateQueries({ queryKey: ["lineChannels"] });
+    },
+  });
+  const revokeMutation = useMutation({
+    mutationFn: (granteeUid: string) =>
+      api.lineChannels.revokeGrant(uid, channel.id, granteeUid),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["lineChannelGrants", uid, channel.id] });
+      qc.invalidateQueries({ queryKey: ["lineChannels"] });
+    },
+  });
+  const [inviteId, setInviteId] = useState("");
+
+  const onInvite = async () => {
+    const v = inviteId.trim();
+    if (!v) {
+      toast("請輸入受邀者的 FB User ID", "error");
+      return;
+    }
+    try {
+      await inviteMutation.mutateAsync(v);
+      setInviteId("");
+      toast("已送出邀請,等對方確認", "success");
+    } catch (e) {
+      toast(`邀請失敗:${e instanceof Error ? e.message : String(e)}`, "error", 5000);
+    }
+  };
+
+  const onRevoke = async (granteeUid: string) => {
+    const ok = await confirm("確定要移除這個共享?對方將立刻失去存取權限");
+    if (!ok) return;
+    try {
+      await revokeMutation.mutateAsync(granteeUid);
+      toast("已移除", "success");
+    } catch (e) {
+      toast(`移除失敗:${e instanceof Error ? e.message : String(e)}`, "error", 5000);
+    }
+  };
+
+  const grants = grantsQuery.data ?? [];
+
+  return (
+    <Modal
+      open
+      onOpenChange={(v) => !v && onClose()}
+      title={`共享「${channel.name}」`}
+      subtitle="輸入對方的 Facebook User ID 邀請共同管理此 OA。對方確認後即可看到底下的群組與推播設定。"
+    >
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] font-semibold text-gray-500">邀請新使用者</span>
+          <div className="flex items-stretch gap-1.5">
+            <input
+              type="text"
+              value={inviteId}
+              onChange={(e) => setInviteId(e.currentTarget.value)}
+              placeholder="Facebook User ID(對方登入後可在右上角頭像取得)"
+              className="flex-1 rounded border border-border bg-bg px-2.5 py-1.5 text-[13px] outline-none focus:border-orange focus:bg-white"
+            />
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => void onInvite()}
+              disabled={inviteMutation.isPending}
+            >
+              {inviteMutation.isPending ? "送出中..." : "邀請"}
+            </Button>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] font-semibold text-gray-500">
+            目前共享名單({grants.length})
+          </span>
+          {grantsQuery.isLoading ? (
+            <div className="text-[12px] text-gray-300">載入中...</div>
+          ) : grants.length === 0 ? (
+            <div className="rounded border border-dashed border-border bg-bg px-3 py-3 text-[12px] text-gray-300">
+              尚未邀請任何使用者
+            </div>
+          ) : (
+            <ul className="m-0 flex flex-col gap-1 p-0">
+              {grants.map((g) => (
+                <li
+                  key={g.fb_user_id}
+                  className="flex items-center justify-between gap-2 rounded border border-border px-2.5 py-1.5"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="truncate text-[12px] font-mono text-ink">{g.fb_user_id}</span>
+                    <span
+                      className={cn(
+                        "shrink-0 whitespace-nowrap rounded-full px-1.5 py-[1px] text-[10px] font-semibold",
+                        g.status === "accepted"
+                          ? "bg-emerald-50 text-emerald-600"
+                          : g.status === "pending"
+                            ? "bg-amber-50 text-amber-600"
+                            : "bg-gray-100 text-gray-500",
+                      )}
+                    >
+                      {g.status === "accepted"
+                        ? "已加入"
+                        : g.status === "pending"
+                          ? "待確認"
+                          : "已拒絕"}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void onRevoke(g.fb_user_id)}
+                    disabled={revokeMutation.isPending}
+                    className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-red hover:border-red hover:bg-red-bg disabled:opacity-50"
+                  >
+                    移除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="flex justify-end">
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            關閉
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }

@@ -371,6 +371,49 @@ async def lifespan(app: FastAPI):
                     ON line_channels ((1)) WHERE is_default
                     """
                 )
+                # Channel-secret uniqueness (Phase B): prevents user B
+                # from re-adding user A's OA. LINE channels have a
+                # globally-unique channel_secret, so a duplicate insert
+                # is by definition the same OA. Use a UNIQUE INDEX so
+                # we can predicate on `enabled` — a soft-disabled
+                # channel from a previous owner shouldn't block re-
+                # registration. Existing rows are checked for duplicates
+                # by the migration; manual cleanup needed if any pre-
+                # 2026-05-08 dataset has duplicates.
+                await conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_line_channels_secret_unique
+                    ON line_channels (channel_secret) WHERE enabled
+                    """
+                )
+                # ── Phase B: LINE OA grants ───────────────────────
+                # Lets a channel OWNER share their OA with another FB
+                # user. Granted users see the same groups + can manage
+                # push configs once they ACCEPT the invitation.
+                # Schema: composite PK (channel_id, fb_user_id) so a
+                # user can't have two invitations to the same channel.
+                # Status flow: pending → accepted | rejected. Rejected
+                # rows stay so the same user can't be re-invited
+                # immediately after rejecting.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS line_channel_grants (
+                        channel_id UUID NOT NULL REFERENCES line_channels(id) ON DELETE CASCADE,
+                        fb_user_id TEXT NOT NULL,
+                        granted_by_fb_user_id TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        responded_at TIMESTAMPTZ,
+                        PRIMARY KEY (channel_id, fb_user_id)
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_lcg_user_status
+                    ON line_channel_grants (fb_user_id, status)
+                    """
+                )
                 # `line_groups`: populated from the /api/line/webhook
                 # join/leave events. We keep left_at instead of deleting
                 # so existing push configs don't lose their FK target.
@@ -4434,11 +4477,46 @@ async def _default_channel_creds() -> Optional[tuple[str, str, str]]:
     return str(row["id"]), row["channel_secret"], row["access_token"]
 
 
+async def _channel_role_for_user(channel_id: str, uid: str) -> Optional[str]:
+    """Return the caller's relationship to a LINE channel:
+       'owner'  → owns the channel
+       'shared' → has an accepted grant
+       None     → neither (no access)
+
+    Used by the per-channel auth gates so both owners AND accepted-
+    grant users can read / manage the channel's groups + push configs.
+    Only owners can transfer / delete / share-invite — gated separately
+    in the relevant endpoints."""
+    if _db_pool is None or not channel_id or not uid:
+        return None
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT c.owner_fb_user_id,
+                   COALESCE(g.status, '') AS grant_status
+            FROM line_channels c
+            LEFT JOIN line_channel_grants g
+                ON g.channel_id = c.id AND g.fb_user_id = $2
+            WHERE c.id = $1::uuid
+            """,
+            channel_id,
+            uid,
+        )
+    if row is None:
+        return None
+    if row["owner_fb_user_id"] == uid:
+        return "owner"
+    if row["grant_status"] == "accepted":
+        return "shared"
+    return None
+
+
 async def _assert_can_modify_config_for_group(group_id: str, fb_user_id: Optional[str]) -> None:
     """Authorize a config write (create/update/delete/test) on this group.
 
-    Rule (strict per-user):
-      - Caller must own the channel that the group is bound to.
+    Rule (Phase B — sharing):
+      - Caller must own the channel the group is bound to, OR have an
+        accepted grant on that channel.
       - Orphan channels (owner_fb_user_id IS NULL, legacy seeded data)
         cannot be modified by anyone — set ADMIN_FB_USER_ID env to
         claim them at startup.
@@ -4450,14 +4528,18 @@ async def _assert_can_modify_config_for_group(group_id: str, fb_user_id: Optiona
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT c.owner_fb_user_id
+            SELECT c.id AS channel_id, c.owner_fb_user_id,
+                   COALESCE(gr.status, '') AS grant_status
             FROM line_groups g
             LEFT JOIN line_channels c ON c.id = g.channel_id
+            LEFT JOIN line_channel_grants gr
+                ON gr.channel_id = c.id AND gr.fb_user_id = $2
             WHERE g.group_id = $1
             """,
             group_id,
+            uid,
         )
-    if row is None:
+    if row is None or row["channel_id"] is None:
         raise HTTPException(status_code=404, detail="Group not found")
     owner = row["owner_fb_user_id"]
     if owner is None:
@@ -4465,8 +4547,11 @@ async def _assert_can_modify_config_for_group(group_id: str, fb_user_id: Optiona
             status_code=403,
             detail="此群組綁定的官方帳號沒有擁有者(舊資料);請設 ADMIN_FB_USER_ID 認領後再操作",
         )
-    if owner != uid:
-        raise HTTPException(status_code=403, detail="此推播由其他用戶的官方帳號管理,無權限修改")
+    if owner == uid:
+        return
+    if row["grant_status"] == "accepted":
+        return
+    raise HTTPException(status_code=403, detail="此推播由其他用戶的官方帳號管理,無權限修改")
 
 
 async def _channel_creds_for_group(group_id: str) -> Optional[tuple[str, str, str]]:
@@ -5331,14 +5416,15 @@ def _public_channel_url(request: Request, channel_id: str) -> str:
 async def list_line_channels(request: Request, fb_user_id: Optional[str] = None):
     """List LINE Official Accounts visible to the calling FB user.
 
-    Visibility:
-      - Channels owned by the caller → editable
+    Visibility (Phase B sharing model):
+      - Channels owned by the caller → `is_owner: true`, full edit
+      - Channels granted to the caller and accepted →
+        `is_owner: false, is_shared: true` — can manage groups +
+        push configs, but can't transfer ownership / delete the OA
       - Orphan channels (`owner_fb_user_id IS NULL`, pre-2026-04-30
-        seed/legacy) → shown to ALL users with `is_orphan: true` and
-        a「認領」button. First-come-first-served: clicking 認領 calls
-        POST /api/line-channels/{id}/claim and sets the caller as
-        owner. Other users with their own owned channels won't see
-        someone else's private OA.
+        seed/legacy) → shown to ALL users with `is_orphan: true`
+        and a「認領」 button (first-come-first-served claim).
+      - Other users' private OAs → invisible.
     """
     if _db_pool is None:
         return {"data": []}
@@ -5346,13 +5432,16 @@ async def list_line_channels(request: Request, fb_user_id: Optional[str] = None)
     if not uid:
         return {"data": []}
     async with _db_pool.acquire() as conn:
-        # LEFT JOIN to count active group bindings per channel — used
-        # by the UI to show「綁定 N 群組」 and gate the delete button.
+        # LEFT JOIN counts: active group bindings + accepted grants.
+        # Visibility = owned OR orphan OR (granted AND accepted).
         rows = await conn.fetch(
             """
             SELECT c.id, c.name, c.channel_secret, c.access_token, c.enabled, c.is_default,
                    c.owner_fb_user_id, c.created_at, c.updated_at, c.last_webhook_at,
-                   COALESCE(g.cnt, 0) AS bound_groups_count
+                   COALESCE(g.cnt, 0) AS bound_groups_count,
+                   COALESCE(gr.shared_count, 0) AS shared_count,
+                   COALESCE(gr.pending_count, 0) AS pending_count,
+                   COALESCE(my_grant.status, '') AS my_grant_status
             FROM line_channels c
             LEFT JOIN (
                 SELECT channel_id, COUNT(*) AS cnt
@@ -5360,8 +5449,23 @@ async def list_line_channels(request: Request, fb_user_id: Optional[str] = None)
                 WHERE left_at IS NULL
                 GROUP BY channel_id
             ) g ON g.channel_id = c.id
-            WHERE c.owner_fb_user_id = $1 OR c.owner_fb_user_id IS NULL
-            ORDER BY (c.owner_fb_user_id IS NULL) ASC, c.is_default DESC, c.created_at ASC
+            LEFT JOIN (
+                SELECT channel_id,
+                       COUNT(*) FILTER (WHERE status = 'accepted') AS shared_count,
+                       COUNT(*) FILTER (WHERE status = 'pending') AS pending_count
+                FROM line_channel_grants
+                GROUP BY channel_id
+            ) gr ON gr.channel_id = c.id
+            LEFT JOIN line_channel_grants my_grant
+                ON my_grant.channel_id = c.id AND my_grant.fb_user_id = $1
+            WHERE c.owner_fb_user_id = $1
+               OR c.owner_fb_user_id IS NULL
+               OR (my_grant.fb_user_id = $1 AND my_grant.status = 'accepted')
+            ORDER BY
+                (c.owner_fb_user_id IS NULL) ASC,
+                (c.owner_fb_user_id <> $1) ASC,
+                c.is_default DESC,
+                c.created_at ASC
             """,
             uid,
         )
@@ -5382,6 +5486,8 @@ async def list_line_channels(request: Request, fb_user_id: Optional[str] = None)
         sec = r["channel_secret"] or ""
         owner = r["owner_fb_user_id"]
         is_orphan = owner is None
+        is_owner = owner == uid
+        is_shared = (r["my_grant_status"] == "accepted") and not is_owner
         out.append(
             {
                 "id": cid,
@@ -5391,8 +5497,16 @@ async def list_line_channels(request: Request, fb_user_id: Optional[str] = None)
                 "enabled": r["enabled"],
                 "is_default": r["is_default"],
                 "is_orphan": is_orphan,
-                "editable": owner == uid,
+                "is_owner": is_owner,
+                "is_shared": is_shared,
+                # `editable`: kept for back-compat with existing UI
+                # that uses it for "show edit button". Owner OR shared
+                # user can manage groups; only owner can delete /
+                # transfer / share.
+                "editable": is_owner or is_shared,
                 "bound_groups_count": int(r["bound_groups_count"] or 0),
+                "shared_count": int(r["shared_count"] or 0),
+                "pending_count": int(r["pending_count"] or 0),
                 "last_webhook_at": r["last_webhook_at"].isoformat() if r["last_webhook_at"] else None,
                 "webhook_url": _public_channel_url(request, cid),
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
@@ -5578,23 +5692,23 @@ async def get_line_channel_quota(channel_id: str, fb_user_id: Optional[str] = No
     this endpoint hits LINE's quota API directly so the UI can show
     actual current usage.
 
-    Auth: requires fb_user_id and channel ownership (same rule as
-    channel mutation endpoints).
+    Auth: caller must own the channel OR have an accepted grant on it.
     """
     pool = _require_db()
     uid = (fb_user_id or "").strip()
     if not uid:
         raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    role = await _channel_role_for_user(channel_id, uid)
+    if role is None:
+        raise HTTPException(status_code=403, detail="無權限查詢此官方帳號用量")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT access_token, owner_fb_user_id FROM line_channels "
+            "SELECT access_token FROM line_channels "
             "WHERE id = $1::uuid AND enabled",
             channel_id,
         )
     if row is None:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if row["owner_fb_user_id"] not in (None, uid):
-        raise HTTPException(status_code=403, detail="無權限查詢此官方帳號用量")
     try:
         return await line_client.get_quota(_http_client, access_token=row["access_token"])
     except line_client.LinePushError as e:
@@ -5617,11 +5731,18 @@ async def refresh_all_line_channels(fb_user_id: Optional[str] = None):
     if not uid:
         raise HTTPException(status_code=401, detail="fb_user_id 必填")
     async with pool.acquire() as conn:
+        # Owned channels OR accepted-grant channels — both should be
+        # refreshable since both can see the channel and would benefit
+        # from the displayName sync (renames in LINE Manager are visible
+        # to all members of the OA).
         rows = await conn.fetch(
             """
-            SELECT id, name, access_token
-            FROM line_channels
-            WHERE owner_fb_user_id = $1 AND enabled
+            SELECT DISTINCT c.id, c.name, c.access_token
+            FROM line_channels c
+            LEFT JOIN line_channel_grants gr
+                ON gr.channel_id = c.id AND gr.fb_user_id = $1 AND gr.status = 'accepted'
+            WHERE c.enabled
+              AND (c.owner_fb_user_id = $1 OR gr.fb_user_id = $1)
             """,
             uid,
         )
@@ -5659,6 +5780,201 @@ async def refresh_all_line_channels(fb_user_id: Optional[str] = None):
     return {"ok": True, "refreshed": refreshed}
 
 
+# ── LINE channel grants (sharing) ─────────────────────────────
+
+
+class ChannelGrantPayload(BaseModel):
+    fb_user_id: str  # invitee
+
+
+@app.post("/api/line-channels/{channel_id}/grants")
+async def invite_channel_user(
+    channel_id: str,
+    payload: ChannelGrantPayload,
+    fb_user_id: Optional[str] = None,
+):
+    """Owner invites another FB user to share access to this channel.
+    The invitee sees a pending invitation banner on next login and
+    must accept before the channel becomes visible to them."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    invitee = (payload.fb_user_id or "").strip()
+    if not invitee:
+        raise HTTPException(status_code=400, detail="invitee fb_user_id 必填")
+    if invitee == uid:
+        raise HTTPException(status_code=400, detail="不能邀請自己")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT owner_fb_user_id FROM line_channels WHERE id = $1::uuid",
+            channel_id,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Channel not found")
+        if row["owner_fb_user_id"] != uid:
+            raise HTTPException(status_code=403, detail="只有擁有者能邀請其他人")
+        await conn.execute(
+            """
+            INSERT INTO line_channel_grants
+              (channel_id, fb_user_id, granted_by_fb_user_id, status)
+            VALUES ($1::uuid, $2, $3, 'pending')
+            ON CONFLICT (channel_id, fb_user_id) DO UPDATE
+            SET status = 'pending',
+                granted_by_fb_user_id = EXCLUDED.granted_by_fb_user_id,
+                granted_at = NOW(),
+                responded_at = NULL
+            """,
+            channel_id,
+            invitee,
+            uid,
+        )
+    return {"ok": True, "status": "pending"}
+
+
+@app.get("/api/line-channels/{channel_id}/grants")
+async def list_channel_grants(channel_id: str, fb_user_id: Optional[str] = None):
+    """Owner lists who has been invited / accepted access to this channel."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    async with pool.acquire() as conn:
+        owner = await conn.fetchval(
+            "SELECT owner_fb_user_id FROM line_channels WHERE id = $1::uuid",
+            channel_id,
+        )
+        if owner != uid:
+            raise HTTPException(status_code=403, detail="只有擁有者能查看共享名單")
+        rows = await conn.fetch(
+            """
+            SELECT fb_user_id, status, granted_by_fb_user_id,
+                   granted_at, responded_at
+            FROM line_channel_grants
+            WHERE channel_id = $1::uuid
+            ORDER BY granted_at DESC
+            """,
+            channel_id,
+        )
+    return {
+        "data": [
+            {
+                "fb_user_id": r["fb_user_id"],
+                "status": r["status"],
+                "granted_at": r["granted_at"].isoformat() if r["granted_at"] else None,
+                "responded_at": r["responded_at"].isoformat() if r["responded_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.delete("/api/line-channels/{channel_id}/grants/{user_id}")
+async def revoke_channel_grant(
+    channel_id: str,
+    user_id: str,
+    fb_user_id: Optional[str] = None,
+):
+    """Owner revokes a previously-granted (or pending) access.
+    Removed users immediately lose visibility of this channel + its
+    groups + push configs."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    async with pool.acquire() as conn:
+        owner = await conn.fetchval(
+            "SELECT owner_fb_user_id FROM line_channels WHERE id = $1::uuid",
+            channel_id,
+        )
+        if owner != uid:
+            raise HTTPException(status_code=403, detail="只有擁有者能移除共享")
+        await conn.execute(
+            """
+            DELETE FROM line_channel_grants
+            WHERE channel_id = $1::uuid AND fb_user_id = $2
+            """,
+            channel_id,
+            user_id,
+        )
+    return {"ok": True}
+
+
+@app.get("/api/line-channels/grants/pending")
+async def my_pending_invitations(fb_user_id: Optional[str] = None):
+    """Caller's pending invitations across all channels. Surfaced as
+    a top-of-page banner on the LINE 推播設定 view."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        return {"data": []}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT g.channel_id, g.granted_by_fb_user_id, g.granted_at,
+                   c.name AS channel_name
+            FROM line_channel_grants g
+            JOIN line_channels c ON c.id = g.channel_id
+            WHERE g.fb_user_id = $1 AND g.status = 'pending'
+            ORDER BY g.granted_at DESC
+            """,
+            uid,
+        )
+    return {
+        "data": [
+            {
+                "channel_id": str(r["channel_id"]),
+                "channel_name": r["channel_name"],
+                "granted_by_fb_user_id": r["granted_by_fb_user_id"],
+                "granted_at": r["granted_at"].isoformat() if r["granted_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post("/api/line-channels/grants/{channel_id}/accept")
+async def accept_channel_grant(channel_id: str, fb_user_id: Optional[str] = None):
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    async with pool.acquire() as conn:
+        n = await conn.execute(
+            """
+            UPDATE line_channel_grants
+            SET status = 'accepted', responded_at = NOW()
+            WHERE channel_id = $1::uuid AND fb_user_id = $2 AND status = 'pending'
+            """,
+            channel_id,
+            uid,
+        )
+    if n.endswith(" 0"):
+        raise HTTPException(status_code=404, detail="找不到待確認的邀請")
+    return {"ok": True}
+
+
+@app.post("/api/line-channels/grants/{channel_id}/reject")
+async def reject_channel_grant(channel_id: str, fb_user_id: Optional[str] = None):
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    async with pool.acquire() as conn:
+        n = await conn.execute(
+            """
+            UPDATE line_channel_grants
+            SET status = 'rejected', responded_at = NOW()
+            WHERE channel_id = $1::uuid AND fb_user_id = $2 AND status = 'pending'
+            """,
+            channel_id,
+            uid,
+        )
+    if n.endswith(" 0"):
+        raise HTTPException(status_code=404, detail="找不到待確認的邀請")
+    return {"ok": True}
+
+
 # ── LINE group management ─────────────────────────────────────
 
 
@@ -5687,11 +6003,19 @@ async def list_line_groups(fb_user_id: Optional[str] = None):
             SELECT g.group_id, g.group_name, g.label, g.joined_at, g.left_at,
                    g.channel_id,
                    COALESCE(c.name, '') AS channel_name,
-                   c.owner_fb_user_id AS channel_owner_fb_user_id
+                   c.owner_fb_user_id AS channel_owner_fb_user_id,
+                   (c.owner_fb_user_id = $1) AS is_owner,
+                   COALESCE(gr.status, '') AS my_grant_status
             FROM line_groups g
             LEFT JOIN line_channels c ON c.id = g.channel_id
+            LEFT JOIN line_channel_grants gr
+                ON gr.channel_id = c.id AND gr.fb_user_id = $1
             WHERE g.left_at IS NULL
-              AND (c.owner_fb_user_id = $1 OR c.owner_fb_user_id IS NULL)
+              AND (
+                c.owner_fb_user_id = $1
+                OR c.owner_fb_user_id IS NULL
+                OR (gr.fb_user_id = $1 AND gr.status = 'accepted')
+              )
             ORDER BY g.joined_at DESC
             """,
             uid,
@@ -5705,6 +6029,8 @@ async def list_line_groups(fb_user_id: Optional[str] = None):
                 "channel_id": str(r["channel_id"]) if r["channel_id"] else None,
                 "channel_name": r["channel_name"] or "",
                 "channel_owner_fb_user_id": r["channel_owner_fb_user_id"],
+                "is_owner": bool(r["is_owner"]),
+                "is_shared": (r["my_grant_status"] == "accepted") and not bool(r["is_owner"]),
                 "joined_at": r["joined_at"].isoformat() if r["joined_at"] else None,
                 "left_at": r["left_at"].isoformat() if r["left_at"] else None,
             }
@@ -5834,12 +6160,18 @@ async def refresh_all_line_groups(fb_user_id: Optional[str] = None):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT g.group_id, c.access_token
+            SELECT DISTINCT g.group_id, c.access_token
             FROM line_groups g
             LEFT JOIN line_channels c ON c.id = g.channel_id
+            LEFT JOIN line_channel_grants gr
+                ON gr.channel_id = c.id AND gr.fb_user_id = $1 AND gr.status = 'accepted'
             WHERE g.left_at IS NULL
               AND c.enabled
-              AND (c.owner_fb_user_id = $1 OR c.owner_fb_user_id IS NULL)
+              AND (
+                c.owner_fb_user_id = $1
+                OR c.owner_fb_user_id IS NULL
+                OR gr.fb_user_id = $1
+              )
             """,
             uid,
         )
