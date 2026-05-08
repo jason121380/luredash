@@ -2074,7 +2074,15 @@ TIER_CONFIGS: dict = {
         "ad_accounts_limit": 1,
         "line_channels_limit": 0,
         "line_groups_limit": 0,
-        "monthly_push_limit": 0,
+        # monthly_push_limit removed as a tier differentiator (2026-05-08)
+        # — actual push budget is bounded by LINE Official Account's own
+        # monthly message quota (LINE bills `messages × recipients`),
+        # which the operator pays LINE for separately. Keeping our own
+        # internal cap on top added confusion ("Max 為什麼還會被擋")
+        # without saving any FB / LINE cost. Free still effectively
+        # can't push because line_channels_limit = 0 (no OA → no group →
+        # no push).
+        "monthly_push_limit": -1,
         # Free tier gets 40 LIFETIME trial runs (not per-month). The
         # period is enforced by the tier check in
         # _count_advice_runs_for_quota — paid tiers count this
@@ -2090,7 +2098,7 @@ TIER_CONFIGS: dict = {
         "ad_accounts_limit": 5,
         "line_channels_limit": 1,
         "line_groups_limit": 3,
-        "monthly_push_limit": 30,
+        "monthly_push_limit": -1,
         "agent_advice_limit": 2,
         "polar_product_id": POLAR_PRODUCT_ID_BASIC,
     },
@@ -2102,7 +2110,7 @@ TIER_CONFIGS: dict = {
         "ad_accounts_limit": 20,
         "line_channels_limit": 3,
         "line_groups_limit": 15,
-        "monthly_push_limit": 100,
+        "monthly_push_limit": -1,
         "agent_advice_limit": 6,
         "polar_product_id": POLAR_PRODUCT_ID_PLUS,
     },

@@ -201,11 +201,13 @@ function UsageCard({ sub }: { sub: SubscriptionState }) {
   // We don't have live usage counts in this Phase yet — show the
   // configured limits as the source of truth. Phase 5 will add a
   // /api/billing/usage endpoint that joins the real counts.
+  // monthly_push intentionally not surfaced — actual push budget is
+  // bounded by the LINE Official Account's own monthly quota (LINE
+  // bills `messages × recipients`), not by our subscription tier.
   const rows: Array<{ label: string; limit: number | null }> = [
     { label: "廣告帳戶", limit: sub.ad_accounts_limit },
     { label: "LINE 官方帳號", limit: sub.line_channels_limit },
     { label: "LINE 群組推播", limit: sub.line_groups_limit },
-    { label: "每月推播", limit: sub.monthly_push_limit ?? null },
   ];
   return (
     <section className="rounded-2xl border border-border bg-white p-5 md:p-6">
