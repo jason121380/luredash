@@ -33,8 +33,31 @@ BASE_URL = f"https://graph.facebook.com/{API_VERSION}"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
-# Runtime token override (from FB Login)
+# Runtime token override (from FB Login). Legacy global — kept as a
+# fallback for code paths that haven't been migrated to per-user tokens
+# yet (notably the public `/r/<campaign_id>` share page, where the
+# viewer has no session). Phase A is migrating callers to use the
+# per-user `_user_token_cache` via the `_current_fb_user_id` contextvar.
 _runtime_token: Optional[str] = None
+# Per-user FB access tokens, loaded from `user_fb_tokens` PG table on
+# lifespan startup and updated on every `/api/auth/token` POST. Each
+# logged-in operator's FB calls are routed through THEIR OWN token via
+# the `_current_fb_user_id` contextvar, so user A doesn't see user B's
+# BMs / ad accounts (the "multi-tenant FB data isolation" goal).
+_user_token_cache: dict[str, str] = {}
+import contextvars
+
+# Per-request context for "which FB user is currently making this
+# call". Set by `_user_context_middleware` from `?fb_user_id=…` (or
+# `x-fb-user-id` header), and by background tasks (scheduler, warm
+# loop) from the channel-owner / config-owner of the work item being
+# processed. Read by `get_token()` to look up the right per-user
+# token. Default None means "no user context known" — `get_token()`
+# falls back to the legacy global runtime token in that case (the
+# share-page path).
+_current_fb_user_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_fb_user_id", default=None
+)
 # In-memory set of FB user ids that have successfully completed
 # `POST /api/auth/token`. Persisted to `shared_settings._fb_known_users`
 # so it survives restarts. Used by `_assert_known_user()` to reject
@@ -104,13 +127,17 @@ def _account_semaphore(account_id: str) -> asyncio.Semaphore:
     return sem
 
 
-# Tracks which (account_id, kind, date_preset, time_range) tuples
-# have been fetched recently. The cache-warm loop reads this to pick
-# entries to refresh just before they expire so user-facing reads
-# always land on warm cache. Entries older than 10 min are skipped
-# (cold accounts don't get re-warmed; this keeps background FB usage
-# bounded by what's actually being looked at).
-_warm_targets: dict[tuple[str, str, str, Optional[str]], float] = {}
+# Tracks which (account_id, kind, date_preset, time_range, fb_user_id)
+# tuples have been fetched recently. The cache-warm loop reads this
+# to pick entries to refresh just before they expire so user-facing
+# reads always land on warm cache. fb_user_id is part of the key
+# because Phase A made FB calls per-user — the same (account_id,
+# date) tuple from two users uses two different tokens and lives in
+# two separate cache entries, so the warm loop must refresh under
+# the same user context the original read used. Entries older than
+# 10 min are skipped (cold accounts don't get re-warmed; this keeps
+# background FB usage bounded by what's actually being looked at).
+_warm_targets: dict[tuple[str, str, str, Optional[str], str], float] = {}
 
 # Set whenever we observe an 80004 throttle response. The warm loop
 # checks this and backs off for 10 minutes — the absolute last thing
@@ -143,7 +170,35 @@ def _scheduler_tz() -> ZoneInfo:
 
 
 def get_token() -> str:
+    """Resolve the FB access token for the current call.
+
+    Resolution order:
+      1. The per-user token for `_current_fb_user_id` (set by the
+         middleware from `?fb_user_id=…` or by background tasks
+         from a config / channel owner). This is the multi-tenant
+         path — each user's calls go through their own token so they
+         only see what THEIR FB account has access to.
+      2. The legacy `_runtime_token` global, populated by
+         `POST /api/auth/token` for backward compatibility.
+         Currently used by the public `/r/<campaign_id>` share page
+         where the viewer has no session.
+      3. The .env `FB_ACCESS_TOKEN` fallback for local dev.
+    """
+    uid = _current_fb_user_id.get()
+    if uid:
+        tok = _user_token_cache.get(uid)
+        if tok:
+            return tok
     return _runtime_token or _ACCESS_TOKEN or ""
+
+
+def _token_for_user(uid: str) -> Optional[str]:
+    """Direct lookup of a specific user's token, bypassing contextvar.
+    Used by background tasks that need to call FB on behalf of a known
+    user without first setting the contextvar."""
+    if not uid:
+        return None
+    return _user_token_cache.get(uid)
 
 
 # Built React app output (from frontend/ via `pnpm build`). Served as
@@ -314,6 +369,49 @@ async def lifespan(app: FastAPI):
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_line_channels_one_default
                     ON line_channels ((1)) WHERE is_default
+                    """
+                )
+                # Channel-secret uniqueness (Phase B): prevents user B
+                # from re-adding user A's OA. LINE channels have a
+                # globally-unique channel_secret, so a duplicate insert
+                # is by definition the same OA. Use a UNIQUE INDEX so
+                # we can predicate on `enabled` — a soft-disabled
+                # channel from a previous owner shouldn't block re-
+                # registration. Existing rows are checked for duplicates
+                # by the migration; manual cleanup needed if any pre-
+                # 2026-05-08 dataset has duplicates.
+                await conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_line_channels_secret_unique
+                    ON line_channels (channel_secret) WHERE enabled
+                    """
+                )
+                # ── Phase B: LINE OA grants ───────────────────────
+                # Lets a channel OWNER share their OA with another FB
+                # user. Granted users see the same groups + can manage
+                # push configs once they ACCEPT the invitation.
+                # Schema: composite PK (channel_id, fb_user_id) so a
+                # user can't have two invitations to the same channel.
+                # Status flow: pending → accepted | rejected. Rejected
+                # rows stay so the same user can't be re-invited
+                # immediately after rejecting.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS line_channel_grants (
+                        channel_id UUID NOT NULL REFERENCES line_channels(id) ON DELETE CASCADE,
+                        fb_user_id TEXT NOT NULL,
+                        granted_by_fb_user_id TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        responded_at TIMESTAMPTZ,
+                        PRIMARY KEY (channel_id, fb_user_id)
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_lcg_user_status
+                    ON line_channel_grants (fb_user_id, status)
                     """
                 )
                 # `line_groups`: populated from the /api/line/webhook
@@ -496,6 +594,32 @@ async def lifespan(app: FastAPI):
                 await conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_lpl_config_run ON line_push_logs (config_id, run_at DESC)"
                 )
+                # ── Per-user FB tokens (Phase A — multi-tenant) ───
+                # Each FB user's long-lived token is persisted here so a
+                # server restart doesn't blow away every user's session.
+                # Replaces the legacy `_fb_runtime_token` row in
+                # shared_settings, which only tracked the LAST user to
+                # log in. With multi-tenant FB data isolation, each
+                # logged-in user's FB calls go through THEIR OWN token
+                # (set via the contextvar middleware) so user A no
+                # longer sees user B's BMs / ad accounts.
+                #
+                # Schema is deliberately minimal — just (uid, token,
+                # timestamps). expires_at is reserved for future
+                # auto-refresh logic; FB long-lived tokens last ~60d
+                # and the frontend re-runs the FB Login flow before
+                # expiry, persisting a fresh token here each time.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_fb_tokens (
+                        fb_user_id TEXT PRIMARY KEY,
+                        access_token TEXT NOT NULL,
+                        expires_at TIMESTAMPTZ,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
                 # ── Billing / Subscription (Polar.sh) ─────────────
                 # `subscriptions`: one row per fb_user_id. Tracks Polar
                 # state + denormalized quota limits so per-request
@@ -674,6 +798,12 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             print(f"[startup] known users restore failed: {exc}", flush=True)
 
+        # Phase A: load every persisted per-user FB token into the
+        # in-memory cache so the contextvar-based lookup in get_token()
+        # works immediately on first request post-restart instead of
+        # falling through to the legacy _runtime_token global.
+        await _load_user_tokens_cache()
+
     # Multi-user (2026-04-30): no auto-seeded default channel.
     # Each user adds their own LINE Official Accounts via the UI;
     # there is no shared/team-wide channel anymore. Existing
@@ -822,6 +952,36 @@ async def _security_headers(request: Request, call_next):
             "base-uri 'self'",
         )
     return resp
+
+
+# Per-request user-context middleware. Pulls fb_user_id from the
+# query string (or `x-fb-user-id` header for non-GET callers) and sets
+# the `_current_fb_user_id` contextvar so every fb_get / fb_post inside
+# the request handler routes through THAT user's FB token. Without
+# this every call would still hit the legacy `_runtime_token` global
+# (the last user to log in). Reset in `finally` so adjacent requests
+# in the same task pool don't leak context.
+#
+# Spoofing note: anyone who knows another user's fb_user_id can pass
+# it here and use that user's token. This is the SAME trust model as
+# the rest of the app today (most endpoints already trust query-param
+# fb_user_id without a real session). Tightening this requires a
+# proper signed-session layer — out of scope for the multi-tenant
+# data-isolation work.
+@app.middleware("http")
+async def _user_context_middleware(request: Request, call_next):
+    uid = (
+        request.query_params.get("fb_user_id")
+        or request.headers.get("x-fb-user-id")
+        or ""
+    ).strip()
+    if not uid:
+        return await call_next(request)
+    reset_token = _current_fb_user_id.set(uid)
+    try:
+        return await call_next(request)
+    finally:
+        _current_fb_user_id.reset(reset_token)
 
 
 # Gzip EVERY response >500 bytes for clients that send Accept-Encoding:
@@ -1633,6 +1793,59 @@ class TokenPayload(BaseModel):
     token: str
 
 
+async def _persist_user_token(uid: str, token: Optional[str]) -> None:
+    """Insert / update / delete the given FB user's token in the
+    `user_fb_tokens` table. Best-effort — logs failures but never
+    raises, since the in-memory `_user_token_cache` is the live source
+    of truth for the current process. PG persistence is purely so a
+    Zeabur redeploy doesn't blow away every user's session."""
+    if not uid or _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            if token:
+                await conn.execute(
+                    """
+                    INSERT INTO user_fb_tokens (fb_user_id, access_token, updated_at)
+                    VALUES ($1, $2, NOW())
+                    ON CONFLICT (fb_user_id) DO UPDATE
+                    SET access_token = EXCLUDED.access_token, updated_at = NOW()
+                    """,
+                    uid,
+                    token,
+                )
+            else:
+                await conn.execute(
+                    "DELETE FROM user_fb_tokens WHERE fb_user_id = $1", uid
+                )
+    except Exception as exc:
+        print(f"[user-token] persist failed for {uid[-4:]}: {exc}", flush=True)
+
+
+async def _load_user_tokens_cache() -> None:
+    """Populate `_user_token_cache` from `user_fb_tokens` on lifespan
+    startup. Called after `_db_pool` is created so post-redeploy reads
+    the freshest tokens before any `fb_get` fires."""
+    if _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT fb_user_id, access_token FROM user_fb_tokens"
+            )
+        for r in rows:
+            uid = str(r["fb_user_id"] or "")
+            tok = r["access_token"] or ""
+            if uid and tok:
+                _user_token_cache[uid] = tok
+        print(
+            f"[startup] user_fb_tokens loaded: {len(_user_token_cache)} users",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[startup] user_fb_tokens load failed: {exc}", flush=True)
+
+
 async def _persist_runtime_token(token: Optional[str]) -> None:
     """Save / clear the runtime FB token to PG so that a server
     restart (e.g. Zeabur redeploy) doesn't break the public share
@@ -1738,9 +1951,14 @@ def _check_agent_rate_limit(uid: str) -> None:
 @app.post("/api/auth/token")
 async def set_token(payload: TokenPayload):
     global _runtime_token
+    # Temporarily set the legacy global so the /me call below has a
+    # token to use — we don't know fb_user_id yet (that's exactly
+    # what /me returns), so we can't yet route through
+    # _user_token_cache. Once /me succeeds, we promote the token to
+    # the per-user cache and the legacy global stays as the share-
+    # page fallback.
     _runtime_token = payload.token
     try:
-        # Get basic profile
         me = await fb_get("me", {"fields": "id,name,picture"})
         uid = str(me.get("id") or "")
         pic = me.get("picture", {}).get("data", {}).get("url")
@@ -1748,6 +1966,8 @@ async def set_token(payload: TokenPayload):
         # garbage that would 401 every share-page viewer.
         await _persist_runtime_token(payload.token)
         if uid:
+            _user_token_cache[uid] = payload.token
+            await _persist_user_token(uid, payload.token)
             _KNOWN_FB_USERS.add(uid)
             await _persist_known_user(uid)
         return {"ok": True, "name": me.get("name"), "id": me.get("id"), "pictureUrl": pic}
@@ -1760,10 +1980,19 @@ async def set_token(payload: TokenPayload):
 
 
 @app.delete("/api/auth/token")
-async def clear_token():
+async def clear_token(fb_user_id: Optional[str] = None):
+    """Logout: drop the calling user's per-user token AND the legacy
+    global runtime token. The per-user cache eviction is gated on the
+    caller's `fb_user_id` so one user's logout doesn't kick everyone
+    else out — when fb_user_id is missing (legacy clients, or share
+    page logout), only the global is cleared."""
     global _runtime_token
     _runtime_token = None
     await _persist_runtime_token(None)
+    uid = (fb_user_id or "").strip()
+    if uid:
+        _user_token_cache.pop(uid, None)
+        await _persist_user_token(uid, None)
     return {"ok": True}
 
 @app.get("/api/auth/me")
@@ -3254,9 +3483,15 @@ async def _fetch_campaigns_for_account(
     # Register as a warm target so the cache-warm loop refreshes this
     # entry just before TTL expires. Lite-mode reads (skeleton) are
     # NOT registered — they're cheap and already happen pre-paint, no
-    # need to keep them warm in the background.
+    # need to keep them warm in the background. Includes fb_user_id
+    # from contextvar so the warm loop can re-fire under the same
+    # per-user FB token.
     if not lite:
-        _warm_targets[(account_id, "campaigns", date_preset, time_range)] = time.monotonic()
+        warm_uid = _current_fb_user_id.get() or ""
+        if warm_uid:
+            _warm_targets[(account_id, "campaigns", date_preset, time_range, warm_uid)] = (
+                time.monotonic()
+            )
     ins = _insights_clause(
         "spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
         "inline_link_clicks,cost_per_inline_link_click,"
@@ -3717,7 +3952,11 @@ async def _fetch_account_insights(
     takes 10-15s before returning, which was pushing the old 10s
     GET timeout into "sometimes works, sometimes doesn't" territory.
     """
-    _warm_targets[(account_id, "insights", date_preset, time_range)] = time.monotonic()
+    warm_uid = _current_fb_user_id.get() or ""
+    if warm_uid:
+        _warm_targets[(account_id, "insights", date_preset, time_range, warm_uid)] = (
+            time.monotonic()
+        )
     params = {
         "fields": "spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions",
     }
@@ -4238,11 +4477,46 @@ async def _default_channel_creds() -> Optional[tuple[str, str, str]]:
     return str(row["id"]), row["channel_secret"], row["access_token"]
 
 
+async def _channel_role_for_user(channel_id: str, uid: str) -> Optional[str]:
+    """Return the caller's relationship to a LINE channel:
+       'owner'  → owns the channel
+       'shared' → has an accepted grant
+       None     → neither (no access)
+
+    Used by the per-channel auth gates so both owners AND accepted-
+    grant users can read / manage the channel's groups + push configs.
+    Only owners can transfer / delete / share-invite — gated separately
+    in the relevant endpoints."""
+    if _db_pool is None or not channel_id or not uid:
+        return None
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT c.owner_fb_user_id,
+                   COALESCE(g.status, '') AS grant_status
+            FROM line_channels c
+            LEFT JOIN line_channel_grants g
+                ON g.channel_id = c.id AND g.fb_user_id = $2
+            WHERE c.id = $1::uuid
+            """,
+            channel_id,
+            uid,
+        )
+    if row is None:
+        return None
+    if row["owner_fb_user_id"] == uid:
+        return "owner"
+    if row["grant_status"] == "accepted":
+        return "shared"
+    return None
+
+
 async def _assert_can_modify_config_for_group(group_id: str, fb_user_id: Optional[str]) -> None:
     """Authorize a config write (create/update/delete/test) on this group.
 
-    Rule (strict per-user):
-      - Caller must own the channel that the group is bound to.
+    Rule (Phase B — sharing):
+      - Caller must own the channel the group is bound to, OR have an
+        accepted grant on that channel.
       - Orphan channels (owner_fb_user_id IS NULL, legacy seeded data)
         cannot be modified by anyone — set ADMIN_FB_USER_ID env to
         claim them at startup.
@@ -4254,14 +4528,18 @@ async def _assert_can_modify_config_for_group(group_id: str, fb_user_id: Optiona
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT c.owner_fb_user_id
+            SELECT c.id AS channel_id, c.owner_fb_user_id,
+                   COALESCE(gr.status, '') AS grant_status
             FROM line_groups g
             LEFT JOIN line_channels c ON c.id = g.channel_id
+            LEFT JOIN line_channel_grants gr
+                ON gr.channel_id = c.id AND gr.fb_user_id = $2
             WHERE g.group_id = $1
             """,
             group_id,
+            uid,
         )
-    if row is None:
+    if row is None or row["channel_id"] is None:
         raise HTTPException(status_code=404, detail="Group not found")
     owner = row["owner_fb_user_id"]
     if owner is None:
@@ -4269,8 +4547,11 @@ async def _assert_can_modify_config_for_group(group_id: str, fb_user_id: Optiona
             status_code=403,
             detail="此群組綁定的官方帳號沒有擁有者(舊資料);請設 ADMIN_FB_USER_ID 認領後再操作",
         )
-    if owner != uid:
-        raise HTTPException(status_code=403, detail="此推播由其他用戶的官方帳號管理,無權限修改")
+    if owner == uid:
+        return
+    if row["grant_status"] == "accepted":
+        return
+    raise HTTPException(status_code=403, detail="此推播由其他用戶的官方帳號管理,無權限修改")
 
 
 async def _channel_creds_for_group(group_id: str) -> Optional[tuple[str, str, str]]:
@@ -5135,14 +5416,15 @@ def _public_channel_url(request: Request, channel_id: str) -> str:
 async def list_line_channels(request: Request, fb_user_id: Optional[str] = None):
     """List LINE Official Accounts visible to the calling FB user.
 
-    Visibility:
-      - Channels owned by the caller → editable
+    Visibility (Phase B sharing model):
+      - Channels owned by the caller → `is_owner: true`, full edit
+      - Channels granted to the caller and accepted →
+        `is_owner: false, is_shared: true` — can manage groups +
+        push configs, but can't transfer ownership / delete the OA
       - Orphan channels (`owner_fb_user_id IS NULL`, pre-2026-04-30
-        seed/legacy) → shown to ALL users with `is_orphan: true` and
-        a「認領」button. First-come-first-served: clicking 認領 calls
-        POST /api/line-channels/{id}/claim and sets the caller as
-        owner. Other users with their own owned channels won't see
-        someone else's private OA.
+        seed/legacy) → shown to ALL users with `is_orphan: true`
+        and a「認領」 button (first-come-first-served claim).
+      - Other users' private OAs → invisible.
     """
     if _db_pool is None:
         return {"data": []}
@@ -5150,13 +5432,16 @@ async def list_line_channels(request: Request, fb_user_id: Optional[str] = None)
     if not uid:
         return {"data": []}
     async with _db_pool.acquire() as conn:
-        # LEFT JOIN to count active group bindings per channel — used
-        # by the UI to show「綁定 N 群組」 and gate the delete button.
+        # LEFT JOIN counts: active group bindings + accepted grants.
+        # Visibility = owned OR orphan OR (granted AND accepted).
         rows = await conn.fetch(
             """
             SELECT c.id, c.name, c.channel_secret, c.access_token, c.enabled, c.is_default,
                    c.owner_fb_user_id, c.created_at, c.updated_at, c.last_webhook_at,
-                   COALESCE(g.cnt, 0) AS bound_groups_count
+                   COALESCE(g.cnt, 0) AS bound_groups_count,
+                   COALESCE(gr.shared_count, 0) AS shared_count,
+                   COALESCE(gr.pending_count, 0) AS pending_count,
+                   COALESCE(my_grant.status, '') AS my_grant_status
             FROM line_channels c
             LEFT JOIN (
                 SELECT channel_id, COUNT(*) AS cnt
@@ -5164,8 +5449,23 @@ async def list_line_channels(request: Request, fb_user_id: Optional[str] = None)
                 WHERE left_at IS NULL
                 GROUP BY channel_id
             ) g ON g.channel_id = c.id
-            WHERE c.owner_fb_user_id = $1 OR c.owner_fb_user_id IS NULL
-            ORDER BY (c.owner_fb_user_id IS NULL) ASC, c.is_default DESC, c.created_at ASC
+            LEFT JOIN (
+                SELECT channel_id,
+                       COUNT(*) FILTER (WHERE status = 'accepted') AS shared_count,
+                       COUNT(*) FILTER (WHERE status = 'pending') AS pending_count
+                FROM line_channel_grants
+                GROUP BY channel_id
+            ) gr ON gr.channel_id = c.id
+            LEFT JOIN line_channel_grants my_grant
+                ON my_grant.channel_id = c.id AND my_grant.fb_user_id = $1
+            WHERE c.owner_fb_user_id = $1
+               OR c.owner_fb_user_id IS NULL
+               OR (my_grant.fb_user_id = $1 AND my_grant.status = 'accepted')
+            ORDER BY
+                (c.owner_fb_user_id IS NULL) ASC,
+                (c.owner_fb_user_id <> $1) ASC,
+                c.is_default DESC,
+                c.created_at ASC
             """,
             uid,
         )
@@ -5186,6 +5486,8 @@ async def list_line_channels(request: Request, fb_user_id: Optional[str] = None)
         sec = r["channel_secret"] or ""
         owner = r["owner_fb_user_id"]
         is_orphan = owner is None
+        is_owner = owner == uid
+        is_shared = (r["my_grant_status"] == "accepted") and not is_owner
         out.append(
             {
                 "id": cid,
@@ -5195,8 +5497,16 @@ async def list_line_channels(request: Request, fb_user_id: Optional[str] = None)
                 "enabled": r["enabled"],
                 "is_default": r["is_default"],
                 "is_orphan": is_orphan,
-                "editable": owner == uid,
+                "is_owner": is_owner,
+                "is_shared": is_shared,
+                # `editable`: kept for back-compat with existing UI
+                # that uses it for "show edit button". Owner OR shared
+                # user can manage groups; only owner can delete /
+                # transfer / share.
+                "editable": is_owner or is_shared,
                 "bound_groups_count": int(r["bound_groups_count"] or 0),
+                "shared_count": int(r["shared_count"] or 0),
+                "pending_count": int(r["pending_count"] or 0),
                 "last_webhook_at": r["last_webhook_at"].isoformat() if r["last_webhook_at"] else None,
                 "webhook_url": _public_channel_url(request, cid),
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
@@ -5382,23 +5692,23 @@ async def get_line_channel_quota(channel_id: str, fb_user_id: Optional[str] = No
     this endpoint hits LINE's quota API directly so the UI can show
     actual current usage.
 
-    Auth: requires fb_user_id and channel ownership (same rule as
-    channel mutation endpoints).
+    Auth: caller must own the channel OR have an accepted grant on it.
     """
     pool = _require_db()
     uid = (fb_user_id or "").strip()
     if not uid:
         raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    role = await _channel_role_for_user(channel_id, uid)
+    if role is None:
+        raise HTTPException(status_code=403, detail="無權限查詢此官方帳號用量")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT access_token, owner_fb_user_id FROM line_channels "
+            "SELECT access_token FROM line_channels "
             "WHERE id = $1::uuid AND enabled",
             channel_id,
         )
     if row is None:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if row["owner_fb_user_id"] not in (None, uid):
-        raise HTTPException(status_code=403, detail="無權限查詢此官方帳號用量")
     try:
         return await line_client.get_quota(_http_client, access_token=row["access_token"])
     except line_client.LinePushError as e:
@@ -5421,11 +5731,18 @@ async def refresh_all_line_channels(fb_user_id: Optional[str] = None):
     if not uid:
         raise HTTPException(status_code=401, detail="fb_user_id 必填")
     async with pool.acquire() as conn:
+        # Owned channels OR accepted-grant channels — both should be
+        # refreshable since both can see the channel and would benefit
+        # from the displayName sync (renames in LINE Manager are visible
+        # to all members of the OA).
         rows = await conn.fetch(
             """
-            SELECT id, name, access_token
-            FROM line_channels
-            WHERE owner_fb_user_id = $1 AND enabled
+            SELECT DISTINCT c.id, c.name, c.access_token
+            FROM line_channels c
+            LEFT JOIN line_channel_grants gr
+                ON gr.channel_id = c.id AND gr.fb_user_id = $1 AND gr.status = 'accepted'
+            WHERE c.enabled
+              AND (c.owner_fb_user_id = $1 OR gr.fb_user_id = $1)
             """,
             uid,
         )
@@ -5463,6 +5780,201 @@ async def refresh_all_line_channels(fb_user_id: Optional[str] = None):
     return {"ok": True, "refreshed": refreshed}
 
 
+# ── LINE channel grants (sharing) ─────────────────────────────
+
+
+class ChannelGrantPayload(BaseModel):
+    fb_user_id: str  # invitee
+
+
+@app.post("/api/line-channels/{channel_id}/grants")
+async def invite_channel_user(
+    channel_id: str,
+    payload: ChannelGrantPayload,
+    fb_user_id: Optional[str] = None,
+):
+    """Owner invites another FB user to share access to this channel.
+    The invitee sees a pending invitation banner on next login and
+    must accept before the channel becomes visible to them."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    invitee = (payload.fb_user_id or "").strip()
+    if not invitee:
+        raise HTTPException(status_code=400, detail="invitee fb_user_id 必填")
+    if invitee == uid:
+        raise HTTPException(status_code=400, detail="不能邀請自己")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT owner_fb_user_id FROM line_channels WHERE id = $1::uuid",
+            channel_id,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Channel not found")
+        if row["owner_fb_user_id"] != uid:
+            raise HTTPException(status_code=403, detail="只有擁有者能邀請其他人")
+        await conn.execute(
+            """
+            INSERT INTO line_channel_grants
+              (channel_id, fb_user_id, granted_by_fb_user_id, status)
+            VALUES ($1::uuid, $2, $3, 'pending')
+            ON CONFLICT (channel_id, fb_user_id) DO UPDATE
+            SET status = 'pending',
+                granted_by_fb_user_id = EXCLUDED.granted_by_fb_user_id,
+                granted_at = NOW(),
+                responded_at = NULL
+            """,
+            channel_id,
+            invitee,
+            uid,
+        )
+    return {"ok": True, "status": "pending"}
+
+
+@app.get("/api/line-channels/{channel_id}/grants")
+async def list_channel_grants(channel_id: str, fb_user_id: Optional[str] = None):
+    """Owner lists who has been invited / accepted access to this channel."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    async with pool.acquire() as conn:
+        owner = await conn.fetchval(
+            "SELECT owner_fb_user_id FROM line_channels WHERE id = $1::uuid",
+            channel_id,
+        )
+        if owner != uid:
+            raise HTTPException(status_code=403, detail="只有擁有者能查看共享名單")
+        rows = await conn.fetch(
+            """
+            SELECT fb_user_id, status, granted_by_fb_user_id,
+                   granted_at, responded_at
+            FROM line_channel_grants
+            WHERE channel_id = $1::uuid
+            ORDER BY granted_at DESC
+            """,
+            channel_id,
+        )
+    return {
+        "data": [
+            {
+                "fb_user_id": r["fb_user_id"],
+                "status": r["status"],
+                "granted_at": r["granted_at"].isoformat() if r["granted_at"] else None,
+                "responded_at": r["responded_at"].isoformat() if r["responded_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.delete("/api/line-channels/{channel_id}/grants/{user_id}")
+async def revoke_channel_grant(
+    channel_id: str,
+    user_id: str,
+    fb_user_id: Optional[str] = None,
+):
+    """Owner revokes a previously-granted (or pending) access.
+    Removed users immediately lose visibility of this channel + its
+    groups + push configs."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    async with pool.acquire() as conn:
+        owner = await conn.fetchval(
+            "SELECT owner_fb_user_id FROM line_channels WHERE id = $1::uuid",
+            channel_id,
+        )
+        if owner != uid:
+            raise HTTPException(status_code=403, detail="只有擁有者能移除共享")
+        await conn.execute(
+            """
+            DELETE FROM line_channel_grants
+            WHERE channel_id = $1::uuid AND fb_user_id = $2
+            """,
+            channel_id,
+            user_id,
+        )
+    return {"ok": True}
+
+
+@app.get("/api/line-channels/grants/pending")
+async def my_pending_invitations(fb_user_id: Optional[str] = None):
+    """Caller's pending invitations across all channels. Surfaced as
+    a top-of-page banner on the LINE 推播設定 view."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        return {"data": []}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT g.channel_id, g.granted_by_fb_user_id, g.granted_at,
+                   c.name AS channel_name
+            FROM line_channel_grants g
+            JOIN line_channels c ON c.id = g.channel_id
+            WHERE g.fb_user_id = $1 AND g.status = 'pending'
+            ORDER BY g.granted_at DESC
+            """,
+            uid,
+        )
+    return {
+        "data": [
+            {
+                "channel_id": str(r["channel_id"]),
+                "channel_name": r["channel_name"],
+                "granted_by_fb_user_id": r["granted_by_fb_user_id"],
+                "granted_at": r["granted_at"].isoformat() if r["granted_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post("/api/line-channels/grants/{channel_id}/accept")
+async def accept_channel_grant(channel_id: str, fb_user_id: Optional[str] = None):
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    async with pool.acquire() as conn:
+        n = await conn.execute(
+            """
+            UPDATE line_channel_grants
+            SET status = 'accepted', responded_at = NOW()
+            WHERE channel_id = $1::uuid AND fb_user_id = $2 AND status = 'pending'
+            """,
+            channel_id,
+            uid,
+        )
+    if n.endswith(" 0"):
+        raise HTTPException(status_code=404, detail="找不到待確認的邀請")
+    return {"ok": True}
+
+
+@app.post("/api/line-channels/grants/{channel_id}/reject")
+async def reject_channel_grant(channel_id: str, fb_user_id: Optional[str] = None):
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    async with pool.acquire() as conn:
+        n = await conn.execute(
+            """
+            UPDATE line_channel_grants
+            SET status = 'rejected', responded_at = NOW()
+            WHERE channel_id = $1::uuid AND fb_user_id = $2 AND status = 'pending'
+            """,
+            channel_id,
+            uid,
+        )
+    if n.endswith(" 0"):
+        raise HTTPException(status_code=404, detail="找不到待確認的邀請")
+    return {"ok": True}
+
+
 # ── LINE group management ─────────────────────────────────────
 
 
@@ -5491,11 +6003,19 @@ async def list_line_groups(fb_user_id: Optional[str] = None):
             SELECT g.group_id, g.group_name, g.label, g.joined_at, g.left_at,
                    g.channel_id,
                    COALESCE(c.name, '') AS channel_name,
-                   c.owner_fb_user_id AS channel_owner_fb_user_id
+                   c.owner_fb_user_id AS channel_owner_fb_user_id,
+                   (c.owner_fb_user_id = $1) AS is_owner,
+                   COALESCE(gr.status, '') AS my_grant_status
             FROM line_groups g
             LEFT JOIN line_channels c ON c.id = g.channel_id
+            LEFT JOIN line_channel_grants gr
+                ON gr.channel_id = c.id AND gr.fb_user_id = $1
             WHERE g.left_at IS NULL
-              AND (c.owner_fb_user_id = $1 OR c.owner_fb_user_id IS NULL)
+              AND (
+                c.owner_fb_user_id = $1
+                OR c.owner_fb_user_id IS NULL
+                OR (gr.fb_user_id = $1 AND gr.status = 'accepted')
+              )
             ORDER BY g.joined_at DESC
             """,
             uid,
@@ -5509,6 +6029,8 @@ async def list_line_groups(fb_user_id: Optional[str] = None):
                 "channel_id": str(r["channel_id"]) if r["channel_id"] else None,
                 "channel_name": r["channel_name"] or "",
                 "channel_owner_fb_user_id": r["channel_owner_fb_user_id"],
+                "is_owner": bool(r["is_owner"]),
+                "is_shared": (r["my_grant_status"] == "accepted") and not bool(r["is_owner"]),
                 "joined_at": r["joined_at"].isoformat() if r["joined_at"] else None,
                 "left_at": r["left_at"].isoformat() if r["left_at"] else None,
             }
@@ -5638,12 +6160,18 @@ async def refresh_all_line_groups(fb_user_id: Optional[str] = None):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT g.group_id, c.access_token
+            SELECT DISTINCT g.group_id, c.access_token
             FROM line_groups g
             LEFT JOIN line_channels c ON c.id = g.channel_id
+            LEFT JOIN line_channel_grants gr
+                ON gr.channel_id = c.id AND gr.fb_user_id = $1 AND gr.status = 'accepted'
             WHERE g.left_at IS NULL
               AND c.enabled
-              AND (c.owner_fb_user_id = $1 OR c.owner_fb_user_id IS NULL)
+              AND (
+                c.owner_fb_user_id = $1
+                OR c.owner_fb_user_id IS NULL
+                OR gr.fb_user_id = $1
+              )
             """,
             uid,
         )
@@ -6206,6 +6734,17 @@ async def _scheduler_tick() -> None:
                         )
                     print(f"[scheduler] tier-limit skip: {cfg['id']} ({err_msg})", flush=True)
                     continue
+        # Set the per-user FB context so _build_flex_for_config's FB
+        # API calls go through the channel owner's token (Phase A
+        # multi-tenant isolation). Without this the scheduler would
+        # fall back to the legacy global _runtime_token and could end
+        # up calling FB as the wrong user — which on a multi-tenant
+        # server would mean fetching ad insights from a DIFFERENT
+        # agency's account. Reset the contextvar in finally so the
+        # next iteration starts clean.
+        ctx_token = None
+        if owner_uid and _token_for_user(owner_uid):
+            ctx_token = _current_fb_user_id.set(owner_uid)
         try:
             flex = await _build_flex_for_config(cfg)
             assert _http_client is not None
@@ -6285,6 +6824,9 @@ async def _scheduler_tick() -> None:
                 f"{' (auto-disabled)' if auto_disable else ''}",
                 flush=True,
             )
+        finally:
+            if ctx_token is not None:
+                _current_fb_user_id.reset(ctx_token)
 
 
 async def _scheduler_loop() -> None:
@@ -6325,8 +6867,6 @@ _WARM_THROTTLE_BACKOFF_S = 600
 
 
 async def _cache_warm_tick() -> None:
-    if get_token() == "":
-        return
     now = time.monotonic()
     if _last_ads_throttle_at and (now - _last_ads_throttle_at) < _WARM_THROTTLE_BACKOFF_S:
         return
@@ -6336,8 +6876,9 @@ async def _cache_warm_tick() -> None:
     # their TTL. Older-than-_WARM_RECENT_ACCESS_S entries are dropped
     # from the warm set to prevent unbounded growth on accounts
     # nobody's looking at any more.
-    candidates: list[tuple[float, tuple[str, str, str, Optional[str]]]] = []
-    expired_targets: list[tuple[str, str, str, Optional[str]]] = []
+    WarmKey = tuple[str, str, str, Optional[str], str]
+    candidates: list[tuple[float, WarmKey]] = []
+    expired_targets: list[WarmKey] = []
     for key, last_seen in list(_warm_targets.items()):
         if (now - last_seen) > _WARM_RECENT_ACCESS_S:
             expired_targets.append(key)
@@ -6348,9 +6889,15 @@ async def _cache_warm_tick() -> None:
 
     candidates.sort(reverse=True)  # most recent first
     refreshed = 0
-    for _, (account_id, kind, date_preset, time_range) in candidates:
+    for _, (account_id, kind, date_preset, time_range, uid) in candidates:
         if refreshed >= _WARM_MAX_PER_TICK:
             break
+        # User logged out / token revoked → skip silently. Next time
+        # they log in, fresh warm entries get registered under the
+        # new login.
+        if not _token_for_user(uid):
+            continue
+        ctx_token = _current_fb_user_id.set(uid)
         try:
             if kind == "insights":
                 await _fetch_account_insights(account_id, date_preset, time_range)
@@ -6364,6 +6911,8 @@ async def _cache_warm_tick() -> None:
             # tick retry. _last_ads_throttle_at gets set inside the
             # FB error handler so the next tick's backoff guard fires.
             return
+        finally:
+            _current_fb_user_id.reset(ctx_token)
         # Spread out the refreshes a little so bursts of warm-loop
         # activity don't themselves contribute to throttle.
         await asyncio.sleep(0.5)

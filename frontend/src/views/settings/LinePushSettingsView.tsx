@@ -4,7 +4,7 @@ import { Button } from "@/components/Button";
 import { toast } from "@/components/Toast";
 import { Topbar } from "@/layout/Topbar";
 import { cn } from "@/lib/cn";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { LineChannelsContent } from "./LineChannelsContent";
 import { LineGroupsContent } from "./LineGroupsContent";
@@ -86,6 +86,7 @@ export function LinePushSettingsView() {
       </Topbar>
       <div className="flex-1 overflow-y-auto bg-bg">
         <div className="mx-auto w-full max-w-[1100px] px-4 py-5 md:px-6 md:py-6">
+          <PendingInvitationsBanner />
           {/* LINE 計費規則備註 — 提醒操作者推播額度由 LINE 自己管,
               不是 LURE 方案,避免「我是 Max 為什麼還會被擋」的困惑。 */}
           <div className="mb-4 flex items-start gap-2 rounded-lg border border-orange-border bg-orange-bg/50 px-3 py-2.5 text-[12px] leading-relaxed text-gray-500 md:text-[13px]">
@@ -151,5 +152,102 @@ export function LinePushSettingsView() {
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * Top-of-page banner that surfaces any LINE-OA share invitations the
+ * caller has been sent but not yet responded to. Renders nothing when
+ * there are no pending invitations, so the page stays clean for the
+ * common case. Each row has Accept / Reject buttons that hit the
+ * grants accept/reject endpoints and refetch the channel list (so
+ * an accepted channel becomes immediately visible below).
+ */
+function PendingInvitationsBanner() {
+  const { user } = useFbAuth();
+  const uid = user?.id ?? "";
+  const qc = useQueryClient();
+  const pendingQuery = useQuery({
+    queryKey: ["lineChannelPendingInvitations", uid] as const,
+    queryFn: async () => (await api.lineChannels.pendingInvitations(uid)).data,
+    enabled: !!uid,
+    staleTime: 30_000,
+  });
+  const acceptMutation = useMutation({
+    mutationFn: (channelId: string) => api.lineChannels.acceptInvitation(uid, channelId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["lineChannelPendingInvitations"] });
+      qc.invalidateQueries({ queryKey: ["lineChannels"] });
+      qc.invalidateQueries({ queryKey: ["lineGroups"] });
+    },
+  });
+  const rejectMutation = useMutation({
+    mutationFn: (channelId: string) => api.lineChannels.rejectInvitation(uid, channelId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["lineChannelPendingInvitations"] });
+    },
+  });
+
+  const onAccept = async (channelId: string, channelName: string) => {
+    try {
+      await acceptMutation.mutateAsync(channelId);
+      toast(`已加入「${channelName}」`, "success");
+    } catch (e) {
+      toast(`加入失敗:${e instanceof Error ? e.message : String(e)}`, "error", 4500);
+    }
+  };
+  const onReject = async (channelId: string) => {
+    try {
+      await rejectMutation.mutateAsync(channelId);
+      toast("已拒絕邀請", "info");
+    } catch (e) {
+      toast(`拒絕失敗:${e instanceof Error ? e.message : String(e)}`, "error", 4500);
+    }
+  };
+
+  const invites = pendingQuery.data ?? [];
+  if (invites.length === 0) return null;
+
+  return (
+    <div className="mb-4 rounded-lg border border-orange bg-orange-bg/40 p-3">
+      <div className="mb-2 text-[13px] font-bold text-orange">
+        你有 {invites.length} 個待確認的官方帳號邀請
+      </div>
+      <ul className="m-0 flex flex-col gap-1.5 p-0">
+        {invites.map((inv) => (
+          <li
+            key={inv.channel_id}
+            className="flex flex-wrap items-center justify-between gap-2 rounded border border-border bg-white px-3 py-2"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[13px] font-semibold text-ink">
+                {inv.channel_name}
+              </div>
+              <div className="text-[11px] text-gray-500">
+                邀請者:<span className="font-mono">{inv.granted_by_fb_user_id}</span>
+              </div>
+            </div>
+            <div className="flex shrink-0 gap-1.5">
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => void onAccept(inv.channel_id, inv.channel_name)}
+                disabled={acceptMutation.isPending}
+              >
+                接受
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void onReject(inv.channel_id)}
+                disabled={rejectMutation.isPending}
+              >
+                拒絕
+              </Button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

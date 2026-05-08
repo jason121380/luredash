@@ -579,8 +579,12 @@ export const api = {
           enabled: boolean;
           is_default: boolean;
           is_orphan: boolean;
+          is_owner: boolean;
+          is_shared: boolean;
           editable: boolean;
           bound_groups_count: number;
+          shared_count: number;
+          pending_count: number;
           last_webhook_at: string | null;
           webhook_url: string;
           created_at: string | null;
@@ -645,6 +649,60 @@ export const api = {
       request<{ ok: boolean; refreshed: number }>(
         "POST",
         "/api/line-channels/refresh-all",
+        { query: { fb_user_id: fbUserId } },
+      ),
+    /** Owner invites another FB user to share access to a channel. */
+    invite: (fbUserId: string, channelId: string, inviteeFbUserId: string) =>
+      request<{ ok: boolean; status: string }>(
+        "POST",
+        `/api/line-channels/${encodeURIComponent(channelId)}/grants`,
+        {
+          query: { fb_user_id: fbUserId },
+          body: { fb_user_id: inviteeFbUserId },
+        },
+      ),
+    /** Owner lists all grants (pending + accepted + rejected) for a channel. */
+    listGrants: (fbUserId: string, channelId: string) =>
+      request<{
+        data: Array<{
+          fb_user_id: string;
+          status: "pending" | "accepted" | "rejected";
+          granted_at: string | null;
+          responded_at: string | null;
+        }>;
+      }>("GET", `/api/line-channels/${encodeURIComponent(channelId)}/grants`, {
+        query: { fb_user_id: fbUserId },
+      }),
+    /** Owner revokes a previously-granted (or pending) access. */
+    revokeGrant: (fbUserId: string, channelId: string, granteeFbUserId: string) =>
+      request<{ ok: boolean }>(
+        "DELETE",
+        `/api/line-channels/${encodeURIComponent(channelId)}/grants/${encodeURIComponent(granteeFbUserId)}`,
+        { query: { fb_user_id: fbUserId } },
+      ),
+    /** Caller's pending invitations across all channels — used by the
+     *  banner on the LINE 推播設定 view. */
+    pendingInvitations: (fbUserId: string) =>
+      request<{
+        data: Array<{
+          channel_id: string;
+          channel_name: string;
+          granted_by_fb_user_id: string;
+          granted_at: string | null;
+        }>;
+      }>("GET", "/api/line-channels/grants/pending", {
+        query: { fb_user_id: fbUserId },
+      }),
+    acceptInvitation: (fbUserId: string, channelId: string) =>
+      request<{ ok: boolean }>(
+        "POST",
+        `/api/line-channels/grants/${encodeURIComponent(channelId)}/accept`,
+        { query: { fb_user_id: fbUserId } },
+      ),
+    rejectInvitation: (fbUserId: string, channelId: string) =>
+      request<{ ok: boolean }>(
+        "POST",
+        `/api/line-channels/grants/${encodeURIComponent(channelId)}/reject`,
         { query: { fb_user_id: fbUserId } },
       ),
   },
