@@ -5,7 +5,7 @@ import { Button } from "@/components/Button";
 import { LoadingState } from "@/components/LoadingState";
 import { PolarLanguageNotice } from "@/components/PolarLanguageNotice";
 import { toast } from "@/components/Toast";
-import { fM, fN } from "@/lib/format";
+import { fM } from "@/lib/format";
 import { useState } from "react";
 
 /**
@@ -162,9 +162,7 @@ function PlanCard({
     `${tier.ad_accounts_limit === -1 ? "無限" : tier.ad_accounts_limit} 個廣告帳戶`,
     `${tier.line_channels_limit === -1 ? "無限" : tier.line_channels_limit} 個 LINE 官方帳號`,
     `${tier.line_groups_limit === -1 ? "無限" : tier.line_groups_limit} 個 LINE 群組推播`,
-    tier.monthly_push_limit === -1
-      ? "無限自動推播次數"
-      : `每月 ${fN(tier.monthly_push_limit)} 次自動推播`,
+    "推播次數依 LINE 官方計費(與本系統方案無關)",
     "即時警示列表",
     adviceLine,
     "AI 即時對話顧問",

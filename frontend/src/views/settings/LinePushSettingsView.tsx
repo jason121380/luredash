@@ -75,6 +75,52 @@ export function LinePushSettingsView() {
       </Topbar>
       <div className="flex-1 overflow-y-auto bg-bg">
         <div className="mx-auto w-full max-w-[1100px] px-4 py-5 md:px-6 md:py-6">
+          {/* LINE 計費規則備註 — 提醒操作者推播額度由 LINE 自己管,
+              不是 LURE 方案,避免「我是 Max 為什麼還會被擋」的困惑。 */}
+          <div className="mb-4 flex items-start gap-2 rounded-lg border border-orange-border bg-orange-bg/50 px-3 py-2.5 text-[12px] leading-relaxed text-gray-500 md:text-[13px]">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="mt-0.5 shrink-0 text-orange"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="16" x2="12" y2="12" />
+              <line x1="12" y1="8" x2="12.01" y2="8" />
+            </svg>
+            <div className="flex-1">
+              <span className="font-semibold text-ink">推播額度由 LINE 官方計算</span>
+              <span className="text-gray-500">
+                ,與 LURE 方案無關。LINE 計費規則:**每次推送依收訊人數計則**(推到 30
+                人群組 = 30 則),免費方案每月 200 則。如有需要,請至{" "}
+              </span>
+              <a
+                href="https://manager.line.biz/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-semibold text-orange hover:underline"
+              >
+                LINE Official Account Manager
+              </a>
+              <span className="text-gray-500">調整方案。詳細規則請參考</span>{" "}
+              <a
+                href="https://www.linebiz.com/tw/service/line-official-account/plan/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-semibold text-orange hover:underline"
+              >
+                LINE 官方說明
+              </a>
+              <span className="text-gray-500">。</span>
+            </div>
+          </div>
+
           <div className="mb-4">
             <div className="text-[15px] font-bold text-ink">LINE 官方帳號設定</div>
             <div className="mt-0.5 text-[12px] text-gray-500">
