@@ -33,8 +33,31 @@ BASE_URL = f"https://graph.facebook.com/{API_VERSION}"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
-# Runtime token override (from FB Login)
+# Runtime token override (from FB Login). Legacy global — kept as a
+# fallback for code paths that haven't been migrated to per-user tokens
+# yet (notably the public `/r/<campaign_id>` share page, where the
+# viewer has no session). Phase A is migrating callers to use the
+# per-user `_user_token_cache` via the `_current_fb_user_id` contextvar.
 _runtime_token: Optional[str] = None
+# Per-user FB access tokens, loaded from `user_fb_tokens` PG table on
+# lifespan startup and updated on every `/api/auth/token` POST. Each
+# logged-in operator's FB calls are routed through THEIR OWN token via
+# the `_current_fb_user_id` contextvar, so user A doesn't see user B's
+# BMs / ad accounts (the "multi-tenant FB data isolation" goal).
+_user_token_cache: dict[str, str] = {}
+import contextvars
+
+# Per-request context for "which FB user is currently making this
+# call". Set by `_user_context_middleware` from `?fb_user_id=…` (or
+# `x-fb-user-id` header), and by background tasks (scheduler, warm
+# loop) from the channel-owner / config-owner of the work item being
+# processed. Read by `get_token()` to look up the right per-user
+# token. Default None means "no user context known" — `get_token()`
+# falls back to the legacy global runtime token in that case (the
+# share-page path).
+_current_fb_user_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_fb_user_id", default=None
+)
 # In-memory set of FB user ids that have successfully completed
 # `POST /api/auth/token`. Persisted to `shared_settings._fb_known_users`
 # so it survives restarts. Used by `_assert_known_user()` to reject
@@ -104,13 +127,17 @@ def _account_semaphore(account_id: str) -> asyncio.Semaphore:
     return sem
 
 
-# Tracks which (account_id, kind, date_preset, time_range) tuples
-# have been fetched recently. The cache-warm loop reads this to pick
-# entries to refresh just before they expire so user-facing reads
-# always land on warm cache. Entries older than 10 min are skipped
-# (cold accounts don't get re-warmed; this keeps background FB usage
-# bounded by what's actually being looked at).
-_warm_targets: dict[tuple[str, str, str, Optional[str]], float] = {}
+# Tracks which (account_id, kind, date_preset, time_range, fb_user_id)
+# tuples have been fetched recently. The cache-warm loop reads this
+# to pick entries to refresh just before they expire so user-facing
+# reads always land on warm cache. fb_user_id is part of the key
+# because Phase A made FB calls per-user — the same (account_id,
+# date) tuple from two users uses two different tokens and lives in
+# two separate cache entries, so the warm loop must refresh under
+# the same user context the original read used. Entries older than
+# 10 min are skipped (cold accounts don't get re-warmed; this keeps
+# background FB usage bounded by what's actually being looked at).
+_warm_targets: dict[tuple[str, str, str, Optional[str], str], float] = {}
 
 # Set whenever we observe an 80004 throttle response. The warm loop
 # checks this and backs off for 10 minutes — the absolute last thing
@@ -143,7 +170,35 @@ def _scheduler_tz() -> ZoneInfo:
 
 
 def get_token() -> str:
+    """Resolve the FB access token for the current call.
+
+    Resolution order:
+      1. The per-user token for `_current_fb_user_id` (set by the
+         middleware from `?fb_user_id=…` or by background tasks
+         from a config / channel owner). This is the multi-tenant
+         path — each user's calls go through their own token so they
+         only see what THEIR FB account has access to.
+      2. The legacy `_runtime_token` global, populated by
+         `POST /api/auth/token` for backward compatibility.
+         Currently used by the public `/r/<campaign_id>` share page
+         where the viewer has no session.
+      3. The .env `FB_ACCESS_TOKEN` fallback for local dev.
+    """
+    uid = _current_fb_user_id.get()
+    if uid:
+        tok = _user_token_cache.get(uid)
+        if tok:
+            return tok
     return _runtime_token or _ACCESS_TOKEN or ""
+
+
+def _token_for_user(uid: str) -> Optional[str]:
+    """Direct lookup of a specific user's token, bypassing contextvar.
+    Used by background tasks that need to call FB on behalf of a known
+    user without first setting the contextvar."""
+    if not uid:
+        return None
+    return _user_token_cache.get(uid)
 
 
 # Built React app output (from frontend/ via `pnpm build`). Served as
@@ -496,6 +551,32 @@ async def lifespan(app: FastAPI):
                 await conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_lpl_config_run ON line_push_logs (config_id, run_at DESC)"
                 )
+                # ── Per-user FB tokens (Phase A — multi-tenant) ───
+                # Each FB user's long-lived token is persisted here so a
+                # server restart doesn't blow away every user's session.
+                # Replaces the legacy `_fb_runtime_token` row in
+                # shared_settings, which only tracked the LAST user to
+                # log in. With multi-tenant FB data isolation, each
+                # logged-in user's FB calls go through THEIR OWN token
+                # (set via the contextvar middleware) so user A no
+                # longer sees user B's BMs / ad accounts.
+                #
+                # Schema is deliberately minimal — just (uid, token,
+                # timestamps). expires_at is reserved for future
+                # auto-refresh logic; FB long-lived tokens last ~60d
+                # and the frontend re-runs the FB Login flow before
+                # expiry, persisting a fresh token here each time.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_fb_tokens (
+                        fb_user_id TEXT PRIMARY KEY,
+                        access_token TEXT NOT NULL,
+                        expires_at TIMESTAMPTZ,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
                 # ── Billing / Subscription (Polar.sh) ─────────────
                 # `subscriptions`: one row per fb_user_id. Tracks Polar
                 # state + denormalized quota limits so per-request
@@ -674,6 +755,12 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             print(f"[startup] known users restore failed: {exc}", flush=True)
 
+        # Phase A: load every persisted per-user FB token into the
+        # in-memory cache so the contextvar-based lookup in get_token()
+        # works immediately on first request post-restart instead of
+        # falling through to the legacy _runtime_token global.
+        await _load_user_tokens_cache()
+
     # Multi-user (2026-04-30): no auto-seeded default channel.
     # Each user adds their own LINE Official Accounts via the UI;
     # there is no shared/team-wide channel anymore. Existing
@@ -822,6 +909,36 @@ async def _security_headers(request: Request, call_next):
             "base-uri 'self'",
         )
     return resp
+
+
+# Per-request user-context middleware. Pulls fb_user_id from the
+# query string (or `x-fb-user-id` header for non-GET callers) and sets
+# the `_current_fb_user_id` contextvar so every fb_get / fb_post inside
+# the request handler routes through THAT user's FB token. Without
+# this every call would still hit the legacy `_runtime_token` global
+# (the last user to log in). Reset in `finally` so adjacent requests
+# in the same task pool don't leak context.
+#
+# Spoofing note: anyone who knows another user's fb_user_id can pass
+# it here and use that user's token. This is the SAME trust model as
+# the rest of the app today (most endpoints already trust query-param
+# fb_user_id without a real session). Tightening this requires a
+# proper signed-session layer — out of scope for the multi-tenant
+# data-isolation work.
+@app.middleware("http")
+async def _user_context_middleware(request: Request, call_next):
+    uid = (
+        request.query_params.get("fb_user_id")
+        or request.headers.get("x-fb-user-id")
+        or ""
+    ).strip()
+    if not uid:
+        return await call_next(request)
+    reset_token = _current_fb_user_id.set(uid)
+    try:
+        return await call_next(request)
+    finally:
+        _current_fb_user_id.reset(reset_token)
 
 
 # Gzip EVERY response >500 bytes for clients that send Accept-Encoding:
@@ -1633,6 +1750,59 @@ class TokenPayload(BaseModel):
     token: str
 
 
+async def _persist_user_token(uid: str, token: Optional[str]) -> None:
+    """Insert / update / delete the given FB user's token in the
+    `user_fb_tokens` table. Best-effort — logs failures but never
+    raises, since the in-memory `_user_token_cache` is the live source
+    of truth for the current process. PG persistence is purely so a
+    Zeabur redeploy doesn't blow away every user's session."""
+    if not uid or _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            if token:
+                await conn.execute(
+                    """
+                    INSERT INTO user_fb_tokens (fb_user_id, access_token, updated_at)
+                    VALUES ($1, $2, NOW())
+                    ON CONFLICT (fb_user_id) DO UPDATE
+                    SET access_token = EXCLUDED.access_token, updated_at = NOW()
+                    """,
+                    uid,
+                    token,
+                )
+            else:
+                await conn.execute(
+                    "DELETE FROM user_fb_tokens WHERE fb_user_id = $1", uid
+                )
+    except Exception as exc:
+        print(f"[user-token] persist failed for {uid[-4:]}: {exc}", flush=True)
+
+
+async def _load_user_tokens_cache() -> None:
+    """Populate `_user_token_cache` from `user_fb_tokens` on lifespan
+    startup. Called after `_db_pool` is created so post-redeploy reads
+    the freshest tokens before any `fb_get` fires."""
+    if _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT fb_user_id, access_token FROM user_fb_tokens"
+            )
+        for r in rows:
+            uid = str(r["fb_user_id"] or "")
+            tok = r["access_token"] or ""
+            if uid and tok:
+                _user_token_cache[uid] = tok
+        print(
+            f"[startup] user_fb_tokens loaded: {len(_user_token_cache)} users",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[startup] user_fb_tokens load failed: {exc}", flush=True)
+
+
 async def _persist_runtime_token(token: Optional[str]) -> None:
     """Save / clear the runtime FB token to PG so that a server
     restart (e.g. Zeabur redeploy) doesn't break the public share
@@ -1738,9 +1908,14 @@ def _check_agent_rate_limit(uid: str) -> None:
 @app.post("/api/auth/token")
 async def set_token(payload: TokenPayload):
     global _runtime_token
+    # Temporarily set the legacy global so the /me call below has a
+    # token to use — we don't know fb_user_id yet (that's exactly
+    # what /me returns), so we can't yet route through
+    # _user_token_cache. Once /me succeeds, we promote the token to
+    # the per-user cache and the legacy global stays as the share-
+    # page fallback.
     _runtime_token = payload.token
     try:
-        # Get basic profile
         me = await fb_get("me", {"fields": "id,name,picture"})
         uid = str(me.get("id") or "")
         pic = me.get("picture", {}).get("data", {}).get("url")
@@ -1748,6 +1923,8 @@ async def set_token(payload: TokenPayload):
         # garbage that would 401 every share-page viewer.
         await _persist_runtime_token(payload.token)
         if uid:
+            _user_token_cache[uid] = payload.token
+            await _persist_user_token(uid, payload.token)
             _KNOWN_FB_USERS.add(uid)
             await _persist_known_user(uid)
         return {"ok": True, "name": me.get("name"), "id": me.get("id"), "pictureUrl": pic}
@@ -1760,10 +1937,19 @@ async def set_token(payload: TokenPayload):
 
 
 @app.delete("/api/auth/token")
-async def clear_token():
+async def clear_token(fb_user_id: Optional[str] = None):
+    """Logout: drop the calling user's per-user token AND the legacy
+    global runtime token. The per-user cache eviction is gated on the
+    caller's `fb_user_id` so one user's logout doesn't kick everyone
+    else out — when fb_user_id is missing (legacy clients, or share
+    page logout), only the global is cleared."""
     global _runtime_token
     _runtime_token = None
     await _persist_runtime_token(None)
+    uid = (fb_user_id or "").strip()
+    if uid:
+        _user_token_cache.pop(uid, None)
+        await _persist_user_token(uid, None)
     return {"ok": True}
 
 @app.get("/api/auth/me")
@@ -3254,9 +3440,15 @@ async def _fetch_campaigns_for_account(
     # Register as a warm target so the cache-warm loop refreshes this
     # entry just before TTL expires. Lite-mode reads (skeleton) are
     # NOT registered — they're cheap and already happen pre-paint, no
-    # need to keep them warm in the background.
+    # need to keep them warm in the background. Includes fb_user_id
+    # from contextvar so the warm loop can re-fire under the same
+    # per-user FB token.
     if not lite:
-        _warm_targets[(account_id, "campaigns", date_preset, time_range)] = time.monotonic()
+        warm_uid = _current_fb_user_id.get() or ""
+        if warm_uid:
+            _warm_targets[(account_id, "campaigns", date_preset, time_range, warm_uid)] = (
+                time.monotonic()
+            )
     ins = _insights_clause(
         "spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
         "inline_link_clicks,cost_per_inline_link_click,"
@@ -3717,7 +3909,11 @@ async def _fetch_account_insights(
     takes 10-15s before returning, which was pushing the old 10s
     GET timeout into "sometimes works, sometimes doesn't" territory.
     """
-    _warm_targets[(account_id, "insights", date_preset, time_range)] = time.monotonic()
+    warm_uid = _current_fb_user_id.get() or ""
+    if warm_uid:
+        _warm_targets[(account_id, "insights", date_preset, time_range, warm_uid)] = (
+            time.monotonic()
+        )
     params = {
         "fields": "spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions",
     }
@@ -6206,6 +6402,17 @@ async def _scheduler_tick() -> None:
                         )
                     print(f"[scheduler] tier-limit skip: {cfg['id']} ({err_msg})", flush=True)
                     continue
+        # Set the per-user FB context so _build_flex_for_config's FB
+        # API calls go through the channel owner's token (Phase A
+        # multi-tenant isolation). Without this the scheduler would
+        # fall back to the legacy global _runtime_token and could end
+        # up calling FB as the wrong user — which on a multi-tenant
+        # server would mean fetching ad insights from a DIFFERENT
+        # agency's account. Reset the contextvar in finally so the
+        # next iteration starts clean.
+        ctx_token = None
+        if owner_uid and _token_for_user(owner_uid):
+            ctx_token = _current_fb_user_id.set(owner_uid)
         try:
             flex = await _build_flex_for_config(cfg)
             assert _http_client is not None
@@ -6285,6 +6492,9 @@ async def _scheduler_tick() -> None:
                 f"{' (auto-disabled)' if auto_disable else ''}",
                 flush=True,
             )
+        finally:
+            if ctx_token is not None:
+                _current_fb_user_id.reset(ctx_token)
 
 
 async def _scheduler_loop() -> None:
@@ -6325,8 +6535,6 @@ _WARM_THROTTLE_BACKOFF_S = 600
 
 
 async def _cache_warm_tick() -> None:
-    if get_token() == "":
-        return
     now = time.monotonic()
     if _last_ads_throttle_at and (now - _last_ads_throttle_at) < _WARM_THROTTLE_BACKOFF_S:
         return
@@ -6336,8 +6544,9 @@ async def _cache_warm_tick() -> None:
     # their TTL. Older-than-_WARM_RECENT_ACCESS_S entries are dropped
     # from the warm set to prevent unbounded growth on accounts
     # nobody's looking at any more.
-    candidates: list[tuple[float, tuple[str, str, str, Optional[str]]]] = []
-    expired_targets: list[tuple[str, str, str, Optional[str]]] = []
+    WarmKey = tuple[str, str, str, Optional[str], str]
+    candidates: list[tuple[float, WarmKey]] = []
+    expired_targets: list[WarmKey] = []
     for key, last_seen in list(_warm_targets.items()):
         if (now - last_seen) > _WARM_RECENT_ACCESS_S:
             expired_targets.append(key)
@@ -6348,9 +6557,15 @@ async def _cache_warm_tick() -> None:
 
     candidates.sort(reverse=True)  # most recent first
     refreshed = 0
-    for _, (account_id, kind, date_preset, time_range) in candidates:
+    for _, (account_id, kind, date_preset, time_range, uid) in candidates:
         if refreshed >= _WARM_MAX_PER_TICK:
             break
+        # User logged out / token revoked → skip silently. Next time
+        # they log in, fresh warm entries get registered under the
+        # new login.
+        if not _token_for_user(uid):
+            continue
+        ctx_token = _current_fb_user_id.set(uid)
         try:
             if kind == "insights":
                 await _fetch_account_insights(account_id, date_preset, time_range)
@@ -6364,6 +6579,8 @@ async def _cache_warm_tick() -> None:
             # tick retry. _last_ads_throttle_at gets set inside the
             # FB error handler so the next tick's backoff guard fires.
             return
+        finally:
+            _current_fb_user_id.reset(ctx_token)
         # Spread out the refreshes a little so bursts of warm-loop
         # activity don't themselves contribute to throttle.
         await asyncio.sleep(0.5)
