@@ -65,6 +65,8 @@ interface LineGroup {
   channel_id: string | null;
   channel_name: string;
   channel_owner_fb_user_id: string | null;
+  is_owner: boolean;
+  is_shared: boolean;
   joined_at: string | null;
   left_at: string | null;
 }
@@ -105,11 +107,23 @@ export function LineGroupsContent() {
   const groupCap = usageQuery.data?.limits.line_groups ?? -1;
   const groupsUsed = usageQuery.data?.usage.line_groups ?? 0;
   const isUnlimited = groupCap < 0 || groupCap >= 999_000;
-  const atLimit = !isUnlimited && groupsUsed >= groupCap;
+  // Tier limit only applies when the user owns at least one channel.
+  // Shared OAs count against the OWNER's tier (not the caller's), so
+  // a grantee viewing only shared groups should never see「已達上限」
+  // — that limit is irrelevant for them.
+  const ownedGroupsCount = (groups as LineGroup[]).filter((g) => g.is_owner).length;
+  const sharedGroupsCount = (groups as LineGroup[]).filter((g) => g.is_shared).length;
+  const showLimitBadge = !isUnlimited && ownedGroupsCount > 0;
+  const atLimit = showLimitBadge && groupsUsed >= groupCap;
   const [upgradeState, setUpgradeState] = useState<UpgradeModalState | null>(null);
 
   const tryAddPush = (target: NonNullable<EditTarget>) => {
-    if (atLimit) {
+    // Only enforce caller's tier on rows under their OWN channels.
+    // For shared OAs the limit lives on the owner's tier — backend
+    // will 403 if owner is over THEIR cap, with a friendly message.
+    const targetGroup = (groups as LineGroup[]).find((g) => g.group_id === target.groupId);
+    const isCallerOwnedTarget = targetGroup?.is_owner ?? false;
+    if (isCallerOwnedTarget && atLimit) {
       setUpgradeState({
         resource: "line_groups",
         tier: usageQuery.data?.tier ?? "free",
@@ -172,7 +186,7 @@ export function LineGroupsContent() {
     <>
       <UpgradeModal state={upgradeState} onClose={() => setUpgradeState(null)} />
       <GraceBanner usage={usageQuery.data} resource="line_groups" />
-      {!isUnlimited && (
+      {showLimitBadge && (
         <div
           className={cn(
             "mb-3 flex items-center justify-between rounded-lg border px-3 py-2 text-[12px]",
@@ -182,8 +196,14 @@ export function LineGroupsContent() {
           )}
         >
           <span>
-            推播設定 <span className="font-semibold tabular-nums text-ink">{groupsUsed}</span> /{" "}
+            我的推播設定{" "}
+            <span className="font-semibold tabular-nums text-ink">{groupsUsed}</span> /{" "}
             <span className="tabular-nums">{groupCap}</span>
+            {sharedGroupsCount > 0 && (
+              <span className="ml-3 text-gray-300">
+                · 共享 {sharedGroupsCount} 個群組(計入擁有者方案,不影響你的額度)
+              </span>
+            )}
           </span>
           {atLimit && <span className="font-semibold">已達上限</span>}
         </div>
