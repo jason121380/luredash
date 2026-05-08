@@ -160,8 +160,8 @@ function PlanCard({
 
   const features = [
     `${tier.ad_accounts_limit === -1 ? "無限" : tier.ad_accounts_limit} 個廣告帳戶`,
-    `${tier.line_channels_limit === -1 ? "無限" : tier.line_channels_limit} 個 LINE 官方帳號`,
-    `${tier.line_groups_limit === -1 ? "無限" : tier.line_groups_limit} 個 LINE 群組推播`,
+    `可串接 ${tier.line_channels_limit === -1 ? "無限" : tier.line_channels_limit} 個 LINE 官方帳號`,
+    `可被加入 ${tier.line_groups_limit === -1 ? "無限" : tier.line_groups_limit} 個 LINE 群組`,
     "推播次數依 LINE 官方計費(與本系統方案無關)",
     "即時警示列表",
     adviceLine,

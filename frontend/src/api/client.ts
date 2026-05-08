@@ -637,6 +637,16 @@ export const api = {
       }>("GET", `/api/line-channels/${encodeURIComponent(id)}/quota`, {
         query: { fb_user_id: fbUserId },
       }),
+    /** Bulk-refresh channel display names from LINE's /v2/bot/info.
+     *  Picks up renames the operator made inside LINE Official Account
+     *  Manager. Paired with `linePush.refreshAllGroups` in the LINE
+     *  推播設定 top-right refresh button. */
+    refreshAll: (fbUserId: string) =>
+      request<{ ok: boolean; refreshed: number }>(
+        "POST",
+        "/api/line-channels/refresh-all",
+        { query: { fb_user_id: fbUserId } },
+      ),
   },
 
   linePush: {

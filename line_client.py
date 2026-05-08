@@ -31,6 +31,7 @@ LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 LINE_GROUP_SUMMARY_URL = "https://api.line.me/v2/bot/group/{group_id}/summary"
 LINE_QUOTA_URL = "https://api.line.me/v2/bot/message/quota"
 LINE_QUOTA_CONSUMPTION_URL = "https://api.line.me/v2/bot/message/quota/consumption"
+LINE_BOT_INFO_URL = "https://api.line.me/v2/bot/info"
 
 
 def _mock_enabled() -> bool:
@@ -126,6 +127,40 @@ async def line_push(
             detail = resp.text[:600]
         print(f"[line_push] {resp.status_code} {detail}", flush=True)
         raise LinePushError(resp.status_code, detail)
+
+
+async def get_bot_info(
+    client: httpx.AsyncClient,
+    *,
+    access_token: str,
+) -> Optional[dict]:
+    """Fetch LINE bot account info — primarily used to sync the OA's
+    `displayName` back to our `line_channels.name` column when the
+    operator renames the OA in LINE Official Account Manager.
+
+    Returns the LINE response dict (`{userId, basicId, displayName,
+    pictureUrl, ...}`) on success, or None when the call fails / the
+    token is missing. Failures are intentionally swallowed — callers
+    are typically batching across many channels and one bad token
+    shouldn't blow up the whole refresh."""
+    if _mock_enabled():
+        return {"userId": "U_MOCK", "displayName": "MOCK BOT"}
+    if not access_token:
+        return None
+    try:
+        resp = await client.get(
+            LINE_BOT_INFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        return None
 
 
 async def get_quota(

@@ -206,8 +206,8 @@ function UsageCard({ sub }: { sub: SubscriptionState }) {
   // bills `messages × recipients`), not by our subscription tier.
   const rows: Array<{ label: string; limit: number | null }> = [
     { label: "廣告帳戶", limit: sub.ad_accounts_limit },
-    { label: "LINE 官方帳號", limit: sub.line_channels_limit },
-    { label: "LINE 群組推播", limit: sub.line_groups_limit },
+    { label: "可串接 Line 官方帳號數", limit: sub.line_channels_limit },
+    { label: "可被加入 Line 群組數量", limit: sub.line_groups_limit },
   ];
   return (
     <section className="rounded-2xl border border-border bg-white p-5 md:p-6">
