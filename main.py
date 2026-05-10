@@ -1503,7 +1503,19 @@ async def _fb_fetch_and_cache(
         raise HTTPException(status_code=502, detail=f"Facebook API returned non-JSON (HTTP {r.status_code}): {snippet}")
     if isinstance(body, dict) and "error" in body:
         err = body["error"] if isinstance(body["error"], dict) else {}
-        msg = err.get("message", "Facebook API error")
+        # FB's `message` is usually a generic「Invalid parameter」or
+        # the like. The actually actionable version is in
+        # `error_user_title` + `error_user_msg`, which FB localises and
+        # explicitly intends for operator-facing display. Prefer those
+        # when present so users see「廣告組合無法啟用,因上層行銷活動
+        # 已暫停」 instead of「Invalid parameter」.
+        user_title = (err.get("error_user_title") or "").strip()
+        user_msg = (err.get("error_user_msg") or "").strip()
+        generic_msg = err.get("message", "Facebook API error")
+        if user_msg:
+            msg = f"{user_title}:{user_msg}" if user_title else user_msg
+        else:
+            msg = generic_msg
         # Re-surface FB error code so frontend can react (e.g. token expired = 190)
         code = err.get("code")
         sub = err.get("error_subcode")
@@ -1634,7 +1646,15 @@ async def _fb_get_paginated_fetch(
                     data = None
                 if data is not None and isinstance(data, dict) and "error" in data:
                     err = data["error"] if isinstance(data["error"], dict) else {}
-                    msg = err.get("message", "Facebook API error")
+                    # Prefer the actionable error_user_title /
+                    # error_user_msg FB provides, falling back to the
+                    # generic `message` only when those are absent.
+                    user_title = (err.get("error_user_title") or "").strip()
+                    user_msg = (err.get("error_user_msg") or "").strip()
+                    if user_msg:
+                        msg = f"{user_title}:{user_msg}" if user_title else user_msg
+                    else:
+                        msg = err.get("message", "Facebook API error")
                     code = err.get("code")
                     # Code 4 / 17 / 32 / 613 are app/user/page-level
                     # rate-limit codes — treat as transient so we
