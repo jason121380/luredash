@@ -408,6 +408,17 @@ async def lifespan(app: FastAPI):
                     )
                     """
                 )
+                # Role on the grant: 'admin' (full edit on groups +
+                # push configs, can fire test pushes) or 'viewer'
+                # (read-only). Owner can change at any time via the
+                # share modal. Existing rows default to 'admin' to
+                # preserve current behaviour for pre-role grants.
+                await conn.execute(
+                    """
+                    ALTER TABLE line_channel_grants
+                    ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'admin'
+                    """
+                )
                 await conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_lcg_user_status
@@ -4505,6 +4516,11 @@ async def _channel_role_for_user(channel_id: str, uid: str) -> Optional[str]:
 
     Used by the per-channel auth gates so both owners AND accepted-
     grant users can read / manage the channel's groups + push configs.
+    Roles returned:
+      - 'owner'  → full control (channel CRUD + grants)
+      - 'admin'  → accepted grant with role=admin (manage groups + configs)
+      - 'viewer' → accepted grant with role=viewer (read-only)
+      - None     → no access
     Only owners can transfer / delete / share-invite — gated separately
     in the relevant endpoints."""
     if _db_pool is None or not channel_id or not uid:
@@ -4513,7 +4529,8 @@ async def _channel_role_for_user(channel_id: str, uid: str) -> Optional[str]:
         row = await conn.fetchrow(
             """
             SELECT c.owner_fb_user_id,
-                   COALESCE(g.status, '') AS grant_status
+                   COALESCE(g.status, '') AS grant_status,
+                   COALESCE(g.role, 'admin') AS grant_role
             FROM line_channels c
             LEFT JOIN line_channel_grants g
                 ON g.channel_id = c.id AND g.fb_user_id = $2
@@ -4527,7 +4544,8 @@ async def _channel_role_for_user(channel_id: str, uid: str) -> Optional[str]:
     if row["owner_fb_user_id"] == uid:
         return "owner"
     if row["grant_status"] == "accepted":
-        return "shared"
+        r = row["grant_role"]
+        return "viewer" if r == "viewer" else "admin"
     return None
 
 
@@ -4536,7 +4554,8 @@ async def _assert_can_modify_config_for_group(group_id: str, fb_user_id: Optiona
 
     Rule (Phase B — sharing):
       - Caller must own the channel the group is bound to, OR have an
-        accepted grant on that channel.
+        accepted grant with role='admin'. Viewers (role='viewer') can
+        READ configs via the list endpoints but get 403 here.
       - Orphan channels (owner_fb_user_id IS NULL, legacy seeded data)
         cannot be modified by anyone — set ADMIN_FB_USER_ID env to
         claim them at startup.
@@ -4549,7 +4568,8 @@ async def _assert_can_modify_config_for_group(group_id: str, fb_user_id: Optiona
         row = await conn.fetchrow(
             """
             SELECT c.id AS channel_id, c.owner_fb_user_id,
-                   COALESCE(gr.status, '') AS grant_status
+                   COALESCE(gr.status, '') AS grant_status,
+                   COALESCE(gr.role, 'admin') AS grant_role
             FROM line_groups g
             LEFT JOIN line_channels c ON c.id = g.channel_id
             LEFT JOIN line_channel_grants gr
@@ -4570,6 +4590,11 @@ async def _assert_can_modify_config_for_group(group_id: str, fb_user_id: Optiona
     if owner == uid:
         return
     if row["grant_status"] == "accepted":
+        if row["grant_role"] == "viewer":
+            raise HTTPException(
+                status_code=403,
+                detail="你的權限為唯讀,無法修改推播設定。請聯絡此官方帳號擁有者調整權限。",
+            )
         return
     raise HTTPException(status_code=403, detail="此推播由其他用戶的官方帳號管理,無權限修改")
 
@@ -5461,7 +5486,8 @@ async def list_line_channels(request: Request, fb_user_id: Optional[str] = None)
                    COALESCE(g.cnt, 0) AS bound_groups_count,
                    COALESCE(gr.shared_count, 0) AS shared_count,
                    COALESCE(gr.pending_count, 0) AS pending_count,
-                   COALESCE(my_grant.status, '') AS my_grant_status
+                   COALESCE(my_grant.status, '') AS my_grant_status,
+                   COALESCE(my_grant.role, '') AS my_grant_role
             FROM line_channels c
             LEFT JOIN (
                 SELECT channel_id, COUNT(*) AS cnt
@@ -5508,6 +5534,14 @@ async def list_line_channels(request: Request, fb_user_id: Optional[str] = None)
         is_orphan = owner is None
         is_owner = owner == uid
         is_shared = (r["my_grant_status"] == "accepted") and not is_owner
+        # Resolve caller's role on this channel for downstream UI
+        # gating (admin sees write controls, viewer sees read-only).
+        if is_owner:
+            my_role = "owner"
+        elif is_shared:
+            my_role = "viewer" if r["my_grant_role"] == "viewer" else "admin"
+        else:
+            my_role = ""
         out.append(
             {
                 "id": cid,
@@ -5519,11 +5553,10 @@ async def list_line_channels(request: Request, fb_user_id: Optional[str] = None)
                 "is_orphan": is_orphan,
                 "is_owner": is_owner,
                 "is_shared": is_shared,
-                # `editable`: kept for back-compat with existing UI
-                # that uses it for "show edit button". Owner OR shared
-                # user can manage groups; only owner can delete /
-                # transfer / share.
-                "editable": is_owner or is_shared,
+                "my_role": my_role,
+                # `editable`: write access. Owner + admin grantees only.
+                # Viewers can READ groups + configs but cannot mutate.
+                "editable": is_owner or my_role == "admin",
                 "bound_groups_count": int(r["bound_groups_count"] or 0),
                 "shared_count": int(r["shared_count"] or 0),
                 "pending_count": int(r["pending_count"] or 0),
@@ -5803,8 +5836,16 @@ async def refresh_all_line_channels(fb_user_id: Optional[str] = None):
 # ── LINE channel grants (sharing) ─────────────────────────────
 
 
+_VALID_GRANT_ROLES = {"admin", "viewer"}
+
+
 class ChannelGrantPayload(BaseModel):
     fb_user_id: str  # invitee
+    role: Optional[str] = "admin"  # 'admin' | 'viewer'
+
+
+class ChannelGrantRolePayload(BaseModel):
+    role: str  # 'admin' | 'viewer'
 
 
 @app.post("/api/line-channels/{channel_id}/grants")
@@ -5815,7 +5856,10 @@ async def invite_channel_user(
 ):
     """Owner invites another FB user to share access to this channel.
     The invitee sees a pending invitation banner on next login and
-    must accept before the channel becomes visible to them."""
+    must accept before the channel becomes visible to them.
+
+    `role` may be 'admin' (full edit, default) or 'viewer' (read-only).
+    Owner can change the role later via the PUT-role endpoint."""
     pool = _require_db()
     uid = (fb_user_id or "").strip()
     if not uid:
@@ -5825,6 +5869,9 @@ async def invite_channel_user(
         raise HTTPException(status_code=400, detail="invitee fb_user_id 必填")
     if invitee == uid:
         raise HTTPException(status_code=400, detail="不能邀請自己")
+    role = (payload.role or "admin").strip()
+    if role not in _VALID_GRANT_ROLES:
+        raise HTTPException(status_code=400, detail=f"role 必須是 {_VALID_GRANT_ROLES} 之一")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT owner_fb_user_id FROM line_channels WHERE id = $1::uuid",
@@ -5837,10 +5884,11 @@ async def invite_channel_user(
         await conn.execute(
             """
             INSERT INTO line_channel_grants
-              (channel_id, fb_user_id, granted_by_fb_user_id, status)
-            VALUES ($1::uuid, $2, $3, 'pending')
+              (channel_id, fb_user_id, granted_by_fb_user_id, status, role)
+            VALUES ($1::uuid, $2, $3, 'pending', $4)
             ON CONFLICT (channel_id, fb_user_id) DO UPDATE
             SET status = 'pending',
+                role = EXCLUDED.role,
                 granted_by_fb_user_id = EXCLUDED.granted_by_fb_user_id,
                 granted_at = NOW(),
                 responded_at = NULL
@@ -5848,8 +5896,48 @@ async def invite_channel_user(
             channel_id,
             invitee,
             uid,
+            role,
         )
-    return {"ok": True, "status": "pending"}
+    return {"ok": True, "status": "pending", "role": role}
+
+
+@app.put("/api/line-channels/{channel_id}/grants/{user_id}/role")
+async def update_channel_grant_role(
+    channel_id: str,
+    user_id: str,
+    payload: ChannelGrantRolePayload,
+    fb_user_id: Optional[str] = None,
+):
+    """Owner changes a grantee's role (admin ↔ viewer). Takes effect
+    immediately — next request from the grantee respects the new role
+    via the auth gates."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    role = (payload.role or "").strip()
+    if role not in _VALID_GRANT_ROLES:
+        raise HTTPException(status_code=400, detail=f"role 必須是 {_VALID_GRANT_ROLES} 之一")
+    async with pool.acquire() as conn:
+        owner = await conn.fetchval(
+            "SELECT owner_fb_user_id FROM line_channels WHERE id = $1::uuid",
+            channel_id,
+        )
+        if owner != uid:
+            raise HTTPException(status_code=403, detail="只有擁有者能變更權限")
+        n = await conn.execute(
+            """
+            UPDATE line_channel_grants
+            SET role = $1
+            WHERE channel_id = $2::uuid AND fb_user_id = $3
+            """,
+            role,
+            channel_id,
+            user_id,
+        )
+    if n.endswith(" 0"):
+        raise HTTPException(status_code=404, detail="找不到該共享紀錄")
+    return {"ok": True, "role": role}
 
 
 @app.get("/api/line-channels/{channel_id}/grants")
@@ -5868,7 +5956,7 @@ async def list_channel_grants(channel_id: str, fb_user_id: Optional[str] = None)
             raise HTTPException(status_code=403, detail="只有擁有者能查看共享名單")
         rows = await conn.fetch(
             """
-            SELECT fb_user_id, status, granted_by_fb_user_id,
+            SELECT fb_user_id, status, role, granted_by_fb_user_id,
                    granted_at, responded_at
             FROM line_channel_grants
             WHERE channel_id = $1::uuid
@@ -5881,6 +5969,7 @@ async def list_channel_grants(channel_id: str, fb_user_id: Optional[str] = None)
             {
                 "fb_user_id": r["fb_user_id"],
                 "status": r["status"],
+                "role": r["role"] or "admin",
                 "granted_at": r["granted_at"].isoformat() if r["granted_at"] else None,
                 "responded_at": r["responded_at"].isoformat() if r["responded_at"] else None,
             }
@@ -6025,7 +6114,8 @@ async def list_line_groups(fb_user_id: Optional[str] = None):
                    COALESCE(c.name, '') AS channel_name,
                    c.owner_fb_user_id AS channel_owner_fb_user_id,
                    (c.owner_fb_user_id = $1) AS is_owner,
-                   COALESCE(gr.status, '') AS my_grant_status
+                   COALESCE(gr.status, '') AS my_grant_status,
+                   COALESCE(gr.role, '') AS my_grant_role
             FROM line_groups g
             LEFT JOIN line_channels c ON c.id = g.channel_id
             LEFT JOIN line_channel_grants gr
@@ -6051,6 +6141,12 @@ async def list_line_groups(fb_user_id: Optional[str] = None):
                 "channel_owner_fb_user_id": r["channel_owner_fb_user_id"],
                 "is_owner": bool(r["is_owner"]),
                 "is_shared": (r["my_grant_status"] == "accepted") and not bool(r["is_owner"]),
+                "my_role": (
+                    "owner" if bool(r["is_owner"]) else
+                    ("viewer" if r["my_grant_role"] == "viewer" else "admin")
+                    if r["my_grant_status"] == "accepted"
+                    else ""
+                ),
                 "joined_at": r["joined_at"].isoformat() if r["joined_at"] else None,
                 "left_at": r["left_at"].isoformat() if r["left_at"] else None,
             }

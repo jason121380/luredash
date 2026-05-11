@@ -7,7 +7,6 @@ import {
   useTestLinePush,
 } from "@/api/hooks/useLinePush";
 import { useBillingUsage } from "@/api/hooks/useSubscription";
-import { useFbAuth } from "@/auth/FbAuthProvider";
 import { confirm } from "@/components/ConfirmDialog";
 import { GraceBanner } from "@/components/GraceBanner";
 import { toast } from "@/components/Toast";
@@ -67,6 +66,7 @@ interface LineGroup {
   channel_owner_fb_user_id: string | null;
   is_owner: boolean;
   is_shared: boolean;
+  my_role: "owner" | "admin" | "viewer" | "";
   joined_at: string | null;
   left_at: string | null;
 }
@@ -85,8 +85,6 @@ interface LineGroup {
 export function LineGroupsContent() {
   const groupsQuery = useLineGroups();
   const groups = groupsQuery.data ?? [];
-  const { user } = useFbAuth();
-  const currentUserId = user?.id ?? "";
   // Set of account IDs the current FB user has Marketing API access to.
   // `useAccounts()` calls /me/adaccounts which FB itself filters by the
   // user's permissions, so this is the authoritative "what they can see".
@@ -256,7 +254,9 @@ export function LineGroupsContent() {
                     no={idx + 1}
                     group={g}
                     accessibleAccountIds={accessibleAccountIds}
-                    canAddPush={!!g.channel_owner_fb_user_id && g.channel_owner_fb_user_id === currentUserId}
+                    // canEdit = owner OR admin grantee. Viewers see
+                    // configs but no add/edit/delete/test buttons.
+                    canEdit={g.my_role === "owner" || g.my_role === "admin"}
                     onAddPush={() =>
                       tryAddPush({
                         groupId: g.group_id,
@@ -328,14 +328,16 @@ function GroupRow({
   no,
   group,
   accessibleAccountIds,
-  canAddPush,
+  canEdit,
   onAddPush,
   onEditPush,
 }: {
   no: number;
   group: LineGroup;
   accessibleAccountIds: Set<string>;
-  canAddPush: boolean;
+  /** Caller can mutate configs (add / edit / delete / test).
+   *  False for viewer-role grantees → read-only display. */
+  canEdit: boolean;
   onAddPush: () => void;
   onEditPush: (cfg: LinePushConfig) => void;
 }) {
@@ -347,8 +349,26 @@ function GroupRow({
       <td className="px-3 py-2.5 text-center text-[11px] tabular-nums text-gray-300">{no}</td>
       <td className="px-3 py-2.5">
         {group.channel_name ? (
-          <span className="inline-block rounded-full bg-orange-bg px-2 py-[1px] text-[11px] font-semibold text-orange">
-            {group.channel_name}
+          <span className="inline-flex items-center gap-1">
+            <span className="rounded-full bg-orange-bg px-2 py-[1px] text-[11px] font-semibold text-orange">
+              {group.channel_name}
+            </span>
+            {group.my_role === "viewer" && (
+              <span
+                className="rounded-full bg-gray-100 px-1.5 py-[1px] text-[10px] font-semibold text-gray-500"
+                title="你對此官方帳號為唯讀權限"
+              >
+                唯讀
+              </span>
+            )}
+            {group.my_role === "admin" && (
+              <span
+                className="rounded-full bg-emerald-50 px-1.5 py-[1px] text-[10px] font-semibold text-emerald-600"
+                title="你對此官方帳號為管理員權限(共享)"
+              >
+                共享 · 管理員
+              </span>
+            )}
           </span>
         ) : (
           <span className="text-[11px] text-gray-300">—</span>
@@ -368,8 +388,9 @@ function GroupRow({
         <GroupPushConfigsList
           groupId={group.group_id}
           accessibleAccountIds={accessibleAccountIds}
+          canEdit={canEdit}
           onEdit={onEditPush}
-          onAdd={canAddPush ? onAddPush : undefined}
+          onAdd={canEdit ? onAddPush : undefined}
         />
       </td>
     </tr>
@@ -379,11 +400,13 @@ function GroupRow({
 function GroupPushConfigsList({
   groupId,
   accessibleAccountIds,
+  canEdit,
   onEdit,
   onAdd,
 }: {
   groupId: string;
   accessibleAccountIds: Set<string>;
+  canEdit: boolean;
   onEdit: (cfg: LinePushConfig) => void;
   /** Optional: omit when the bot has left the group (cannot create new). */
   onAdd?: () => void;
@@ -406,7 +429,7 @@ function GroupPushConfigsList({
       ) : (
         <ul className="flex flex-col gap-1">
           {configs.map((cfg) => (
-            <PushConfigRow key={cfg.id} cfg={cfg} onEdit={onEdit} />
+            <PushConfigRow key={cfg.id} cfg={cfg} canEdit={canEdit} onEdit={onEdit} />
           ))}
         </ul>
       )}
@@ -425,9 +448,12 @@ function GroupPushConfigsList({
 
 function PushConfigRow({
   cfg,
+  canEdit,
   onEdit,
 }: {
   cfg: LinePushConfig & { campaign_nickname?: string };
+  /** Owner OR admin grantee: full edit. Viewer / no-access: read-only. */
+  canEdit: boolean;
   onEdit: (cfg: LinePushConfig) => void;
 }) {
   // Display fallback: nickname (店家·設計師) → cached FB campaign name
@@ -439,11 +465,9 @@ function PushConfigRow({
   const rule = formatPushRule(cfg);
   const deleteMutation = useDeleteLinePushConfig();
   const testMutation = useTestLinePush();
-  const { user } = useFbAuth();
-  // Read-only when the channel is owned by someone else (or has no
-  // owner / is shared). Visibility was already gated by FB account
-  // access; ownership controls write access.
-  const editable = !!cfg.channel_owner_fb_user_id && cfg.channel_owner_fb_user_id === user?.id;
+  // Edit controls visible when the caller can write on this OA.
+  // canEdit is true for owners and admin-role grantees.
+  const editable = canEdit;
 
   const onUnbind = async () => {
     const ok = await confirm(`確定要解除「${name}」的推播綁定？`);

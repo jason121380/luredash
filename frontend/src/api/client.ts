@@ -581,6 +581,7 @@ export const api = {
           is_orphan: boolean;
           is_owner: boolean;
           is_shared: boolean;
+          my_role: "owner" | "admin" | "viewer" | "";
           editable: boolean;
           bound_groups_count: number;
           shared_count: number;
@@ -651,14 +652,20 @@ export const api = {
         "/api/line-channels/refresh-all",
         { query: { fb_user_id: fbUserId } },
       ),
-    /** Owner invites another FB user to share access to a channel. */
-    invite: (fbUserId: string, channelId: string, inviteeFbUserId: string) =>
-      request<{ ok: boolean; status: string }>(
+    /** Owner invites another FB user to share access to a channel.
+     *  `role` is 'admin' (full edit, default) or 'viewer' (read-only). */
+    invite: (
+      fbUserId: string,
+      channelId: string,
+      inviteeFbUserId: string,
+      role: "admin" | "viewer" = "admin",
+    ) =>
+      request<{ ok: boolean; status: string; role: string }>(
         "POST",
         `/api/line-channels/${encodeURIComponent(channelId)}/grants`,
         {
           query: { fb_user_id: fbUserId },
-          body: { fb_user_id: inviteeFbUserId },
+          body: { fb_user_id: inviteeFbUserId, role },
         },
       ),
     /** Owner lists all grants (pending + accepted + rejected) for a channel. */
@@ -667,12 +674,28 @@ export const api = {
         data: Array<{
           fb_user_id: string;
           status: "pending" | "accepted" | "rejected";
+          role: "admin" | "viewer";
           granted_at: string | null;
           responded_at: string | null;
         }>;
       }>("GET", `/api/line-channels/${encodeURIComponent(channelId)}/grants`, {
         query: { fb_user_id: fbUserId },
       }),
+    /** Owner changes an existing grant's role (admin ↔ viewer). */
+    updateGrantRole: (
+      fbUserId: string,
+      channelId: string,
+      granteeFbUserId: string,
+      role: "admin" | "viewer",
+    ) =>
+      request<{ ok: boolean; role: string }>(
+        "PUT",
+        `/api/line-channels/${encodeURIComponent(channelId)}/grants/${encodeURIComponent(granteeFbUserId)}/role`,
+        {
+          query: { fb_user_id: fbUserId },
+          body: { role },
+        },
+      ),
     /** Owner revokes a previously-granted (or pending) access. */
     revokeGrant: (fbUserId: string, channelId: string, granteeFbUserId: string) =>
       request<{ ok: boolean }>(
@@ -720,6 +743,7 @@ export const api = {
           channel_owner_fb_user_id: string | null;
           is_owner: boolean;
           is_shared: boolean;
+          my_role: "owner" | "admin" | "viewer" | "";
           joined_at: string | null;
           left_at: string | null;
         }>;
