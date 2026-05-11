@@ -29,6 +29,7 @@ interface ChannelRow {
   is_orphan: boolean;
   is_owner: boolean;
   is_shared: boolean;
+  my_role: "owner" | "admin" | "viewer" | "";
   editable: boolean;
   bound_groups_count: number;
   shared_count: number;
@@ -237,10 +238,19 @@ function ChannelRow({
           )}
           {channel.is_shared && (
             <span
-              className="shrink-0 whitespace-nowrap rounded-full bg-emerald-50 px-1.5 py-[1px] text-[10px] font-semibold text-emerald-600"
-              title="此官方帳號是別的使用者邀請你共同管理的"
+              className={cn(
+                "shrink-0 whitespace-nowrap rounded-full px-1.5 py-[1px] text-[10px] font-semibold",
+                channel.my_role === "viewer"
+                  ? "bg-gray-100 text-gray-500"
+                  : "bg-emerald-50 text-emerald-600",
+              )}
+              title={
+                channel.my_role === "viewer"
+                  ? "你對此官方帳號為唯讀權限"
+                  : "你對此官方帳號為管理員權限(共享)"
+              }
             >
-              共享中
+              {channel.my_role === "viewer" ? "共享 · 唯讀" : "共享 · 管理員"}
             </span>
           )}
           {channel.is_owner && channel.shared_count > 0 && (
@@ -561,7 +571,8 @@ function ChannelShareModal({
     staleTime: 30_000,
   });
   const inviteMutation = useMutation({
-    mutationFn: (invitee: string) => api.lineChannels.invite(uid, channel.id, invitee),
+    mutationFn: ({ invitee, role }: { invitee: string; role: "admin" | "viewer" }) =>
+      api.lineChannels.invite(uid, channel.id, invitee, role),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["lineChannelGrants", uid, channel.id] });
       qc.invalidateQueries({ queryKey: ["lineChannels"] });
@@ -575,7 +586,16 @@ function ChannelShareModal({
       qc.invalidateQueries({ queryKey: ["lineChannels"] });
     },
   });
+  const updateRoleMutation = useMutation({
+    mutationFn: ({ granteeUid, role }: { granteeUid: string; role: "admin" | "viewer" }) =>
+      api.lineChannels.updateGrantRole(uid, channel.id, granteeUid, role),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["lineChannelGrants", uid, channel.id] });
+      qc.invalidateQueries({ queryKey: ["lineChannels"] });
+    },
+  });
   const [inviteId, setInviteId] = useState("");
+  const [inviteRole, setInviteRole] = useState<"admin" | "viewer">("admin");
 
   const onInvite = async () => {
     const v = inviteId.trim();
@@ -584,11 +604,23 @@ function ChannelShareModal({
       return;
     }
     try {
-      await inviteMutation.mutateAsync(v);
+      await inviteMutation.mutateAsync({ invitee: v, role: inviteRole });
       setInviteId("");
-      toast("已送出邀請,等對方確認", "success");
+      toast(
+        `已送出邀請(${inviteRole === "admin" ? "管理員" : "唯讀"}),等對方確認`,
+        "success",
+      );
     } catch (e) {
       toast(`邀請失敗:${e instanceof Error ? e.message : String(e)}`, "error", 5000);
+    }
+  };
+
+  const onChangeRole = async (granteeUid: string, role: "admin" | "viewer") => {
+    try {
+      await updateRoleMutation.mutateAsync({ granteeUid, role });
+      toast(`已變更為${role === "admin" ? "管理員" : "唯讀"}`, "success");
+    } catch (e) {
+      toast(`變更失敗:${e instanceof Error ? e.message : String(e)}`, "error", 5000);
     }
   };
 
@@ -623,6 +655,17 @@ function ChannelShareModal({
               placeholder="Facebook User ID(對方登入後可在右上角頭像取得)"
               className="flex-1 rounded border border-border bg-bg px-2.5 py-1.5 text-[13px] outline-none focus:border-orange focus:bg-white"
             />
+            <select
+              value={inviteRole}
+              onChange={(e) =>
+                setInviteRole(e.currentTarget.value === "viewer" ? "viewer" : "admin")
+              }
+              className="rounded border border-border bg-white px-2 py-1.5 text-[12px] outline-none focus:border-orange"
+              title="管理員可編輯推播設定;唯讀只能檢視"
+            >
+              <option value="admin">管理員</option>
+              <option value="viewer">唯讀</option>
+            </select>
             <Button
               variant="primary"
               size="sm"
@@ -632,6 +675,9 @@ function ChannelShareModal({
               {inviteMutation.isPending ? "送出中..." : "邀請"}
             </Button>
           </div>
+          <span className="text-[11px] text-gray-300">
+            管理員:可新增 / 編輯 / 刪除 / 測試推播 · 唯讀:只能檢視,無法變更任何設定
+          </span>
         </div>
 
         <div className="flex flex-col gap-1.5">
@@ -649,7 +695,7 @@ function ChannelShareModal({
               {grants.map((g) => (
                 <li
                   key={g.fb_user_id}
-                  className="flex items-center justify-between gap-2 rounded border border-border px-2.5 py-1.5"
+                  className="flex flex-wrap items-center justify-between gap-2 rounded border border-border px-2.5 py-1.5"
                 >
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="truncate text-[12px] font-mono text-ink">{g.fb_user_id}</span>
@@ -670,14 +716,33 @@ function ChannelShareModal({
                           : "已拒絕"}
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => void onRevoke(g.fb_user_id)}
-                    disabled={revokeMutation.isPending}
-                    className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-red hover:border-red hover:bg-red-bg disabled:opacity-50"
-                  >
-                    移除
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {g.status !== "rejected" && (
+                      <select
+                        value={g.role}
+                        onChange={(e) =>
+                          void onChangeRole(
+                            g.fb_user_id,
+                            e.currentTarget.value === "viewer" ? "viewer" : "admin",
+                          )
+                        }
+                        disabled={updateRoleMutation.isPending}
+                        className="rounded border border-border bg-white px-1.5 py-0.5 text-[11px] outline-none focus:border-orange disabled:opacity-50"
+                        title="變更權限"
+                      >
+                        <option value="admin">管理員</option>
+                        <option value="viewer">唯讀</option>
+                      </select>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void onRevoke(g.fb_user_id)}
+                      disabled={revokeMutation.isPending}
+                      className="rounded border border-border px-1.5 py-0.5 text-[10px] text-red hover:border-red hover:bg-red-bg disabled:opacity-50"
+                    >
+                      移除
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
