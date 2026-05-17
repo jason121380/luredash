@@ -1760,12 +1760,45 @@ async def root():
 @app.get("/api/_status")
 async def app_status():
     """Diagnostic endpoint: confirms the server has a React build
-    loaded. Hit this URL directly if "/" looks wrong.
+    loaded AND whether the PostgreSQL persistence layer is actually
+    connected. Hit this URL directly when "data disappeared after a
+    redeploy" — it tells you immediately whether the app is running
+    in (silent) no-DB mode vs DB-connected, and surfaces live row
+    counts for the key persistence tables so you can tell apart
+    "DB not connected" from "DB connected but empty (real data loss
+    upstream)".
     """
+    db: dict = {
+        "configured": bool(DATABASE_URL),
+        "connected": _db_pool is not None,
+        "tables": {},
+        "error": None,
+    }
+    if _db_pool is not None:
+        try:
+            async with _db_pool.acquire() as conn:
+                for tbl in (
+                    "user_fb_tokens",
+                    "user_settings",
+                    "line_channels",
+                    "line_channel_grants",
+                    "campaign_line_push_configs",
+                    "subscriptions",
+                    "campaign_nicknames",
+                ):
+                    try:
+                        db["tables"][tbl] = int(
+                            await conn.fetchval(f"SELECT COUNT(*) FROM {tbl}")
+                        )
+                    except Exception as exc:  # table missing / perm error
+                        db["tables"][tbl] = f"err: {exc}"
+        except Exception as exc:
+            db["error"] = str(exc)
     return {
         "react_index_present": _REACT_BUILD_PRESENT,
         "react_assets_present": _REACT_ASSETS_PRESENT,
         "dist_dir": str(DIST_DIR),
+        "db": db,
     }
 
 
