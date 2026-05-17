@@ -1,4 +1,4 @@
-import { ApiError, api } from "@/api/client";
+import { ApiError, api, setApiUserId } from "@/api/client";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
@@ -142,6 +142,14 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
         const id = result.id ?? "";
         const pictureUrl = result.pictureUrl;
 
+        // Register the user id with the api client BEFORE flipping
+        // status → auth, so the first wave of data queries (fired by
+        // resetQueries below) already carry the x-fb-user-id header
+        // and resolve THIS user's token instead of racing the global
+        // _runtime_token. This is the actual fix for the PWA
+        // first-login empty-data bug.
+        setApiUserId(id);
+
         setUser({ id, name, pictureUrl });
         setStatus("auth");
         setError(null);
@@ -154,6 +162,7 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
         queryClient.resetQueries();
       } catch (err) {
         localStorage.removeItem("meta_dash_fb_token");
+        setApiUserId(null);
         const msg = err instanceof ApiError ? err.detail : (err as Error).message;
         setError(msg);
         setStatus("unauth");
@@ -224,6 +233,7 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
       /* ignore */
     }
     localStorage.removeItem("meta_dash_fb_token");
+    setApiUserId(null);
     setUser(null);
     setStatus("unauth");
   }, []);
