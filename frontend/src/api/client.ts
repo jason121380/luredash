@@ -133,6 +133,20 @@ export class ApiError extends Error {
 
 let refreshPromise: Promise<void> | null = null;
 
+// Current logged-in FB user id, set by FbAuthProvider on auth and
+// cleared on logout. Injected as the `x-fb-user-id` header on EVERY
+// request so the backend's per-user-token middleware can resolve the
+// caller's own FB token deterministically — instead of falling back
+// to the shared global `_runtime_token`, which races across users /
+// PWA cold-start / redeploy and was the root cause of the
+// "PWA 第一次登入資料空白" bug. Header (not query param) so it
+// applies uniformly to all ~50 endpoints without touching call sites.
+let _apiFbUserId: string | null = null;
+
+export function setApiUserId(id: string | null): void {
+  _apiFbUserId = id && id.trim() ? id.trim() : null;
+}
+
 function refreshBackendToken(): Promise<void> {
   if (refreshPromise) return refreshPromise;
   refreshPromise = new Promise<void>((resolve, reject) => {
@@ -243,11 +257,19 @@ async function request<T>(
       : undefined;
   const signal = composeSignals(options?.signal, timeoutSignal);
 
+  const headers: Record<string, string> = {};
+  if (options?.body) headers["Content-Type"] = "application/json";
+  // Always advertise the caller's FB user id so the backend resolves
+  // the right per-user token (Phase A). Endpoints that also take
+  // fb_user_id as an explicit query/path param still work — the
+  // middleware prefers the query param, header is the fallback.
+  if (_apiFbUserId) headers["x-fb-user-id"] = _apiFbUserId;
+
   let response: Response;
   try {
     response = await fetch(url, {
       method,
-      headers: options?.body ? { "Content-Type": "application/json" } : undefined,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
       body: options?.body ? JSON.stringify(options.body) : undefined,
       signal,
     });
