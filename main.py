@@ -45,6 +45,12 @@ _runtime_token: Optional[str] = None
 # the `_current_fb_user_id` contextvar, so user A doesn't see user B's
 # BMs / ad accounts (the "multi-tenant FB data isolation" goal).
 _user_token_cache: dict[str, str] = {}
+
+# Captured exception from DB initialisation (if any). Set in the
+# lifespan startup try/except so `/api/_status` can surface it
+# without operators needing to dig through Zeabur logs to find the
+# "[startup] DB: FAILED" line.
+_db_startup_error: Optional[str] = None
 import contextvars
 
 # Per-request context for "which FB user is currently making this
@@ -759,8 +765,24 @@ async def lifespan(app: FastAPI):
                     print(f"[startup] DB exact: {tbl} = {n} rows", flush=True)
             print("[startup] DB: OK (nicknames + settings + LINE push + subscriptions tables ready)", flush=True)
         except Exception as exc:
-            _db_pool = None
-            print(f"[startup] DB: FAILED ({exc})", flush=True)
+            # IMPORTANT: do NOT close the pool on migration failure.
+            # The pool itself is healthy (asyncpg.create_pool succeeded
+            # above); only the DDL block crashed — likely on a single
+            # new ALTER / CREATE INDEX that conflicts with existing
+            # data. Killing _db_pool here would take EVERY feature
+            # offline (the「資料都不見了」symptom). Instead, capture
+            # the error so /api/_status can surface it, log loudly,
+            # and let the pool stay open so existing tables continue
+            # to read/write. New features that depend on the failed
+            # migration will 500 individually — much better than total
+            # silence across the entire product.
+            global _db_startup_error
+            _db_startup_error = str(exc)
+            print(
+                f"[startup] DB: MIGRATION FAILED ({exc}) — pool kept open, "
+                "endpoints relying on the failed schema change will 500 individually",
+                flush=True,
+            )
     else:
         print("[startup] DB: SKIPPED (DATABASE_URL not set)", flush=True)
 
@@ -1772,6 +1794,10 @@ async def app_status():
         "configured": bool(DATABASE_URL),
         "connected": _db_pool is not None,
         "tables": {},
+        # Surface a startup migration / pool failure so operators can
+        # see WHY the app is in no-DB mode (or running with a partially
+        # applied schema) without digging through Zeabur startup logs.
+        "startup_error": _db_startup_error,
         "error": None,
     }
     if _db_pool is not None:
