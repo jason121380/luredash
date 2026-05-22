@@ -23,6 +23,7 @@ export function EngineeringView() {
       <Topbar title="工程模式" />
       <div className="flex flex-col gap-4 p-4 md:p-6">
         <IdentityPanel />
+        <MemoryPanel />
         <FbUsagePanel />
         <div className="grid gap-4 md:grid-cols-2">
           <ReactQueryPanel />
@@ -96,6 +97,63 @@ function Card({
         {action}
       </header>
       {children}
+    </section>
+  );
+}
+
+// ── Server memory ────────────────────────────────────────────
+//
+// Process RSS vs host total. Pulled from /proc/self/status and
+// /proc/meminfo on the backend; the panel here is a thin reactive
+// strip matching the design: large number + percent + progress bar
+// + a caption explaining the source. 10s refetch so it tracks live
+// during AI 幕僚 / dashboard fan-out spikes.
+
+function MemoryPanel() {
+  const query = useQuery({
+    queryKey: ["engineering-memory"],
+    queryFn: () => api.engineering.memory(),
+    refetchInterval: 10_000,
+    staleTime: 0,
+  });
+  const data = query.data;
+  const rss = data?.rss_mb ?? null;
+  const total = data?.total_mb ?? null;
+  const pct = data?.percent ?? null;
+  const source = data?.source ?? "unavailable";
+
+  const fmt = (v: number | null): string =>
+    v === null ? "—" : `${v.toLocaleString("zh-TW")} MB`;
+  const fmtPct = (v: number | null): string => (v === null ? "—" : `${v.toFixed(1)}%`);
+  // Cap visual bar at 100% even if the backend somehow reports > 100.
+  const barWidth = pct === null ? 0 : Math.min(100, Math.max(0, pct));
+  // Colour the bar by pressure: green-ish under 50, orange 50-80, red >80.
+  const barTone =
+    pct === null ? "bg-gray-200" : pct >= 80 ? "bg-red" : pct >= 50 ? "bg-orange" : "bg-indigo-400";
+
+  return (
+    <section className="rounded-2xl border border-border bg-white p-4 md:p-5">
+      <div className="text-[13px] font-semibold text-gray-500">伺服器記憶體</div>
+      <div className="mt-1 flex flex-wrap items-baseline justify-between gap-2">
+        <div className="text-[22px] font-bold tabular-nums text-ink md:text-[24px]">
+          {fmt(rss)} <span className="text-gray-300">/</span> {fmt(total)}
+        </div>
+        <div className="text-[13px] font-semibold tabular-nums text-gray-500">{fmtPct(pct)}</div>
+      </div>
+      <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-bg">
+        <div
+          className={cn("h-full rounded-full transition-all duration-500", barTone)}
+          style={{ width: `${barWidth}%` }}
+        />
+      </div>
+      <div className="mt-2 text-[11px] text-gray-300">
+        來源:{source === "proc" ? "主機" : "無法取得(非 Linux 環境)"}
+        {rss !== null && (
+          <>
+            {"  ·  "}本服務 (RSS): {fmt(rss)}
+          </>
+        )}
+      </div>
     </section>
   );
 }
