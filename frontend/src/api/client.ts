@@ -567,6 +567,16 @@ export const api = {
         >;
         peak_regain_minutes: number;
       }>("GET", "/api/fb-usage"),
+    /** Process RSS + host total memory in MB for the 工程模式
+     *  memory strip. `source: "unavailable"` when /proc is absent
+     *  (non-Linux dev box). */
+    memory: () =>
+      request<{
+        rss_mb: number | null;
+        total_mb: number | null;
+        percent: number | null;
+        source: "proc" | "unavailable";
+      }>("GET", "/api/engineering/memory"),
   },
 
   nicknames: {

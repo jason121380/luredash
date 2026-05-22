@@ -1828,6 +1828,48 @@ async def app_status():
     }
 
 
+def _read_proc_kv(path: str, key: str) -> Optional[int]:
+    """Pull a single `Key: NNN kB` value out of /proc/<x>/status or
+    /proc/meminfo. Returns the integer KB value, or None on Linux-
+    only file missing (macOS dev / Windows). Used by /api/engineering/
+    memory so we don't drag in psutil as a runtime dep."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith(key + ":"):
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        return int(parts[1])  # kB
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    return None
+
+
+@app.get("/api/engineering/memory")
+async def get_engineering_memory():
+    """Process RSS + host total memory for the 工程模式 panel.
+
+    Returns MB-rounded values plus a percent so the frontend can
+    render the「81.4 MB / 1,907.9 MB · 4.3%」 strip without doing
+    its own math. Zeabur runs Linux, so /proc/* is available; on
+    other platforms we degrade gracefully (Nones)."""
+    rss_kb = _read_proc_kv("/proc/self/status", "VmRSS")
+    total_kb = _read_proc_kv("/proc/meminfo", "MemTotal")
+    rss_mb = round(rss_kb / 1024, 1) if rss_kb is not None else None
+    total_mb = round(total_kb / 1024, 1) if total_kb is not None else None
+    percent = (
+        round((rss_kb / total_kb) * 100, 1)
+        if rss_kb is not None and total_kb and total_kb > 0
+        else None
+    )
+    return {
+        "rss_mb": rss_mb,
+        "total_mb": total_mb,
+        "percent": percent,
+        "source": "proc" if rss_kb is not None else "unavailable",
+    }
+
+
 @app.get("/favicon.png")
 async def favicon_png():
     if _FAVICON_PNG is None:
