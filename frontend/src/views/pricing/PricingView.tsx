@@ -55,9 +55,26 @@ export function PricingView() {
     setBusyTier(tier);
     try {
       const resp = await api.billing.checkout({ tier, fbUserId });
+      // Defence-in-depth: only forward to Polar's checkout host.
+      let parsed: URL | null = null;
+      try {
+        parsed = new URL(resp.url);
+      } catch {
+        parsed = null;
+      }
+      const host = parsed?.host ?? "";
+      const allowed = host === "polar.sh" || host.endsWith(".polar.sh");
+      if (!allowed) {
+        if (import.meta.env.DEV) {
+          console.error("[pricing] unexpected checkout host", host);
+        }
+        toast("無法建立訂閱,請稍後再試", "error");
+        setBusyTier(null);
+        return;
+      }
       window.location.assign(resp.url);
     } catch (err) {
-      console.error("[pricing] checkout failed", err);
+      if (import.meta.env.DEV) console.error("[pricing] checkout failed", err);
       toast("無法建立訂閱,請稍後再試", "error");
       setBusyTier(null);
     }
