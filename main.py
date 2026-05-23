@@ -944,8 +944,8 @@ else:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "x-fb-user-id"],
 )
 print(f"[startup] CORS origins: {_CORS_ORIGINS}", flush=True)
 
@@ -978,9 +978,10 @@ async def _security_headers(request: Request, call_next):
             "media-src 'self' https: blob:; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com data:; "
-            "script-src 'self' https://connect.facebook.net 'unsafe-inline'; "
+            "script-src 'self' https://connect.facebook.net; "
             "connect-src 'self' https://graph.facebook.com https://*.facebook.com "
             "https://generativelanguage.googleapis.com; "
+            "frame-src 'none'; "
             "frame-ancestors 'none'; "
             "base-uri 'self'",
         )

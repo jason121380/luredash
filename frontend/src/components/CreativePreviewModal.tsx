@@ -169,7 +169,9 @@ async function downloadAsset(url: string, filename: string): Promise<void> {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
   } catch (err) {
-    console.error("[creative] download failed, opening proxy URL", err);
+    if (import.meta.env.DEV) {
+      console.error("[creative] download failed, opening proxy URL", err);
+    }
     // Last-resort: navigate the user to the proxy URL directly. The
     // backend sets Content-Disposition: attachment so even iOS
     // Safari treats it as a download instead of inline playback.

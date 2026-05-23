@@ -54,6 +54,25 @@ export function BillingView() {
     setOpeningPortal(true);
     try {
       const resp = await api.billing.portal(user.id);
+      // Defence-in-depth: the URL comes from our backend (Polar API
+      // proxy), but if anything upstream is compromised we don't want
+      // to forward the user to an arbitrary host.
+      let parsed: URL | null = null;
+      try {
+        parsed = new URL(resp.url);
+      } catch {
+        parsed = null;
+      }
+      const host = parsed?.host ?? "";
+      const allowed = host === "polar.sh" || host.endsWith(".polar.sh");
+      if (!allowed) {
+        if (import.meta.env.DEV) {
+          console.error("[billing] unexpected portal host", host);
+        }
+        if (popup && !popup.closed) popup.close();
+        toast("無法開啟管理頁,請稍後再試", "error");
+        return;
+      }
       if (popup && !popup.closed) {
         popup.location.replace(resp.url);
       } else {
@@ -61,7 +80,7 @@ export function BillingView() {
         window.location.assign(resp.url);
       }
     } catch (err) {
-      console.error("[billing] portal failed", err);
+      if (import.meta.env.DEV) console.error("[billing] portal failed", err);
       if (popup && !popup.closed) popup.close();
       toast("無法開啟管理頁,請稍後再試", "error");
     } finally {
