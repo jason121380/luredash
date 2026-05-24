@@ -224,6 +224,7 @@ export function SecurityMonitorView() {
                 <SecurityDayList
                   days={visibleDays}
                   creatorByCampaignId={creatorByCampaignId}
+                  insightsPending={overview.insightsPending}
                   defaultExpanded={tab === "pending"}
                   activitiesSince={activitiesBounds.since}
                   activitiesUntil={activitiesBounds.until}
@@ -302,6 +303,7 @@ function TabButton({
 interface SecurityDayListProps {
   days: ReturnType<typeof buildSecurityDays>;
   creatorByCampaignId: Map<string, string>;
+  insightsPending: boolean;
   defaultExpanded: boolean;
   activitiesSince: number;
   activitiesUntil: number;
@@ -310,6 +312,7 @@ interface SecurityDayListProps {
 function SecurityDayList({
   days,
   creatorByCampaignId,
+  insightsPending,
   defaultExpanded,
   activitiesSince,
   activitiesUntil,
@@ -328,6 +331,7 @@ function SecurityDayList({
                 key={row.campaign.id}
                 row={row}
                 creator={creatorByCampaignId.get(row.campaign.id)}
+                insightsPending={insightsPending}
                 defaultExpanded={defaultExpanded}
                 activitiesSince={activitiesSince}
                 activitiesUntil={activitiesUntil}

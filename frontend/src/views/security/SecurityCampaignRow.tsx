@@ -59,6 +59,12 @@ export interface SecurityCampaignRowProps {
    * creator event is missing from the fetched window (e.g. campaign
    * was created before the date range). */
   creator?: string;
+  /** True while the full-phase overview query (with insights) is still
+   * loading. Drives the spend label: while pending, show "—"; once
+   * settled, fall back to "$0" when the campaign genuinely has no
+   * spend data (FB omits the insights envelope for zero-spend
+   * campaigns). */
+  insightsPending: boolean;
   /** Initial value of the expanded state. Set to true for the 待查看
    * tab so the editor's history is visible without an extra click. */
   defaultExpanded?: boolean;
@@ -73,6 +79,7 @@ export interface SecurityCampaignRowProps {
 export function SecurityCampaignRow({
   row,
   creator,
+  insightsPending,
   defaultExpanded,
   activitiesSince,
   activitiesUntil,
@@ -103,16 +110,15 @@ export function SecurityCampaignRow({
   const dailyBudgetIsAggregate = dailyBudgetCents !== null && !campaign.daily_budget;
 
   // Spend so far in the date-range window. FB insights return spend
-  // as a string IN DOLLARS. When the campaign object has an `insights`
-  // envelope (full-phase query resolved) but no spend data, the
-  // campaign genuinely hasn't spent anything yet — render $0 instead
-  // of "—" so the operator can distinguish "still loading" from "real
-  // zero". `campaign.insights === undefined` means full-phase is
-  // still pending.
-  const insightsLoaded = campaign.insights !== undefined;
+  // as a string IN DOLLARS. The full-phase overview query may omit
+  // the insights envelope entirely for campaigns with no spend yet,
+  // so we can't tell "still loading" from "real zero" just by looking
+  // at the campaign object. Use the hook-level `insightsPending` flag
+  // (true until the full query resolves for the active account set)
+  // to render "—" while loading; once settled, show "$X" or "$0".
   const spendRaw = campaign.insights?.data?.[0]?.spend;
   const spendDollars = spendRaw !== undefined ? Number(spendRaw) : Number.NaN;
-  const spendLabel = !insightsLoaded
+  const spendLabel = insightsPending
     ? "—"
     : Number.isFinite(spendDollars)
       ? `$${fM(spendDollars)}`
