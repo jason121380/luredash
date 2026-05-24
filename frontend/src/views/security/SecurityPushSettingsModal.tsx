@@ -213,7 +213,7 @@ function ConfigForm({
   const [filters, setFilters] = useState<Set<SecurityAnomalyTag>>(
     new Set(initial?.anomaly_filters ?? ["deep_night", "weekend", "high_budget"]),
   );
-  const [pollMinutes, setPollMinutes] = useState(initial?.poll_interval_minutes ?? 10);
+  const [pollMinutes, setPollMinutes] = useState(initial?.poll_interval_minutes ?? 30);
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [error, setError] = useState<string | null>(null);
 
