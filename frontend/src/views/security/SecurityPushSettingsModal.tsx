@@ -10,6 +10,7 @@ import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
 import { toast } from "@/components/Toast";
 import { cn } from "@/lib/cn";
+import { useAccountsStore } from "@/stores/accountsStore";
 import { useEffect, useMemo, useState } from "react";
 
 /**
@@ -188,6 +189,7 @@ function ConfigForm({
   const channelsQuery = useLineChannels();
   const groupsQuery = useLineGroups();
   const save = useSaveSecurityPushConfig();
+  const selectedAccountIds = useAccountsStore((s) => s.selectedIds);
 
   const channels = channelsQuery.data ?? [];
   const groups = useMemo(
@@ -345,7 +347,16 @@ function ConfigForm({
         </div>
       </Field>
 
-      <p className="text-[11px] text-gray-500">後端每 60 分鐘檢查一次新建立的活動(系統固定值)</p>
+      <div className="rounded-md border border-border bg-bg/40 px-3 py-2 text-[11px] leading-relaxed text-gray-500">
+        <div>
+          後端每 60 分鐘檢查一次新建立的活動(系統固定值)
+        </div>
+        <div className="mt-1">
+          掃描範圍:你在「廣告帳號設定」中啟用的{" "}
+          <span className="font-semibold text-ink">{selectedAccountIds.length}</span> 個帳戶
+          {selectedAccountIds.length === 0 && "(請先去啟用帳戶,否則無活動可掃)"}
+        </div>
+      </div>
 
       <label className="flex cursor-pointer items-center gap-2 text-[13px]">
         <input
