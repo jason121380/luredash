@@ -63,6 +63,7 @@ export interface FbCampaign extends FbBaseEntity {
  * field is a JSON-encoded string whose shape FB does not document;
  * the security view treats it as opaque text. */
 export interface FbActivity {
+  actor_id?: string;
   actor_name?: string;
   event_time?: string;
   event_type?: string;

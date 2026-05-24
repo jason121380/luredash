@@ -1,10 +1,11 @@
 import { useAccountActivities } from "@/api/hooks/useAccountActivities";
+import { useAccountAssignedUsers } from "@/api/hooks/useAccountAssignedUsers";
 import { Badge } from "@/components/Badge";
 import { cn } from "@/lib/cn";
 import { fM } from "@/lib/format";
 import type { FbActivity } from "@/types/fb";
 import { useMemo, useState } from "react";
-import { type SecurityAnomaly, anomalyLabel } from "./securityData";
+import { type SecurityAnomaly, anomalyLabel, summariseExtraData } from "./securityData";
 import type { SecurityRow } from "./securityData";
 
 /**
@@ -47,6 +48,7 @@ const ANOMALY_CLASS: Record<SecurityAnomaly, string> = {
   deep_night: "bg-orange-bg text-orange",
   weekend: "bg-orange-bg text-orange",
   burst: "bg-red-100 text-red-700",
+  high_budget: "bg-red-100 text-red-700",
 };
 
 export interface SecurityCampaignRowProps {
@@ -74,6 +76,7 @@ export function SecurityCampaignRow({
     activitiesUntil,
     expanded,
   );
+  const assignedUsersQuery = useAccountAssignedUsers(accountId, expanded);
 
   const objLabel = campaign.objective
     ? (OBJECTIVE_LABELS[campaign.objective] ?? campaign.objective)
@@ -143,7 +146,11 @@ export function SecurityCampaignRow({
           ) : (
             <ul className="flex flex-col gap-1.5">
               {matchedActivities.map((a, i) => (
-                <ActivityLine key={`${a.event_time ?? ""}-${i}`} activity={a} />
+                <ActivityLine
+                  key={`${a.event_time ?? ""}-${i}`}
+                  activity={a}
+                  assignedUsers={assignedUsersQuery.data}
+                />
               ))}
             </ul>
           )}
@@ -153,7 +160,14 @@ export function SecurityCampaignRow({
   );
 }
 
-function ActivityLine({ activity }: { activity: FbActivity }) {
+interface ActivityLineProps {
+  activity: FbActivity;
+  /** Set of FB user ids permitted on this account. `undefined` while
+   * loading — don't flag until we know the roster. */
+  assignedUsers: Set<string> | undefined;
+}
+
+function ActivityLine({ activity, assignedUsers }: ActivityLineProps) {
   const when = activity.event_time ? new Date(activity.event_time) : null;
   const whenLabel = when
     ? `${String(when.getMonth() + 1).padStart(2, "0")}/${String(when.getDate()).padStart(2, "0")} ${String(
@@ -162,33 +176,31 @@ function ActivityLine({ activity }: { activity: FbActivity }) {
     : "—";
   const what = activity.translated_event_type ?? activity.event_type ?? "—";
   const who = activity.actor_name ?? "—";
+  // Only flag when we have a non-empty roster AND the actor isn't on
+  // it. Empty roster (FB returned 0 or the call errored) means we
+  // don't know who's authorised — don't show false positives.
+  const isExternalActor =
+    assignedUsers !== undefined &&
+    assignedUsers.size > 0 &&
+    !!activity.actor_id &&
+    !assignedUsers.has(activity.actor_id);
   return (
     <li className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px] leading-relaxed">
       <span className="text-gray-500">{whenLabel}</span>
       <span className="font-medium text-ink">{what}</span>
       <span className="text-gray-500">· {who}</span>
+      {isExternalActor && (
+        <span className="rounded-full bg-red-100 px-1.5 py-[1px] text-[10px] font-semibold text-red-700">
+          非 BM 成員
+        </span>
+      )}
       {activity.extra_data && <ActivityExtra raw={activity.extra_data} />}
     </li>
   );
 }
 
 function ActivityExtra({ raw }: { raw: string }) {
-  const parsed = useMemo(() => {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return null;
-    }
-  }, [raw]);
-  if (!parsed || typeof parsed !== "object") return null;
-  const entries = Object.entries(parsed as Record<string, unknown>).slice(0, 4);
-  if (entries.length === 0) return null;
-  return (
-    <span className="text-gray-500">
-      ·{" "}
-      {entries
-        .map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : String(v)}`)
-        .join(" / ")}
-    </span>
-  );
+  const summary = useMemo(() => summariseExtraData(raw), [raw]);
+  if (!summary) return null;
+  return <span className="text-gray-500">· {summary}</span>;
 }

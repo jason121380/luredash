@@ -3715,13 +3715,47 @@ async def get_account_activities(
             "since": str(since),
             "until": str(until),
             "fields": (
-                "actor_name,event_time,event_type,extra_data,"
+                "actor_id,actor_name,event_time,event_type,extra_data,"
                 "object_id,object_name,object_type,translated_event_type"
             ),
             "limit": "500",
         },
     )
     return {"data": data}
+
+
+@app.get("/api/accounts/{account_id}/assigned-users")
+async def get_account_assigned_users(account_id: str):
+    """Return the FB user ids with permission on this ad account.
+
+    Powers the 安全監控 view's「外部編輯者」 warning — any actor in the
+    Activity Log whose `actor_id` is NOT in this set is flagged as a
+    potential out-of-band editor (compromised account / unrevoked
+    former employee / non-BM user with token).
+
+    Tries `assigned_users` (BM-managed accounts) first; if that
+    endpoint errors (account isn't business-managed, or permission
+    issue), falls back to the legacy `users` edge so we still get the
+    set on personal accounts."""
+    try:
+        rows = await fb_get_paginated(
+            f"{account_id}/assigned_users",
+            {"fields": "id", "limit": "500"},
+        )
+    except HTTPException:
+        try:
+            rows = await fb_get_paginated(
+                f"{account_id}/users",
+                {"fields": "id", "limit": "500"},
+            )
+        except HTTPException:
+            rows = []
+    ids = []
+    for r in rows:
+        uid = r.get("id") if isinstance(r, dict) else None
+        if uid:
+            ids.append(str(uid))
+    return {"data": ids}
 
 
 @app.post("/api/campaigns/{campaign_id}/status")
