@@ -102,6 +102,13 @@ export function SecurityCampaignRow({
             <span className="truncate text-[14px] font-semibold text-ink" title={campaign.name}>
               {campaign.name}
             </span>
+            {/* Baseline reason badge — every campaign in this view is
+                here because it was newly created in the chosen window.
+                Showing it explicitly makes "no anomaly badges" read as
+                "normal new creation" rather than "missing label". */}
+            <span className="rounded-full bg-gray-100 px-2 py-[2px] text-[10px] font-semibold text-gray-600">
+              新建立
+            </span>
             {row.anomalies.map((a) => (
               <span
                 key={a}
@@ -133,6 +140,11 @@ export function SecurityCampaignRow({
 
       {expanded && (
         <div className="border-t border-border bg-bg/40 px-3 py-2 md:px-3.5">
+          <RosterStatus
+            isLoading={assignedUsersQuery.isLoading}
+            isError={assignedUsersQuery.isError}
+            size={assignedUsersQuery.data?.size ?? 0}
+          />
           {!accountId ? (
             <p className="text-[11px] text-gray-500">無帳戶資訊,無法載入編輯紀錄</p>
           ) : activitiesQuery.isLoading ? (
@@ -197,6 +209,29 @@ function ActivityLine({ activity, assignedUsers }: ActivityLineProps) {
       {activity.extra_data && <ActivityExtra raw={activity.extra_data} />}
     </li>
   );
+}
+
+function RosterStatus({
+  isLoading,
+  isError,
+  size,
+}: {
+  isLoading: boolean;
+  isError: boolean;
+  size: number;
+}) {
+  if (isLoading) {
+    return <p className="mb-1.5 text-[10px] text-gray-500">載入 BM 名單...</p>;
+  }
+  if (isError || size === 0) {
+    return (
+      <p className="mb-1.5 text-[10px] text-orange">
+        BM 名單載入不到 — 跳過「非 BM 成員」檢查(可能是帳戶非 BM-managed 或 token 缺
+        business_management 權限)
+      </p>
+    );
+  }
+  return <p className="mb-1.5 text-[10px] text-gray-500">BM 名單:{size} 人 · 比對中</p>;
 }
 
 function ActivityExtra({ raw }: { raw: string }) {
