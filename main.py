@@ -1854,6 +1854,7 @@ async def app_status():
                     "line_channels",
                     "line_channel_grants",
                     "campaign_line_push_configs",
+                    "security_push_configs",
                     "subscriptions",
                     "campaign_nicknames",
                 ):
