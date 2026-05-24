@@ -347,9 +347,12 @@ function ConfigForm({
         </div>
       </Field>
 
-      <div className="rounded-md border border-border bg-bg/40 px-3 py-2 text-[11px] leading-relaxed text-gray-500">
-        <div>
-          後端每 60 分鐘檢查一次新建立的活動(系統固定值)
+      <div className="rounded-md border border-orange-border bg-orange-bg/30 px-3 py-2 text-[11px] leading-relaxed text-gray-500">
+        <div className="font-semibold text-orange">
+          ⚠️ 自動推播暫停中 — FB rate limit 恢復後再開啟
+        </div>
+        <div className="mt-1">
+          設定會儲存,但後端排程器不會自動 fire。可使用「測試」按鈕手動確認連線。
         </div>
         <div className="mt-1">
           掃描範圍:你在「廣告帳號設定」中啟用的{" "}

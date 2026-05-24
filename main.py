@@ -7446,6 +7446,22 @@ async def _scheduler_loop() -> None:
     Any exception inside the tick is caught and logged so the loop
     itself never dies. CancelledError from shutdown propagates out.
     """
+    # Gate the security-push tick on an env flag so it can be
+    # disabled without a redeploy when FB rate-limits the account
+    # (one mis-tuned config used to fire 960 calls/hr per workspace,
+    # which locked /me and blocked login until the limit cleared).
+    # Set SECURITY_PUSH_ENABLED=1 / true / yes to re-enable.
+    sec_push_on = (os.getenv("SECURITY_PUSH_ENABLED") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    print(
+        f"[startup] security-push tick: {'ENABLED' if sec_push_on else 'DISABLED'}"
+        " (set SECURITY_PUSH_ENABLED=1 to enable)",
+        flush=True,
+    )
     try:
         while True:
             try:
@@ -7454,12 +7470,13 @@ async def _scheduler_loop() -> None:
                 raise
             except Exception as e:
                 print(f"[scheduler] tick error: {e}", flush=True)
-            try:
-                await _security_push_tick()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                print(f"[security-push] tick error: {e}", flush=True)
+            if sec_push_on:
+                try:
+                    await _security_push_tick()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    print(f"[security-push] tick error: {e}", flush=True)
             await asyncio.sleep(SCHEDULER_TICK_SECONDS)
     except asyncio.CancelledError:
         print("[scheduler] stopped", flush=True)
