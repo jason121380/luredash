@@ -75,6 +75,21 @@ export function SecurityMonitorView() {
   );
   const overview = useMultiAccountOverview(visibleAll, fetchDate, { includeArchived: true });
 
+  // SECOND overview query at the user's chosen date — only used to
+  // surface spend numbers that match the date-picker label (儀表板
+  // 也是這樣)。campaigns from this query may be a subset (FB throttle
+  // / fallback); we look up insights by id and fall back to "$0" /
+  // "—" when missing.
+  const spendOverview = useMultiAccountOverview(visibleAll, date, { includeArchived: true });
+  const spendByCampaignId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const c of spendOverview.campaigns) {
+      const s = c.insights?.data?.[0]?.spend;
+      if (s !== undefined) map.set(c.id, s);
+    }
+    return map;
+  }, [spendOverview.campaigns]);
+
   const scopedCampaigns = useMemo(() => {
     if (selectedAcctId === null) return overview.campaigns;
     return overview.campaigns.filter((c) => c._accountId === selectedAcctId);
@@ -260,7 +275,8 @@ export function SecurityMonitorView() {
                 <SecurityDayList
                   days={visibleDays}
                   creatorByCampaignId={creatorByCampaignId}
-                  insightsPending={overview.insightsPending}
+                  spendByCampaignId={spendByCampaignId}
+                  insightsPending={spendOverview.insightsPending}
                   defaultExpanded={tab === "pending"}
                   activitiesSince={activitiesBounds.since}
                   activitiesUntil={activitiesBounds.until}
@@ -339,6 +355,7 @@ function TabButton({
 interface SecurityDayListProps {
   days: ReturnType<typeof buildSecurityDays>;
   creatorByCampaignId: Map<string, string>;
+  spendByCampaignId: Map<string, string>;
   insightsPending: boolean;
   defaultExpanded: boolean;
   activitiesSince: number;
@@ -348,6 +365,7 @@ interface SecurityDayListProps {
 function SecurityDayList({
   days,
   creatorByCampaignId,
+  spendByCampaignId,
   insightsPending,
   defaultExpanded,
   activitiesSince,
@@ -367,6 +385,7 @@ function SecurityDayList({
                 key={row.campaign.id}
                 row={row}
                 creator={creatorByCampaignId.get(row.campaign.id)}
+                spend={spendByCampaignId.get(row.campaign.id)}
                 insightsPending={insightsPending}
                 defaultExpanded={defaultExpanded}
                 activitiesSince={activitiesSince}

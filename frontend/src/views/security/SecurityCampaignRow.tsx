@@ -65,6 +65,11 @@ export interface SecurityCampaignRowProps {
    * creator event is missing from the fetched window (e.g. campaign
    * was created before the date range). */
   creator?: string;
+  /** Spend for this campaign within the user-selected date range
+   * (raw FB string in dollars). Undefined when the spend query
+   * hasn't surfaced this campaign (e.g. the campaign has no spend in
+   * the window, or the second-overview query is still loading). */
+  spend?: string;
   /** True while the full-phase overview query (with insights) is still
    * loading. Drives the spend label: while pending, show "—"; once
    * settled, fall back to "$0" when the campaign genuinely has no
@@ -85,6 +90,7 @@ export interface SecurityCampaignRowProps {
 export function SecurityCampaignRow({
   row,
   creator,
+  spend,
   insightsPending,
   defaultExpanded,
   activitiesSince,
@@ -116,15 +122,14 @@ export function SecurityCampaignRow({
   const dailyBudget = effectiveDailyBudget(campaign);
   const dailyBudgetIsAggregate = dailyBudget !== null && !campaign.daily_budget;
 
-  // Spend so far in the date-range window. FB insights return spend
-  // as a string IN DOLLARS. The full-phase overview query may omit
-  // the insights envelope entirely for campaigns with no spend yet,
-  // so we can't tell "still loading" from "real zero" just by looking
-  // at the campaign object. Use the hook-level `insightsPending` flag
-  // (true until the full query resolves for the active account set)
-  // to render "—" while loading; once settled, show "$X" or "$0".
-  const spendRaw = campaign.insights?.data?.[0]?.spend;
-  const spendDollars = spendRaw !== undefined ? Number(spendRaw) : Number.NaN;
+  // Spend within the user-selected date range — comes from the view's
+  // SECOND overview query (date follows the topbar DatePicker) and is
+  // passed in via the `spend` prop. Three-state display:
+  //   - insightsPending → "—" (full-phase still loading)
+  //   - finite number → "$X"
+  //   - undefined / NaN after settle → "$0" (FB omits envelope for
+  //     campaigns with no spend in the window)
+  const spendDollars = spend !== undefined ? Number(spend) : Number.NaN;
   const spendLabel = insightsPending
     ? "—"
     : Number.isFinite(spendDollars)
