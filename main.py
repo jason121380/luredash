@@ -6865,7 +6865,19 @@ async def test_push_config(config_id: str, fb_user_id: Optional[str] = None):
     cfg = _config_row_to_dict(row)
     await _assert_can_modify_config_for_group(cfg["group_id"], fb_user_id)
     try:
-        flex = await _build_flex_for_config(cfg)
+        # Wrap the FB-heavy flex build in a hard timeout so we
+        # return a clear 504 instead of letting Zeabur's edge (~30s)
+        # bounce the request as a generic "HTTP 502". FB throttle
+        # recovery is the usual culprit — calls hang for 30+ s before
+        # FB itself errors. 18s gives the flex build + LINE push +
+        # logging some headroom under the 30s gateway cap.
+        try:
+            flex = await asyncio.wait_for(_build_flex_for_config(cfg), timeout=18.0)
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail="從 Facebook 拉取資料超時(很可能是 FB 限流中)。請等待 30–60 分鐘後再試。",
+            ) from None
         assert _http_client is not None
         creds = await _channel_creds_for_group(cfg["group_id"])
         if creds is None:
@@ -6897,6 +6909,10 @@ async def test_push_config(config_id: str, fb_user_id: Optional[str] = None):
                 e.friendly_message[:500],
             )
         raise HTTPException(status_code=502, detail=e.friendly_message)
+    except HTTPException:
+        # Already a properly-formed HTTP error (e.g. 504 from the
+        # wait_for above) — preserve its status + detail.
+        raise
     except Exception as e:
         async with pool.acquire() as conn:
             await conn.execute(
