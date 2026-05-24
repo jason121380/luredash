@@ -2128,19 +2128,33 @@ def _check_agent_rate_limit(uid: str) -> None:
 @app.post("/api/auth/token")
 async def set_token(payload: TokenPayload):
     global _runtime_token
-    # Temporarily set the legacy global so the /me call below has a
-    # token to use — we don't know fb_user_id yet (that's exactly
-    # what /me returns), so we can't yet route through
-    # _user_token_cache. Once /me succeeds, we promote the token to
-    # the per-user cache and the legacy global stays as the share-
-    # page fallback.
-    _runtime_token = payload.token
+    # IMPORTANT: bypass fb_get / get_token() here. Reason: the caller's
+    # `x-fb-user-id` header may still carry a stale uid from a previous
+    # session, which makes the middleware set the contextvar → get_token
+    # returns the OLD cached token from `_user_token_cache[stale_uid]`
+    # instead of the fresh one in `payload.token`. The /me verify would
+    # then hit FB with the expired token and 190 out, even though the
+    # client just minted a brand-new token via FB.login. Direct httpx
+    # call with payload.token sidesteps the cache entirely.
+    assert _http_client is not None
     try:
-        me = await fb_get("me", {"fields": "id,name,picture"})
+        resp = await _http_client.get(
+            f"{BASE_URL}/me",
+            params={"fields": "id,name,picture", "access_token": payload.token},
+            timeout=10.0,
+        )
+        if resp.status_code != 200:
+            try:
+                err_body = resp.json()
+            except Exception:
+                err_body = {"raw": resp.text[:200]}
+            raise RuntimeError(f"FB /me HTTP {resp.status_code}: {err_body}")
+        me = resp.json()
         uid = str(me.get("id") or "")
         pic = me.get("picture", {}).get("data", {}).get("url")
         # Only persist after the token verifies — avoids storing
         # garbage that would 401 every share-page viewer.
+        _runtime_token = payload.token
         await _persist_runtime_token(payload.token)
         if uid:
             _user_token_cache[uid] = payload.token
@@ -2149,15 +2163,12 @@ async def set_token(payload: TokenPayload):
             await _persist_known_user(uid)
         return {"ok": True, "name": me.get("name"), "id": me.get("id"), "pictureUrl": pic}
     except Exception as e:
-        _runtime_token = None
         # Don't leak FB error internals (URLs, app secret hints) to the
         # client — log internally, surface a categorised hint based on
         # the FB error code so the user knows what to do next.
         print(f"[auth] token verify failed: {e!r}", flush=True)
         err_text = str(e)
         if "190" in err_text or "OAuthException" in err_text or "expired" in err_text.lower():
-            # 190 = "Invalid OAuth access token" — typically expired
-            # cached token. FB.login() will mint a fresh one.
             detail = "FB token 已過期。請再次點擊登入按鈕重新授權。"
         elif "104" in err_text or "appsecret_proof" in err_text:
             detail = "FB App 設定問題,請聯絡管理員。"
