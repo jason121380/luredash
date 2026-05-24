@@ -98,6 +98,48 @@ This means the scope is **safe to request even without review** — FB's behavio
   `LINE_MOCK=1` (local dev), `SCHEDULER_TZ`.
 - Webhook public URL (Zeabur): `https://{your-zeabur-domain}/api/line/webhook` — register this on the LINE Developers Console.
 
+## 安全監控 (Security Monitor, latest: 2026-05-24)
+
+新功能,左側選單第 4 項。以「日」分組列出新建立的廣告活動,讓營運可以
+掃描有沒有可疑活動,並訂閱 LINE 推播在新異常活動出現時主動通知。
+
+### View 結構
+- 預設過去 7 天(獨立 local date,不污染 `filtersStore.date`)
+- 上方 tabs:`待查看` / `已標記安全`(team-wide,寫
+  `shared_settings.security_safe_campaigns`)
+- 卡片:狀態 / 名稱 / 新建立 baseline badge + 異常 badges(深夜創建、
+  週末創建、burst、日預算 > $2000)/ 編號 / 帳戶 / 目標 / 建立時間 /
+  建立者 / 日預算 / 已花費 / 右側「標記為沒問題」+「編輯紀錄」展開
+- 「編輯紀錄」展開:`/api/accounts/{id}/activities` 的 FB Activity Log,
+  `summariseExtraData()` 翻譯 extra_data 成人話。`待查看` tab 預設展開
+- 建立者:view 層 `useQueries` 對每帳戶 eager prefetch activities,過濾
+  `event_type.includes("create")` OR `translated_event_type.includes("建立")`,
+  按 object_id 對應 campaign.id
+
+### 異常偵測(`securityData.ts` 純函式 + Python `_evaluate_campaign_anomalies`)
+- deep_night: 建立時間 hour < 6
+- weekend: 建立日為週六/週日
+- burst: 同帳戶 2 小時內 ≥ 5 個活動(僅前端計算,Python 端不算)
+- high_budget: `effectiveDailyBudget(c) > 2000`(raw FB value,**不除 100**,
+  跟儀表板 fM() 同 scale)。CBO 模式取 campaign.daily_budget,ABO 模式
+  加總 ACTIVE 廣告組合的 daily_budget
+
+### LINE 推播 (`security_push_configs`)
+- PG 表 + B 路線(獨立設定頁,從安全監控 topbar「推播設定」按鈕開
+  Modal)+ C 路線(只在異常觸發 push)
+- `_security_push_tick` 接進現有 `_scheduler_loop`(每 60s 跑一次)
+- 每筆 config 自帶 `poll_interval_minutes`(預設 10),到期就抓擁有者
+  的 selected_accounts 裡所有 campaigns,過濾 `created_time > last_run_at`
+  + 命中 `anomaly_filters` 任一項,組裝 text 訊息推給每個 group_id
+- 5 連續失敗自動 `enabled=false`
+
+### 已知限制
+- 「非 BM 成員」自動偵測曾經做過(`/api/accounts/{id}/assigned-users` +
+  `business_users` + `assigned_users` + 舊 `users`),但 FB API 對非完全
+  BM-managed 帳戶回空集合,實務上抓不到名單。已移除。
+- LINE push 目前只發 text(plain),沒做 flex 卡片。前端 modal 也沒有
+  「測試發送」按鈕(可以後續加)。
+
 ## Layout
 
 - Left sidebar: 220px fixed, flex-column, user avatar at bottom (no border/hover/arrow, dropdown opens upward)

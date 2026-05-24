@@ -23,10 +23,11 @@ Connects to Facebook Marketing API v21.0 to manage 80+ ad accounts across multip
   - **PostgreSQL** (via `asyncpg`, `DATABASE_URL` env) — source of truth for:
     - `campaign_nicknames` (campaign_id → store, designer) — shared team-wide
     - `user_settings` (fb_user_id, key, value JSONB) — per-user: `selected_accounts`, `account_order`
-    - `shared_settings` (key, value JSONB) — team-wide: `finance_row_markups`, `finance_pinned_ids`, `finance_default_markup`, `finance_show_nicknames`. **Underscore-prefixed keys (`_fb_runtime_token`) are server-internal** and are filtered out by `GET /api/settings/shared` — never expose to the frontend.
+    - `shared_settings` (key, value JSONB) — team-wide: `finance_row_markups`, `finance_pinned_ids`, `finance_default_markup`, `finance_show_nicknames`, **`security_safe_campaigns`** (array of campaign ids the team has reviewed and marked safe — drives the 待查看 / 已標記安全 tabs in 安全監控). **Underscore-prefixed keys (`_fb_runtime_token`) are server-internal** and are filtered out by `GET /api/settings/shared` — never expose to the frontend.
     - `line_groups` (group_id PK, **group_name** (real LINE display name from /v2/bot/group/{id}/summary), label (user nickname), joined_at, left_at) — auto-upserted by the `/api/line/webhook` route on LINE `join`/`leave` events. Lifespan startup also runs a one-shot backfill for legacy rows whose `group_name` is empty.
     - `campaign_line_push_configs` (campaign ↔ group pairings: frequency, weekdays/month_day, hour/minute, date_range, enabled, next_run_at, fail_count, **report_fields TEXT[]**, **include_report_button BOOLEAN DEFAULT FALSE**, **include_recommendations BOOLEAN DEFAULT FALSE**) — partial index on `(next_run_at) WHERE enabled` for the scheduler tick. The two `include_*` toggles default FALSE so existing rows opt-in rather than retroactively gaining a button / advice block.
     - `line_push_logs` (per-push audit rows, success/error/preview)
+    - `security_push_configs` (event-driven LINE alert subscriptions for 安全監控: name, owner_fb_user_id, channel_id, group_ids[], account_ids[], anomaly_filters[] (deep_night/weekend/high_budget/burst), poll_interval_minutes, enabled, last_run_at, next_run_at, fail_count) — partial index on `(next_run_at) WHERE enabled`. The scheduler tick (`_security_push_tick`) piggybacks on `_scheduler_loop`; on each tick it fetches campaigns created since `last_run_at`, evaluates anomalies, and pushes a plain-text message via `line_client.line_push` to every group in `group_ids`. 5 consecutive failures auto-flip `enabled=false`.
   - **Browser localStorage** — ephemeral UI state only:
     - `fb_active_accounts` (dashboard current selection — intentionally NOT synced)
     - `filter_active_only`, date-picker preferences, sidebar collapse state
@@ -88,7 +89,7 @@ uvicorn main:app --port 8001 --reload
 ```
 [Left Sidebar 220px - fixed]
   Logo: LURE META
-  Nav: 儀表板 | 數據分析 | 關注名單 | 財務專區 | 快速上架 | 設定
+  Nav: 儀表板 | 數據分析 | 警示列表 | 安全監控 | AI 幕僚 | 費用中心 | 歷史花費 | 店家花費 | 廣告帳號設定 | LINE 推播設定
   Bottom: User avatar (no border, no hover, no arrow — dropdown opens upward)
 
 [Main Content]
@@ -109,6 +110,23 @@ uvicorn main:app --port 8001 --reload
   dash-acct-item style  私訊成本過高 | CPC過高 | 頻次過高
   全部帳戶 + per-account  sortable headers, keyword filters
 ```
+
+### 安全監控 (Security Monitor)
+```
+[Account List 160px] | [Topbar: date picker (預設 last_7d) + 推播設定 button]
+                       [Tabs: 待查看 (N) | 已標記安全 (N)]
+                       [Per-day groups]
+                         [Campaign card: status / 新建立 + anomaly badges
+                          編號 / 帳戶 / 目標 / 時間 / 建立者 / 日預算 / 已花費
+                          右側: 標記為沒問題 / 編輯紀錄 (預設展開於 待查看 tab)]
+```
+- 每張卡片預設顯示「新建立」灰 badge,有異常時加 deep_night / weekend / burst / high_budget badge
+- 「編輯紀錄」展開時拉 `/api/accounts/{id}/activities` 並用 `summariseExtraData()` 把 FB extra_data 翻成「狀態:進行中 → 暫停」「日預算:$X → $Y」「Meta 政策審查 (代碼 4134001)」等人話
+- 「標記為沒問題」寫入 `shared_settings.security_safe_campaigns`,team-wide
+- 「推播設定」開 `SecurityPushSettingsModal` 建立 `security_push_configs` 行(channel + groups + anomaly filter + 輪詢頻率)
+- BM 成員自動偵測之前嘗試過(`/api/accounts/{id}/assigned-users` + `business_users`),但 FB API 對非完全 BM-managed 帳戶都回空,實務上沒用,已移除
+- `effectiveDailyBudget(campaign)` 拿不到 campaign.daily_budget 時加總 ACTIVE adsets 的 daily_budget,卡片顯示「(廣告組合加總)」suffix
+- high_budget 閾值 = 2000(raw FB value,跟儀表板 `fM()` 同 scale);burst 在前端是「同帳戶 2 小時內 ≥ 5 個」,Python 端 push tick 不計算
 
 ### Finance view
 ```
@@ -134,9 +152,9 @@ Sidebar 工具區拆成兩個入口（2026-04-26 後）:
 ### Backend
 - All FB API calls: `fb_get()` or `fb_post()` helpers in main.py
 - Pagination: `get_accounts()` follows `paging.next` in while loop
-- Budget values: × 100 when sending (cents), ÷ 100 when displaying
+- Budget values: render with `fM(daily_budget)` directly — no /100 transformation. FB stores budget in the account's currency major unit (TWD has no subunit, so 500 = NT$500). Dashboard / Alerts / Security view all render raw FB value. The `× 100` note in older code only applies to the Activity Log `extra_data` for budget-change events (FB returns those in cents-equivalent there).
 - Account IDs include `act_` prefix (e.g. `act_123456`)
-- `_fetch_campaigns_for_account` requests `id,name,status,objective,daily_budget,lifetime_budget,updated_time,{insights}`. `updated_time` is needed by the LINE flex push to render「M/D 已暫停」 — FB doesn't expose a dedicated `paused_at` without the Activity Log endpoint, so updated_time (last modification) is the closest free signal.
+- `_fetch_campaigns_for_account` requests `id,name,status,objective,daily_budget,lifetime_budget,created_time,updated_time,adsets.limit(50){daily_budget,lifetime_budget,status},{insights}`. `created_time` powers 安全監控's per-day grouping. `updated_time` is needed by the LINE flex push to render「M/D 已暫停」. The nested `adsets{daily_budget}` lets the security view's `effectiveDailyBudget()` aggregate ABO budgets when the campaign itself uses CBO=off.
 
 ### Frontend
 - Date params: `_insights_clause()` builds `insights.date_preset(X){fields}` or `insights.time_range(X){fields}`

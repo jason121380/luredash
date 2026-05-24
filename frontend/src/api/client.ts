@@ -97,6 +97,39 @@ export interface LinePushConfigInput {
   date_to?: string;
 }
 
+// ── 安全監控推播 (event-driven alert subscription) ────────────
+
+export type SecurityAnomalyTag = "deep_night" | "weekend" | "high_budget" | "burst";
+
+export interface SecurityPushConfig {
+  id: string;
+  name: string;
+  owner_fb_user_id: string;
+  channel_id: string;
+  group_ids: string[];
+  account_ids: string[];
+  anomaly_filters: SecurityAnomalyTag[];
+  poll_interval_minutes: number;
+  enabled: boolean;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  last_error: string | null;
+  fail_count: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface SecurityPushConfigInput {
+  id?: string;
+  name: string;
+  channel_id: string;
+  group_ids: string[];
+  account_ids?: string[];
+  anomaly_filters?: SecurityAnomalyTag[];
+  poll_interval_minutes?: number;
+  enabled?: boolean;
+}
+
 export class ApiError extends Error {
   status: number;
   detail: string;
@@ -320,9 +353,7 @@ async function request<T>(
     // Forward the parsed `detail` field (which may be an object for
     // tier-limit errors) so callers can branch on err.body.code.
     const rawDetail =
-      body && typeof body === "object"
-        ? (body as Record<string, unknown>).detail
-        : undefined;
+      body && typeof body === "object" ? (body as Record<string, unknown>).detail : undefined;
     throw new ApiError(response.status, detail, rawDetail);
   }
 
@@ -391,6 +422,22 @@ export const api = {
     activities: (accountId: string, since: number, until: number) =>
       request<{ data: FbActivity[] }>("GET", `/api/accounts/${accountId}/activities`, {
         query: { since: String(since), until: String(until) },
+      }),
+  },
+
+  securityPush: {
+    list: (fbUserId: string) =>
+      request<{ data: SecurityPushConfig[] }>("GET", "/api/security-push/configs", {
+        query: { fb_user_id: fbUserId },
+      }),
+    upsert: (fbUserId: string, payload: SecurityPushConfigInput) =>
+      request<{ ok: boolean; data: SecurityPushConfig }>("POST", "/api/security-push/configs", {
+        body: payload,
+        query: { fb_user_id: fbUserId },
+      }),
+    delete: (fbUserId: string, id: string) =>
+      request<{ ok: boolean }>("DELETE", `/api/security-push/configs/${encodeURIComponent(id)}`, {
+        query: { fb_user_id: fbUserId },
       }),
   },
 
@@ -687,11 +734,9 @@ export const api = {
      *  Manager. Paired with `linePush.refreshAllGroups` in the LINE
      *  推播設定 top-right refresh button. */
     refreshAll: (fbUserId: string) =>
-      request<{ ok: boolean; refreshed: number }>(
-        "POST",
-        "/api/line-channels/refresh-all",
-        { query: { fb_user_id: fbUserId } },
-      ),
+      request<{ ok: boolean; refreshed: number }>("POST", "/api/line-channels/refresh-all", {
+        query: { fb_user_id: fbUserId },
+      }),
     /** Owner invites another FB user to share access to a channel.
      *  `role` is 'admin' (full edit, default) or 'viewer' (read-only). */
     invite: (
@@ -870,8 +915,7 @@ export const api = {
   optimization: {
     /** Metadata for the 5 expert agents (id, name, emoji, color, role).
      *  Cached indefinitely — only changes on a deploy. */
-    agents: () =>
-      request<{ data: AgentMeta[] }>("GET", "/api/optimization/agents"),
+    agents: () => request<{ data: AgentMeta[] }>("GET", "/api/optimization/agents"),
     /** Cross-device hydration — returns the most recent persisted
      *  AI 幕僚 run for this user, or null if none. Frontend calls
      *  this on mount so opening the page on a new device shows
@@ -905,7 +949,11 @@ export const api = {
     runAgentsStream: async (
       input: { fbUserId: string; dateLabel: string; campaigns: AgentCampaignDigest[] },
       callbacks: {
-        onAgent: (msg: { agent_id: string; advice_md: string | null; error: string | null }) => void;
+        onAgent: (msg: {
+          agent_id: string;
+          advice_md: string | null;
+          error: string | null;
+        }) => void;
         onDone: (msg: { quota: { used_this_month: number; limit: number; tier: TierId } }) => void;
         signal?: AbortSignal;
       },
