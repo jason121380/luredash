@@ -99,7 +99,12 @@ export interface LinePushConfigInput {
 
 // ── 安全監控推播 (event-driven alert subscription) ────────────
 
-export type SecurityAnomalyTag = "deep_night" | "weekend" | "high_budget" | "burst";
+export type SecurityAnomalyTag =
+  | "deep_night"
+  | "weekend"
+  | "high_budget"
+  | "burst"
+  | "abnormal_language";
 
 export interface SecurityPushConfig {
   id: string;

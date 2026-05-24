@@ -6909,7 +6909,7 @@ async def list_push_logs(config_id: Optional[str] = None, limit: int = 20):
 # ── 安全監控推播 CRUD ──────────────────────────────────────────
 
 
-_ALLOWED_ANOMALY_TAGS = {"deep_night", "weekend", "high_budget", "burst"}
+_ALLOWED_ANOMALY_TAGS = {"deep_night", "weekend", "high_budget", "burst", "abnormal_language"}
 
 
 class SecurityPushConfigPayload(BaseModel):
@@ -7397,7 +7397,34 @@ def _evaluate_campaign_anomalies(c: dict) -> List[str]:
     budget = _effective_daily_budget(c)
     if budget is not None and budget > _SECURITY_HIGH_BUDGET:
         tags.append("high_budget")
+    if _has_abnormal_language(c.get("name") or ""):
+        tags.append("abnormal_language")
     return tags
+
+
+def _has_abnormal_language(name: str) -> bool:
+    """Mirror of frontend `hasAbnormalLanguage`: flag campaign names
+    containing any character outside ASCII + CJK + common Chinese
+    punctuation. Keeps Vietnamese, Cyrillic, Arabic, Thai, kana, etc.
+    out of the "normal" set."""
+    for ch in name:
+        code = ord(ch)
+        if code < 0x80:
+            continue
+        if 0x4E00 <= code <= 0x9FFF:
+            continue
+        if 0x3400 <= code <= 0x4DBF:
+            continue
+        if 0x20000 <= code <= 0x2FFFF:
+            continue
+        if 0x2000 <= code <= 0x206F:
+            continue
+        if 0x3000 <= code <= 0x303F:
+            continue
+        if 0xFF00 <= code <= 0xFFEF:
+            continue
+        return True
+    return False
 
 
 _ANOMALY_LABELS = {
@@ -7405,6 +7432,7 @@ _ANOMALY_LABELS = {
     "weekend": "週末創建",
     "high_budget": "日預算 > $2000",
     "burst": "短時間高頻",
+    "abnormal_language": "異常語言",
 }
 
 

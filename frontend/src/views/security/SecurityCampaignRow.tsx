@@ -55,6 +55,7 @@ const ANOMALY_CLASS: Record<SecurityAnomaly, string> = {
   weekend: "bg-orange-bg text-orange",
   burst: "bg-red-100 text-red-700",
   high_budget: "bg-red-100 text-red-700",
+  abnormal_language: "bg-red-100 text-red-700",
 };
 
 export interface SecurityCampaignRowProps {
