@@ -138,6 +138,31 @@ describe("buildSecurityDays — anomaly tagging", () => {
     expect(byId.missing).not.toContain("high_budget");
   });
 
+  it("tags abnormal_language when name contains non-CJK/non-ASCII chars (Vietnamese, etc.)", () => {
+    const camps = [
+      campaign("zh", "私訊 PS31 Angel", "2026-05-22T10:00"),
+      campaign("en", "[Faith] Bonnie 0520", "2026-05-22T10:00"),
+      campaign("zh-en", "[流量][序 Hair Salon] Lewis 0518", "2026-05-22T10:00"),
+      campaign("vi", "Chiến dịch Doanh số mới", "2026-05-22T10:00"),
+      campaign("ja", "新規キャンペーン", "2026-05-22T10:00"),
+      campaign("ko", "새 캠페인", "2026-05-22T10:00"),
+      campaign("ru", "Новая кампания", "2026-05-22T10:00"),
+      campaign("th", "แคมเปญใหม่", "2026-05-22T10:00"),
+    ];
+    const days = buildSecurityDays(camps, customRange("2026-05-01", "2026-05-31"));
+    const byId = Object.fromEntries(
+      days.flatMap((d) => d.rows).map((r) => [r.campaign.id, r.anomalies]),
+    );
+    expect(byId.zh).not.toContain("abnormal_language");
+    expect(byId.en).not.toContain("abnormal_language");
+    expect(byId["zh-en"]).not.toContain("abnormal_language");
+    expect(byId.vi).toContain("abnormal_language");
+    expect(byId.ja).toContain("abnormal_language");
+    expect(byId.ko).toContain("abnormal_language");
+    expect(byId.ru).toContain("abnormal_language");
+    expect(byId.th).toContain("abnormal_language");
+  });
+
   it("tags high_budget when CBO is off and summed ACTIVE adset budgets exceed threshold", () => {
     const cbosOff = (
       id: string,

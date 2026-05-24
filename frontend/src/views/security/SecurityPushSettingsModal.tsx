@@ -8,7 +8,7 @@ import {
 import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
 import { cn } from "@/lib/cn";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 /**
  * 安全監控推播設定 — opens from /security topbar. Lists existing
@@ -24,6 +24,7 @@ const ANOMALY_OPTIONS: Array<{ value: SecurityAnomalyTag; label: string; hint: s
   { value: "deep_night", label: "深夜創建", hint: "00:00–05:59 建立" },
   { value: "weekend", label: "週末創建", hint: "週六、週日建立" },
   { value: "high_budget", label: "日預算 > $2000", hint: "含廣告組合加總" },
+  { value: "abnormal_language", label: "異常語言", hint: "活動名稱含非中/英字元" },
 ];
 
 type EditingState = { mode: "list" } | { mode: "new" } | { mode: "edit"; cfg: SecurityPushConfig };
@@ -165,6 +166,18 @@ function ConfigForm({
 
   const [name, setName] = useState(initial?.name ?? "");
   const [channelId, setChannelId] = useState(initial?.channel_id ?? channels[0]?.id ?? "");
+  // `channels` arrives async from useLineChannels; first render gets
+  // an empty array → useState seeds channelId="". Once the query
+  // resolves, the <select> visually shows the first option but the
+  // browser doesn't fire onChange for the implicit selection, so
+  // channelId stays "" and "請選擇 LINE channel" fires on save.
+  // Sync the state when the list lands.
+  useEffect(() => {
+    if (!channelId && channels.length > 0) {
+      const first = channels[0];
+      if (first) setChannelId(first.id);
+    }
+  }, [channels, channelId]);
   const [groupIds, setGroupIds] = useState<Set<string>>(new Set(initial?.group_ids ?? []));
   const [filters, setFilters] = useState<Set<SecurityAnomalyTag>>(
     new Set(initial?.anomaly_filters ?? ["deep_night", "weekend", "high_budget"]),

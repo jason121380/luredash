@@ -59,11 +59,21 @@ export function SecurityMonitorView() {
     to: null,
   });
 
-  // Reuse the overview batch endpoint. We only care about the campaign
-  // metadata (lite phase already gives us name / status / created_time /
-  // budget / objective). insightsPending is ignored — we never read
-  // insights here.
-  const overview = useMultiAccountOverview(visibleAll, date, { includeArchived: true });
+  // Decouple the FB fetch range from the user's display range. We
+  // always pull campaigns with a fixed `last_90d` window so:
+  //   1. Switching the date picker doesn't re-fetch (different
+  //      `date_preset` was producing different campaign lists when
+  //      FB throttled the larger range and the backend fell back to
+  //      `minimal` fields without `created_time`, silently dropping
+  //      campaigns from the security view).
+  //   2. The user's date config feeds `buildSecurityDays` only as a
+  //      client-side filter on `created_time`, which matches the
+  //      view's actual semantics ("campaigns CREATED in this window").
+  const fetchDate = useMemo<DateConfig>(
+    () => ({ preset: "last_90d", from: null, to: null }),
+    [],
+  );
+  const overview = useMultiAccountOverview(visibleAll, fetchDate, { includeArchived: true });
 
   const scopedCampaigns = useMemo(() => {
     if (selectedAcctId === null) return overview.campaigns;

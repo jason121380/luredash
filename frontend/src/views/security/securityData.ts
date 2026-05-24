@@ -17,7 +17,46 @@ import type { FbCampaign } from "@/types/fb";
  * detection logic is unit-tested without rendering.
  */
 
-export type SecurityAnomaly = "deep_night" | "weekend" | "burst" | "high_budget";
+export type SecurityAnomaly =
+  | "deep_night"
+  | "weekend"
+  | "burst"
+  | "high_budget"
+  | "abnormal_language";
+
+/** Detect "abnormal language" in a campaign name. Returns true when
+ * the name contains any character OUTSIDE the expected set for a
+ * Taiwan-based agency:
+ *
+ *   - ASCII (English letters, digits, ASCII punctuation)
+ *   - CJK Unified Ideographs U+4E00..U+9FFF (most Han / Traditional Chinese)
+ *   - CJK Extension A U+3400..U+4DBF
+ *   - General Punctuation U+2000..U+206F (em dash, ellipsis, etc.)
+ *   - CJK Symbols and Punctuation U+3000..U+303F (full-width brackets,
+ *     middle dot, etc.)
+ *   - Fullwidth/Halfwidth Forms U+FF00..U+FFEF (full-width digits /
+ *     ASCII used in Chinese typography)
+ *
+ * Anything else — Vietnamese diacritics (Latin Extended), Hiragana,
+ * Katakana, Hangul, Cyrillic, Arabic, Thai, etc. — flags the campaign
+ * as `abnormal_language`. Helps surface campaigns created by a
+ * compromised account targeting a different region.
+ */
+export function hasAbnormalLanguage(name: string): boolean {
+  for (const ch of name) {
+    const code = ch.codePointAt(0);
+    if (code === undefined) continue;
+    if (code < 0x80) continue; // ASCII
+    if (code >= 0x4e00 && code <= 0x9fff) continue; // CJK Unified
+    if (code >= 0x3400 && code <= 0x4dbf) continue; // CJK Ext A
+    if (code >= 0x20000 && code <= 0x2ffff) continue; // CJK Ext B+
+    if (code >= 0x2000 && code <= 0x206f) continue; // General Punctuation
+    if (code >= 0x3000 && code <= 0x303f) continue; // CJK Symbols / Punctuation
+    if (code >= 0xff00 && code <= 0xffef) continue; // Halfwidth / Fullwidth
+    return true;
+  }
+  return false;
+}
 
 /** Daily budget threshold — RAW FB value (same scale as
  * dashboard's `fM(campaign.daily_budget)`). FB returns budget as
@@ -162,6 +201,9 @@ export function buildSecurityDays(
     if (effective !== null && effective > HIGH_DAILY_BUDGET) {
       anomalies.push("high_budget");
     }
+    if (hasAbnormalLanguage(c.name ?? "")) {
+      anomalies.push("abnormal_language");
+    }
     rows.push({ campaign: c, createdAt: created, anomalies });
   }
   // Burst is a cross-row signal — compute it after the per-row pass.
@@ -203,6 +245,7 @@ const ANOMALY_LABELS: Record<SecurityAnomaly, string> = {
   weekend: "週末創建",
   burst: "短時間高頻",
   high_budget: `日預算 > $${HIGH_DAILY_BUDGET}`,
+  abnormal_language: "異常語言",
 };
 
 export function anomalyLabel(a: SecurityAnomaly): string {
