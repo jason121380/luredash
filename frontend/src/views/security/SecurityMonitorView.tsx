@@ -18,6 +18,7 @@ import { useQueries } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { AlertAccountPanel } from "../alerts/AlertAccountPanel";
 import { SecurityCampaignRow } from "./SecurityCampaignRow";
+import { SecurityPushSettingsModal } from "./SecurityPushSettingsModal";
 import { buildSecurityDays, formatDayLabel, resolveBounds } from "./securityData";
 
 type SecurityTab = "pending" | "safe";
@@ -49,6 +50,7 @@ export function SecurityMonitorView() {
 
   const safeIds = useSecurityStore((s) => s.safeIds);
   const [tab, setTab] = useState<SecurityTab>("pending");
+  const [pushModalOpen, setPushModalOpen] = useState(false);
 
   const [date, setDate] = useState<DateConfig>({
     preset: "last_7d",
@@ -172,8 +174,17 @@ export function SecurityMonitorView() {
           />
           <TopbarSeparator />
           <DatePicker value={date} onChange={setDate} />
+          <TopbarSeparator />
+          <button
+            type="button"
+            onClick={() => setPushModalOpen(true)}
+            className="rounded-md border border-border bg-white px-2.5 py-1 text-[12px] font-medium text-gray-500 hover:bg-orange-bg hover:text-orange"
+          >
+            推播設定
+          </button>
         </div>
       </Topbar>
+      <SecurityPushSettingsModal open={pushModalOpen} onOpenChange={setPushModalOpen} />
 
       <div className="flex min-w-0 items-start md:flex-row">
         {/* Desktop sidebar (≥768px) */}

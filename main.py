@@ -611,6 +611,50 @@ async def lifespan(app: FastAPI):
                 await conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_lpl_config_run ON line_push_logs (config_id, run_at DESC)"
                 )
+                # ── 安全監控推播 (event-driven, not schedule-driven) ─
+                # One row per "alert subscription". When the scheduler
+                # tick wakes up (every poll_interval_minutes), it
+                # fetches campaigns created since last_run_at across
+                # the configured account_ids, evaluates each against
+                # the anomaly_filters list, and pushes any matches to
+                # every group_id in group_ids.
+                #
+                # Sized for a small team (~5 configs per channel),
+                # poll interval 5-60 min. Empty account_ids means
+                # "all enabled accounts visible to owner_fb_user_id".
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS security_push_configs (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        name TEXT NOT NULL,
+                        owner_fb_user_id TEXT NOT NULL,
+                        channel_id UUID NOT NULL REFERENCES line_channels(id) ON DELETE CASCADE,
+                        group_ids TEXT[] NOT NULL DEFAULT '{}',
+                        account_ids TEXT[] NOT NULL DEFAULT '{}',
+                        anomaly_filters TEXT[] NOT NULL DEFAULT ARRAY['deep_night','weekend','high_budget'],
+                        poll_interval_minutes INT NOT NULL DEFAULT 10,
+                        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        last_run_at TIMESTAMPTZ,
+                        next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        last_error TEXT,
+                        fail_count INT NOT NULL DEFAULT 0,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_sec_push_due
+                    ON security_push_configs (next_run_at) WHERE enabled
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_sec_push_owner
+                    ON security_push_configs (owner_fb_user_id)
+                    """
+                )
                 # ── Per-user FB tokens (Phase A — multi-tenant) ───
                 # Each FB user's long-lived token is persisted here so a
                 # server restart doesn't blow away every user's session.
@@ -6862,6 +6906,159 @@ async def list_push_logs(config_id: Optional[str] = None, limit: int = 20):
     }
 
 
+# ── 安全監控推播 CRUD ──────────────────────────────────────────
+
+
+_ALLOWED_ANOMALY_TAGS = {"deep_night", "weekend", "high_budget", "burst"}
+
+
+class SecurityPushConfigPayload(BaseModel):
+    id: Optional[str] = None
+    name: str
+    channel_id: str
+    group_ids: List[str] = []
+    account_ids: List[str] = []
+    anomaly_filters: List[str] = []
+    poll_interval_minutes: int = 10
+    enabled: bool = True
+
+
+def _sec_push_row_to_dict(r) -> dict:
+    return {
+        "id": str(r["id"]),
+        "name": r["name"],
+        "owner_fb_user_id": r["owner_fb_user_id"],
+        "channel_id": str(r["channel_id"]),
+        "group_ids": list(r["group_ids"] or []),
+        "account_ids": list(r["account_ids"] or []),
+        "anomaly_filters": list(r["anomaly_filters"] or []),
+        "poll_interval_minutes": r["poll_interval_minutes"],
+        "enabled": r["enabled"],
+        "last_run_at": r["last_run_at"].isoformat() if r["last_run_at"] else None,
+        "next_run_at": r["next_run_at"].isoformat() if r["next_run_at"] else None,
+        "last_error": r["last_error"],
+        "fail_count": r["fail_count"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+    }
+
+
+def _validate_security_push_payload(p: SecurityPushConfigPayload) -> None:
+    if not p.name or not p.name.strip():
+        raise HTTPException(status_code=400, detail="name 不可為空")
+    if not p.channel_id:
+        raise HTTPException(status_code=400, detail="必須選擇 LINE channel")
+    if not p.group_ids:
+        raise HTTPException(status_code=400, detail="至少選擇一個 LINE group")
+    bad = [t for t in p.anomaly_filters if t not in _ALLOWED_ANOMALY_TAGS]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"未知的 anomaly tag: {bad}")
+    if not (1 <= p.poll_interval_minutes <= 1440):
+        raise HTTPException(status_code=400, detail="poll_interval_minutes 必須在 1-1440 之間")
+
+
+@app.get("/api/security-push/configs")
+async def list_security_push_configs(fb_user_id: str = Query(...)):
+    _assert_known_user(fb_user_id)
+    if _db_pool is None:
+        return {"data": []}
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM security_push_configs
+            WHERE owner_fb_user_id = $1
+            ORDER BY created_at ASC
+            """,
+            fb_user_id,
+        )
+    return {"data": [_sec_push_row_to_dict(r) for r in rows]}
+
+
+@app.post("/api/security-push/configs")
+async def upsert_security_push_config(
+    payload: SecurityPushConfigPayload,
+    fb_user_id: str = Query(...),
+):
+    _assert_known_user(fb_user_id)
+    _validate_security_push_payload(payload)
+    pool = _require_db()
+    filters = (
+        payload.anomaly_filters
+        if payload.anomaly_filters
+        else ["deep_night", "weekend", "high_budget"]
+    )
+    async with pool.acquire() as conn:
+        if payload.id:
+            row = await conn.fetchrow(
+                "SELECT owner_fb_user_id FROM security_push_configs WHERE id = $1::uuid",
+                payload.id,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="config 不存在")
+            if row["owner_fb_user_id"] != fb_user_id:
+                raise HTTPException(status_code=403, detail="無權編輯此 config")
+            updated = await conn.fetchrow(
+                """
+                UPDATE security_push_configs
+                SET name = $2, channel_id = $3::uuid, group_ids = $4,
+                    account_ids = $5, anomaly_filters = $6,
+                    poll_interval_minutes = $7, enabled = $8,
+                    updated_at = NOW()
+                WHERE id = $1::uuid
+                RETURNING *
+                """,
+                payload.id,
+                payload.name.strip(),
+                payload.channel_id,
+                payload.group_ids,
+                payload.account_ids,
+                filters,
+                payload.poll_interval_minutes,
+                payload.enabled,
+            )
+            return {"ok": True, "data": _sec_push_row_to_dict(updated)}
+        created = await conn.fetchrow(
+            """
+            INSERT INTO security_push_configs (
+                name, owner_fb_user_id, channel_id, group_ids,
+                account_ids, anomaly_filters, poll_interval_minutes,
+                enabled, next_run_at
+            )
+            VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, $8, NOW())
+            RETURNING *
+            """,
+            payload.name.strip(),
+            fb_user_id,
+            payload.channel_id,
+            payload.group_ids,
+            payload.account_ids,
+            filters,
+            payload.poll_interval_minutes,
+            payload.enabled,
+        )
+        return {"ok": True, "data": _sec_push_row_to_dict(created)}
+
+
+@app.delete("/api/security-push/configs/{config_id}")
+async def delete_security_push_config(config_id: str, fb_user_id: str = Query(...)):
+    _assert_known_user(fb_user_id)
+    pool = _require_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT owner_fb_user_id FROM security_push_configs WHERE id = $1::uuid",
+            config_id,
+        )
+        if row is None:
+            return {"ok": True}
+        if row["owner_fb_user_id"] != fb_user_id:
+            raise HTTPException(status_code=403, detail="無權刪除此 config")
+        await conn.execute(
+            "DELETE FROM security_push_configs WHERE id = $1::uuid",
+            config_id,
+        )
+    return {"ok": True}
+
+
 # ── Scheduler loop ────────────────────────────────────────────
 
 async def _scheduler_tick() -> None:
@@ -7117,10 +7314,351 @@ async def _scheduler_loop() -> None:
                 raise
             except Exception as e:
                 print(f"[scheduler] tick error: {e}", flush=True)
+            try:
+                await _security_push_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[security-push] tick error: {e}", flush=True)
             await asyncio.sleep(SCHEDULER_TICK_SECONDS)
     except asyncio.CancelledError:
         print("[scheduler] stopped", flush=True)
         raise
+
+
+# ── 安全監控推播 (event-driven push on new-campaign anomalies) ───
+#
+# Detection mirrors `frontend/src/views/security/securityData.ts` so
+# both surfaces flag the same campaigns. Keep the two in sync when
+# adding new anomaly rules.
+
+# Daily-budget threshold in cents (FB stores budget × 100).
+_SECURITY_HIGH_BUDGET_CENTS = 200_000  # $2,000 / day
+
+
+def _effective_daily_budget_cents(c: dict) -> Optional[int]:
+    """Return effective daily budget for a campaign in cents.
+
+    CBO: campaign.daily_budget is set. Use it.
+    ABO: campaign budget is empty; sum ACTIVE adsets' daily_budget.
+    Neither: return None.
+    """
+    raw = c.get("daily_budget")
+    if raw:
+        try:
+            n = int(raw)
+            if n > 0:
+                return n
+        except (TypeError, ValueError):
+            pass
+    adsets = (c.get("adsets") or {}).get("data") or []
+    total = 0
+    any_found = False
+    for a in adsets:
+        if not isinstance(a, dict):
+            continue
+        if a.get("status") in ("ARCHIVED", "DELETED"):
+            continue
+        try:
+            v = int(a.get("daily_budget") or 0)
+            if v > 0:
+                total += v
+                any_found = True
+        except (TypeError, ValueError):
+            continue
+    return total if any_found else None
+
+
+def _evaluate_campaign_anomalies(c: dict) -> List[str]:
+    """Detect anomalies for one campaign. Returns the list of tags
+    (subset of "deep_night" / "weekend" / "high_budget"). `burst` is
+    cross-campaign so it's evaluated in the caller, not here."""
+    tags: List[str] = []
+    created = c.get("created_time")
+    if not created:
+        return tags
+    try:
+        # FB format: "2026-05-22T15:30:00+0000". Python 3.9 doesn't
+        # accept the "+0000" suffix in fromisoformat; normalise to
+        # "+00:00" first.
+        iso = created
+        if len(iso) >= 5 and iso[-5] in ("+", "-") and iso[-3] != ":":
+            iso = iso[:-2] + ":" + iso[-2:]
+        dt_utc = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return tags
+    local = dt_utc.astimezone(_scheduler_tz())
+    if local.hour < 6:
+        tags.append("deep_night")
+    if local.weekday() in (5, 6):  # Sat=5, Sun=6
+        tags.append("weekend")
+    budget = _effective_daily_budget_cents(c)
+    if budget is not None and budget > _SECURITY_HIGH_BUDGET_CENTS:
+        tags.append("high_budget")
+    return tags
+
+
+_ANOMALY_LABELS = {
+    "deep_night": "深夜創建",
+    "weekend": "週末創建",
+    "high_budget": "日預算 > $2000",
+    "burst": "短時間高頻",
+}
+
+
+def _format_security_push_text(matches: List[dict]) -> str:
+    """Render plain-text LINE message for a batch of flagged campaigns.
+
+    Each match dict has keys: campaign (raw FB campaign dict),
+    account_name (str), anomalies (list[str]), creator (str | None).
+    Up to 5 campaigns per message; trims with "...還有 N 則" when more.
+    """
+    lines: List[str] = ["🚨 新建立活動異常通知", ""]
+    shown = matches[:5]
+    for idx, m in enumerate(shown, 1):
+        c = m["campaign"]
+        budget_c = _effective_daily_budget_cents(c)
+        budget_txt = f"${budget_c // 100:,}" if budget_c else "—"
+        anomaly_txt = "、".join(_ANOMALY_LABELS.get(t, t) for t in m["anomalies"])
+        creator = m.get("creator") or "—"
+        created_local = ""
+        try:
+            iso = c.get("created_time") or ""
+            if len(iso) >= 5 and iso[-5] in ("+", "-") and iso[-3] != ":":
+                iso = iso[:-2] + ":" + iso[-2:]
+            local = datetime.fromisoformat(iso).astimezone(_scheduler_tz())
+            created_local = local.strftime("%m/%d %H:%M")
+        except (TypeError, ValueError):
+            pass
+        name = c.get("name") or "(未命名)"
+        cid = c.get("id") or ""
+        acct_name = m.get("account_name") or ""
+        lines.append(f"{idx}. {name}")
+        lines.append(f"   帳戶：{acct_name}")
+        if created_local:
+            lines.append(f"   建立時間：{created_local}")
+        lines.append(f"   建立者：{creator}")
+        lines.append(f"   日預算：{budget_txt}")
+        lines.append(f"   標記：{anomaly_txt}")
+        lines.append(f"   編號：{cid}")
+        lines.append("")
+    extra = len(matches) - len(shown)
+    if extra > 0:
+        lines.append(f"...另有 {extra} 則新建立活動觸發告警")
+    return "\n".join(lines).rstrip()
+
+
+async def _security_push_run_one(cfg: dict) -> None:
+    """Process a single security_push_configs row: fetch campaigns
+    created since last_run_at, flag matches, push LINE message."""
+    owner_uid = cfg["owner_fb_user_id"]
+    if not owner_uid:
+        raise RuntimeError("config has no owner_fb_user_id")
+
+    # Resolve channel access_token
+    if _db_pool is None:
+        return
+    async with _db_pool.acquire() as conn:
+        ch_row = await conn.fetchrow(
+            "SELECT access_token FROM line_channels WHERE id = $1 AND enabled",
+            cfg["channel_id"],
+        )
+    if not ch_row or not ch_row["access_token"]:
+        raise RuntimeError("channel disabled or missing access_token")
+    access_token = ch_row["access_token"]
+
+    # Determine account scope. Empty array → all of the owner's
+    # currently-enabled accounts (intersected with their actual FB
+    # account list to drop stale ids).
+    account_ids = list(cfg.get("account_ids") or [])
+    if not account_ids:
+        # Pull the owner's selected_accounts from user_settings
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value FROM user_settings WHERE fb_user_id = $1 AND key = 'selected_accounts'",
+                owner_uid,
+            )
+        if row and row["value"]:
+            try:
+                account_ids = [str(x) for x in row["value"] if x]
+            except (TypeError, ValueError):
+                account_ids = []
+    if not account_ids:
+        # Nothing to scan; still bump next_run_at so we don't busy-loop.
+        return
+
+    since_dt = cfg.get("last_run_at") or (datetime.now(timezone.utc) - timedelta(hours=24))
+    if since_dt.tzinfo is None:
+        since_dt = since_dt.replace(tzinfo=timezone.utc)
+
+    filters = set(cfg.get("anomaly_filters") or [])
+
+    # Pull campaigns under the owner's FB token context. Use lite
+    # mode (no insights) for speed — we only need name / created_time
+    # / daily_budget / adsets.
+    ctx_token = _current_fb_user_id.set(owner_uid)
+    try:
+        matches: List[dict] = []
+        for aid in account_ids:
+            try:
+                camps = await _fetch_campaigns_for_account(
+                    aid,
+                    date_preset="last_7d",
+                    time_range=None,
+                    include_archived=True,
+                    lite=True,
+                )
+            except HTTPException as e:
+                print(f"[security-push] fetch {aid} failed: {e.detail}", flush=True)
+                continue
+            for c in camps:
+                created = c.get("created_time")
+                if not created:
+                    continue
+                try:
+                    iso = created
+                    if len(iso) >= 5 and iso[-5] in ("+", "-") and iso[-3] != ":":
+                        iso = iso[:-2] + ":" + iso[-2:]
+                    created_dt = datetime.fromisoformat(iso)
+                except (TypeError, ValueError):
+                    continue
+                if created_dt <= since_dt:
+                    continue
+                tags = _evaluate_campaign_anomalies(c)
+                hit = [t for t in tags if t in filters]
+                if not hit:
+                    continue
+                matches.append(
+                    {
+                        "campaign": c,
+                        "account_id": aid,
+                        "account_name": "",
+                        "anomalies": hit,
+                        "creator": None,
+                    }
+                )
+
+        if not matches:
+            return
+
+        # Fetch account names + recent create-event actors. Best-effort.
+        async with _db_pool.acquire() as conn:
+            pass  # placeholder, names enriched below from FB
+        # Account names: cheap re-fetch via FB
+        try:
+            accts_raw = await fb_get_paginated(
+                "me/adaccounts",
+                {"fields": "id,name", "limit": "500"},
+            )
+            name_by_aid = {a.get("id"): a.get("name", "") for a in accts_raw if isinstance(a, dict)}
+        except HTTPException:
+            name_by_aid = {}
+        for m in matches:
+            m["account_name"] = name_by_aid.get(m["account_id"], "")
+
+        # Activity-log lookup for creator names. One call per affected
+        # account; bounded by the date-range since last_run_at.
+        since_epoch = int(since_dt.timestamp())
+        until_epoch = int(datetime.now(timezone.utc).timestamp())
+        affected_aids = {m["account_id"] for m in matches}
+        creator_by_cid: dict = {}
+        for aid in affected_aids:
+            try:
+                acts = await fb_get_paginated(
+                    f"{aid}/activities",
+                    {
+                        "since": str(since_epoch),
+                        "until": str(until_epoch),
+                        "fields": "actor_name,event_type,object_id,translated_event_type",
+                        "limit": "500",
+                    },
+                )
+            except HTTPException:
+                continue
+            for a in acts:
+                if not isinstance(a, dict):
+                    continue
+                oid = a.get("object_id")
+                if not oid or oid in creator_by_cid:
+                    continue
+                evt = (a.get("event_type") or "").lower()
+                tEvt = a.get("translated_event_type") or ""
+                if "create" in evt or "建立" in tEvt:
+                    nm = (a.get("actor_name") or "").strip()
+                    if nm:
+                        creator_by_cid[oid] = nm
+        for m in matches:
+            m["creator"] = creator_by_cid.get(m["campaign"].get("id"))
+
+        text = _format_security_push_text(matches)
+        for gid in cfg.get("group_ids") or []:
+            try:
+                await line_client.line_push(
+                    _http_client,
+                    gid,
+                    [{"type": "text", "text": text}],
+                    access_token=access_token,
+                )
+            except line_client.LinePushError as e:
+                print(f"[security-push] push group={gid} failed: {e}", flush=True)
+    finally:
+        _current_fb_user_id.reset(ctx_token)
+
+
+async def _security_push_tick() -> None:
+    """Find due security_push_configs and process each. Mirrors the
+    LIMIT 50 + FOR UPDATE SKIP LOCKED pattern from _scheduler_tick."""
+    if _db_pool is None:
+        return
+    now = datetime.now(timezone.utc)
+    async with _db_pool.acquire() as conn:
+        async with conn.transaction():
+            due = await conn.fetch(
+                """
+                SELECT * FROM security_push_configs
+                WHERE enabled AND next_run_at <= $1
+                ORDER BY next_run_at ASC
+                LIMIT 50
+                FOR UPDATE SKIP LOCKED
+                """,
+                now,
+            )
+    for row in due:
+        cfg = dict(row)
+        cid = cfg["id"]
+        try:
+            await _security_push_run_one(cfg)
+            async with _db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE security_push_configs
+                    SET last_run_at = $2,
+                        next_run_at = $2 + (poll_interval_minutes || ' minutes')::INTERVAL,
+                        last_error = NULL,
+                        fail_count = 0,
+                        updated_at = $2
+                    WHERE id = $1
+                    """,
+                    cid,
+                    now,
+                )
+        except Exception as e:
+            print(f"[security-push] config={cid} run failed: {e}", flush=True)
+            async with _db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE security_push_configs
+                    SET last_error = $2,
+                        fail_count = fail_count + 1,
+                        next_run_at = $3 + (poll_interval_minutes || ' minutes')::INTERVAL,
+                        updated_at = $3,
+                        enabled = CASE WHEN fail_count + 1 >= 5 THEN FALSE ELSE enabled END
+                    WHERE id = $1
+                    """,
+                    cid,
+                    str(e)[:500],
+                    now,
+                )
 
 
 # ── Cache warm-refresh loop ───────────────────────────────────
