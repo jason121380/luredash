@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildSecurityDays, formatDayLabel, parseFbTime } from "@/views/security/securityData";
+import {
+  buildSecurityDays,
+  formatDayLabel,
+  parseFbTime,
+  summariseExtraData,
+} from "@/views/security/securityData";
 import type { FbCampaign } from "@/types/fb";
 import type { DateConfig } from "@/lib/datePicker";
 
@@ -116,6 +121,23 @@ describe("buildSecurityDays — anomaly tagging", () => {
     expect(byId.z).not.toContain("burst");
   });
 
+  it("tags high_budget when daily_budget > $2000/day (FB cents)", () => {
+    const camps = [
+      campaign("low", "1", "2026-05-22T10:00", { daily_budget: "150000" }), // $1500
+      campaign("at", "2", "2026-05-22T10:00", { daily_budget: "200000" }), // $2000 — exactly threshold, NOT flagged
+      campaign("high", "3", "2026-05-22T10:00", { daily_budget: "250000" }), // $2500
+      campaign("missing", "4", "2026-05-22T10:00"),
+    ];
+    const days = buildSecurityDays(camps, customRange("2026-05-01", "2026-05-31"));
+    const byId = Object.fromEntries(
+      days.flatMap((d) => d.rows).map((r) => [r.campaign.id, r.anomalies]),
+    );
+    expect(byId.low).not.toContain("high_budget");
+    expect(byId.at).not.toContain("high_budget");
+    expect(byId.high).toContain("high_budget");
+    expect(byId.missing).not.toContain("high_budget");
+  });
+
   it("does NOT tag burst across different accounts", () => {
     const camps = [
       campaign("a", "1", "2026-05-22T10:00", { _accountId: "act_1" }),
@@ -148,5 +170,64 @@ describe("parseFbTime + formatDayLabel", () => {
   it("formats day label as M月D日 (週X)", () => {
     // 2026-05-23 is Saturday
     expect(formatDayLabel("2026-05-23")).toBe("5月23日 (週六)");
+  });
+});
+
+describe("summariseExtraData — FB Activity Log plain-Chinese", () => {
+  it("formats a status change with type + translated values", () => {
+    const raw = JSON.stringify({
+      type: "run_status",
+      old_value: "進行中",
+      new_value: "暫停",
+      run_status: { old_value: 1, new_value: 15 },
+    });
+    expect(summariseExtraData(raw)).toBe("狀態:進行中 → 暫停");
+  });
+
+  it("formats a daily_budget change with cents → dollars", () => {
+    const raw = JSON.stringify({
+      type: "daily_budget",
+      old_value: "10000",
+      new_value: "20000",
+    });
+    expect(summariseExtraData(raw)).toBe("日預算:$100 → $200");
+  });
+
+  it("appends a plain-Chinese hint for with_issue_code", () => {
+    const raw = JSON.stringify({
+      old_value: "進行中",
+      new_value: "必須更新",
+      with_issue_code: 4134001,
+      run_status: { old_value: 1, new_value: 18 },
+    });
+    const out = summariseExtraData(raw);
+    expect(out).toContain("變更:進行中 → 必須更新");
+    expect(out).toContain("Meta 政策審查");
+    expect(out).toContain("4134001");
+  });
+
+  it("recurses into composite_data with a payment_amount payload", () => {
+    const raw = JSON.stringify({
+      type: "composite_data",
+      new_value: {
+        type: "payment_amount",
+        currency: "TWD",
+        new_value: 692,
+        additional_value: "單日",
+      },
+    });
+    expect(summariseExtraData(raw)).toBe("預算 單日 $7 TWD");
+  });
+
+  it("returns null for unrecognisable / empty payloads", () => {
+    expect(summariseExtraData(undefined)).toBeNull();
+    expect(summariseExtraData("")).toBeNull();
+    expect(summariseExtraData("garbage")).toBeNull();
+    expect(summariseExtraData("{}")).toBeNull();
+  });
+
+  it("infers a change sentence when type is missing but old/new present", () => {
+    const raw = JSON.stringify({ old_value: "舊名稱", new_value: "新名稱" });
+    expect(summariseExtraData(raw)).toBe("變更:舊名稱 → 新名稱");
   });
 });
