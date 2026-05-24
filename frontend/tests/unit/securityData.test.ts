@@ -138,6 +138,45 @@ describe("buildSecurityDays — anomaly tagging", () => {
     expect(byId.missing).not.toContain("high_budget");
   });
 
+  it("tags high_budget when CBO is off and summed ACTIVE adset budgets exceed threshold", () => {
+    const cbosOff = (id: string, adsets: Array<{ daily?: string; status?: "ACTIVE" | "PAUSED" | "ARCHIVED" }>): FbCampaign => ({
+      id,
+      name: id,
+      status: "ACTIVE",
+      _accountId: "act_1",
+      created_time: new Date("2026-05-22T10:00").toISOString(),
+      adsets: {
+        data: adsets.map((a) => ({ daily_budget: a.daily, status: a.status ?? "ACTIVE" })),
+      },
+    });
+    const camps = [
+      // CBO off, 3 active adsets summing to $2400 > $2000 → flagged
+      cbosOff("over", [
+        { daily: "80000", status: "ACTIVE" },
+        { daily: "80000", status: "ACTIVE" },
+        { daily: "80000", status: "ACTIVE" },
+      ]),
+      // CBO off, 3 active adsets summing to $1500 → NOT flagged
+      cbosOff("under", [
+        { daily: "50000", status: "ACTIVE" },
+        { daily: "50000", status: "ACTIVE" },
+        { daily: "50000", status: "ACTIVE" },
+      ]),
+      // CBO off, the big adsets are ARCHIVED → only $500 counts → NOT flagged
+      cbosOff("ignore-archived", [
+        { daily: "1000000", status: "ARCHIVED" },
+        { daily: "50000", status: "ACTIVE" },
+      ]),
+    ];
+    const days = buildSecurityDays(camps, customRange("2026-05-01", "2026-05-31"));
+    const byId = Object.fromEntries(
+      days.flatMap((d) => d.rows).map((r) => [r.campaign.id, r.anomalies]),
+    );
+    expect(byId.over).toContain("high_budget");
+    expect(byId.under).not.toContain("high_budget");
+    expect(byId["ignore-archived"]).not.toContain("high_budget");
+  });
+
   it("does NOT tag burst across different accounts", () => {
     const camps = [
       campaign("a", "1", "2026-05-22T10:00", { _accountId: "act_1" }),
