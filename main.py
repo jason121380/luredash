@@ -228,9 +228,13 @@ async def lifespan(app: FastAPI):
         try:
             # max_size=5 was too tight: scheduler tick can claim several
             # connections in parallel while the dashboard simultaneously
-            # fans out per-account fetches. 20 leaves comfortable
-            # headroom; tune via env on busy deployments.
-            db_pool_max = int(os.getenv("DB_POOL_MAX", "20"))
+            # fans out per-account fetches. 10 leaves comfortable
+            # headroom AND lets new deploys grab a pool while the old
+            # container is still releasing its own — on a Lightsail
+            # 2C 2GB PG with max_connections ~20, an old+new combined
+            # max of 20 (10 + 10) is the safe ceiling. Tune via env
+            # on busy deployments.
+            db_pool_max = int(os.getenv("DB_POOL_MAX", "10"))
             db_pool_min = int(os.getenv("DB_POOL_MIN", "2"))
             _db_pool = await asyncpg.create_pool(
                 DATABASE_URL,
