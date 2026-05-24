@@ -2136,19 +2136,53 @@ async def set_token(payload: TokenPayload):
     # then hit FB with the expired token and 190 out, even though the
     # client just minted a brand-new token via FB.login. Direct httpx
     # call with payload.token sidesteps the cache entirely.
-    assert _http_client is not None
+    if _http_client is None:
+        raise HTTPException(status_code=503, detail="伺服器尚未初始化,請稍後再試")
     try:
         resp = await _http_client.get(
             f"{BASE_URL}/me",
             params={"fields": "id,name,picture", "access_token": payload.token},
             timeout=10.0,
         )
-        if resp.status_code != 200:
-            try:
-                err_body = resp.json()
-            except Exception:
-                err_body = {"raw": resp.text[:200]}
-            raise RuntimeError(f"FB /me HTTP {resp.status_code}: {err_body}")
+    except httpx.HTTPError as e:
+        print(f"[auth] token verify network error: {type(e).__name__}: {e}", flush=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"無法連線到 Facebook ({type(e).__name__})",
+        ) from None
+
+    if resp.status_code != 200:
+        # Surface the FB error code + short message so the user (or
+        # support) can see WHY FB rejected. We do NOT log or surface
+        # the access token. Trim message to 200 chars.
+        try:
+            err_body = resp.json()
+            fb_err = err_body.get("error", {}) if isinstance(err_body, dict) else {}
+            fb_code = fb_err.get("code")
+            fb_subcode = fb_err.get("error_subcode")
+            fb_type = fb_err.get("type")
+            fb_msg = (fb_err.get("message") or "")[:200]
+        except Exception:
+            fb_code = fb_subcode = fb_type = None
+            fb_msg = resp.text[:200]
+        print(
+            f"[auth] token verify rejected: HTTP {resp.status_code} "
+            f"code={fb_code} subcode={fb_subcode} type={fb_type} msg={fb_msg}",
+            flush=True,
+        )
+        if fb_code == 190:
+            detail = "FB token 已過期或被撤銷。請再次點擊登入按鈕重新授權。"
+        elif fb_code == 104 or fb_type == "GraphMethodException":
+            detail = "FB App 設定問題(可能需要 App Secret 重設)。"
+        elif fb_code == 4 or "rate" in fb_msg.lower():
+            detail = "FB 觸發頻率限制,請稍後再試。"
+        elif fb_code:
+            detail = f"FB 驗證失敗(代碼 {fb_code}):{fb_msg}"
+        else:
+            detail = f"FB 驗證失敗(HTTP {resp.status_code}):{fb_msg or '無回應內容'}"
+        raise HTTPException(status_code=400, detail=detail)
+
+    try:
         me = resp.json()
         uid = str(me.get("id") or "")
         pic = me.get("picture", {}).get("data", {}).get("url")
@@ -2162,21 +2196,11 @@ async def set_token(payload: TokenPayload):
             _KNOWN_FB_USERS.add(uid)
             await _persist_known_user(uid)
         return {"ok": True, "name": me.get("name"), "id": me.get("id"), "pictureUrl": pic}
+    except HTTPException:
+        raise
     except Exception as e:
-        # Don't leak FB error internals (URLs, app secret hints) to the
-        # client — log internally, surface a categorised hint based on
-        # the FB error code so the user knows what to do next.
-        print(f"[auth] token verify failed: {e!r}", flush=True)
-        err_text = str(e)
-        if "190" in err_text or "OAuthException" in err_text or "expired" in err_text.lower():
-            detail = "FB token 已過期。請再次點擊登入按鈕重新授權。"
-        elif "104" in err_text or "appsecret_proof" in err_text:
-            detail = "FB App 設定問題,請聯絡管理員。"
-        elif "Could not connect" in err_text or "timeout" in err_text.lower():
-            detail = "無法連線到 Facebook,請稍後再試。"
-        else:
-            detail = "Token 驗證失敗。請清除瀏覽器資料後重新登入。"
-        raise HTTPException(status_code=400, detail=detail)
+        print(f"[auth] post-verify persist failed: {e!r}", flush=True)
+        raise HTTPException(status_code=500, detail=f"伺服器儲存失敗:{type(e).__name__}") from None
 
 
 @app.delete("/api/auth/token")
