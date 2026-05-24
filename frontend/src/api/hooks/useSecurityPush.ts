@@ -52,3 +52,14 @@ export function useDeleteSecurityPushConfig() {
     },
   });
 }
+
+export function useTestSecurityPushConfig() {
+  const { user } = useFbAuth();
+  const uid = user?.id ?? "";
+  return useMutation({
+    mutationFn: async (id: string) => {
+      if (!uid) throw new Error("not signed in");
+      return await api.securityPush.test(uid, id);
+    },
+  });
+}

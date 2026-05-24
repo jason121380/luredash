@@ -444,6 +444,15 @@ export const api = {
       request<{ ok: boolean }>("DELETE", `/api/security-push/configs/${encodeURIComponent(id)}`, {
         query: { fb_user_id: fbUserId },
       }),
+    /** Fire a placeholder push to every group in the config so the
+     * user can verify channel + group access. Does not advance
+     * `last_run_at`. */
+    test: (fbUserId: string, id: string) =>
+      request<{ ok: boolean; sent: number; errors: string[] }>(
+        "POST",
+        `/api/security-push/configs/${encodeURIComponent(id)}/test`,
+        { query: { fb_user_id: fbUserId } },
+      ),
   },
 
   campaigns: {

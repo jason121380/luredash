@@ -4,9 +4,11 @@ import {
   useDeleteSecurityPushConfig,
   useSaveSecurityPushConfig,
   useSecurityPushConfigs,
+  useTestSecurityPushConfig,
 } from "@/api/hooks/useSecurityPush";
 import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
+import { toast } from "@/components/Toast";
 import { cn } from "@/lib/cn";
 import { useEffect, useMemo, useState } from "react";
 
@@ -86,6 +88,21 @@ function ConfigList({
   onEdit: (cfg: SecurityPushConfig) => void;
 }) {
   const del = useDeleteSecurityPushConfig();
+  const test = useTestSecurityPushConfig();
+
+  const handleTest = async (id: string) => {
+    try {
+      const resp = await test.mutateAsync(id);
+      if (resp.errors.length > 0) {
+        toast(`已送出 ${resp.sent} 則,${resp.errors.length} 則失敗`, "error");
+      } else {
+        toast(`已送出測試推播到 ${resp.sent} 個群組`, "success");
+      }
+    } catch (e) {
+      toast(`測試失敗:${e instanceof Error ? e.message : "未知錯誤"}`, "error");
+    }
+  };
+
   return (
     <div className="flex flex-col gap-3">
       <Button variant="primary" onClick={onAdd} className="self-start">
@@ -123,6 +140,14 @@ function ConfigList({
                   )}
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={test.isPending}
+                    onClick={() => void handleTest(cfg.id)}
+                  >
+                    {test.isPending ? "測試中..." : "測試"}
+                  </Button>
                   <Button size="sm" variant="ghost" onClick={() => onEdit(cfg)}>
                     編輯
                   </Button>
