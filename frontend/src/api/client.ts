@@ -131,6 +131,13 @@ export interface SecurityPushTestCard {
   created_time: string;
   /** Raw FB value (same scale dashboard renders directly). */
   daily_budget?: number | null;
+  /** Raw FB spend string from `insights.data[0].spend` (account
+   * currency major unit). Optional — omit if the insights query
+   * hasn't resolved yet. */
+  spend?: string | null;
+  /** Short label for the spend's date range, mirrors the DatePicker
+   * (e.g. "本月", "近 7 天", "5/1 ~ 5/24"). */
+  spend_range_label?: string;
   account_name?: string;
   anomalies?: string[];
   creator?: string | null;

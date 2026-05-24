@@ -7135,6 +7135,13 @@ class _TestCardPayload(BaseModel):
     name: str
     created_time: str
     daily_budget: Optional[int] = None  # raw FB value, same scale as dashboard
+    # Raw FB spend string from `insights.data[0].spend` (account currency
+    # major unit, e.g. "62845.34"). Optional — frontend may omit if the
+    # insights query hasn't resolved.
+    spend: Optional[str] = None
+    # Short label for the spend's date range, e.g. "本月" / "近 7 天" /
+    # "5/1 ~ 5/24". Mirrors the DatePicker's `toShortLabel(date)` output.
+    spend_range_label: Optional[str] = None
     account_name: str = ""
     anomalies: List[str] = []
     creator: Optional[str] = None
@@ -7206,6 +7213,8 @@ async def test_security_push_config(
                 "account_name": c.account_name,
                 "anomalies": list(c.anomalies),
                 "creator": c.creator,
+                "spend": c.spend,
+                "spend_range_label": c.spend_range_label,
             }
             for c in payload.cards
         ]
