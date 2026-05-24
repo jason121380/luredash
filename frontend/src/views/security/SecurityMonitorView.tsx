@@ -179,9 +179,30 @@ export function SecurityMonitorView() {
           <button
             type="button"
             onClick={() => setPushModalOpen(true)}
-            className="rounded-md border border-border bg-white px-2.5 py-1 text-[12px] font-medium text-gray-500 hover:bg-orange-bg hover:text-orange"
+            className={cn(
+              "flex h-10 select-none items-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 md:h-9",
+              "text-[13px] font-medium text-ink font-sans",
+              "transition-all duration-150 cursor-pointer active:scale-95",
+              "border-border bg-white hover:border-orange-border hover:bg-orange-bg",
+            )}
           >
-            推播設定
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="shrink-0 text-orange"
+              aria-hidden="true"
+            >
+              <title>bell</title>
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+              <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+            </svg>
+            <span>推播設定</span>
           </button>
         </div>
       </Topbar>
