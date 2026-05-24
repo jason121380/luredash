@@ -124,6 +124,18 @@ export interface SecurityPushConfig {
   updated_at: string | null;
 }
 
+export interface SecurityPushTestCard {
+  id: string;
+  name: string;
+  /** ISO 8601 from FB, e.g. "2026-05-23T01:46:00+0000". */
+  created_time: string;
+  /** Raw FB value (same scale dashboard renders directly). */
+  daily_budget?: number | null;
+  account_name?: string;
+  anomalies?: string[];
+  creator?: string | null;
+}
+
 export interface SecurityPushConfigInput {
   id?: string;
   name: string;
@@ -444,14 +456,18 @@ export const api = {
       request<{ ok: boolean }>("DELETE", `/api/security-push/configs/${encodeURIComponent(id)}`, {
         query: { fb_user_id: fbUserId },
       }),
-    /** Fire a placeholder push to every group in the config so the
-     * user can verify channel + group access. Does not advance
-     * `last_run_at`. */
-    test: (fbUserId: string, id: string) =>
+    /** Fire a real-looking sample push to every group in the config.
+     * `cards` is the snapshot of the user's current "待查看" tab —
+     * passing it lets backend skip FB scanning entirely. Does not
+     * advance `last_run_at`. */
+    test: (fbUserId: string, id: string, cards?: SecurityPushTestCard[]) =>
       request<{ ok: boolean; sent: number; errors: string[] }>(
         "POST",
         `/api/security-push/configs/${encodeURIComponent(id)}/test`,
-        { query: { fb_user_id: fbUserId } },
+        {
+          query: { fb_user_id: fbUserId },
+          body: { cards: cards ?? [] },
+        },
       ),
   },
 

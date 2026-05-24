@@ -1,4 +1,9 @@
-import type { SecurityAnomalyTag, SecurityPushConfig, SecurityPushConfigInput } from "@/api/client";
+import type {
+  SecurityAnomalyTag,
+  SecurityPushConfig,
+  SecurityPushConfigInput,
+  SecurityPushTestCard,
+} from "@/api/client";
 import { useLineChannels, useLineGroups } from "@/api/hooks/useLinePush";
 import {
   useDeleteSecurityPushConfig,
@@ -35,9 +40,17 @@ type EditingState = { mode: "list" } | { mode: "new" } | { mode: "edit"; cfg: Se
 export interface SecurityPushSettingsModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Snapshot of the currently-visible 待查看 cards. When provided,
+   * the「測試」button posts these directly to backend so it doesn't
+   * need to re-scan FB. */
+  pendingCards?: SecurityPushTestCard[];
 }
 
-export function SecurityPushSettingsModal({ open, onOpenChange }: SecurityPushSettingsModalProps) {
+export function SecurityPushSettingsModal({
+  open,
+  onOpenChange,
+  pendingCards,
+}: SecurityPushSettingsModalProps) {
   const [state, setState] = useState<EditingState>({ mode: "list" });
   const configsQuery = useSecurityPushConfigs();
   const configs = configsQuery.data ?? [];
@@ -63,6 +76,7 @@ export function SecurityPushSettingsModal({ open, onOpenChange }: SecurityPushSe
         <ConfigList
           configs={configs}
           loading={configsQuery.isLoading}
+          pendingCards={pendingCards}
           onAdd={() => setState({ mode: "new" })}
           onEdit={(cfg) => setState({ mode: "edit", cfg })}
         />
@@ -80,11 +94,13 @@ export function SecurityPushSettingsModal({ open, onOpenChange }: SecurityPushSe
 function ConfigList({
   configs,
   loading,
+  pendingCards,
   onAdd,
   onEdit,
 }: {
   configs: SecurityPushConfig[];
   loading: boolean;
+  pendingCards?: SecurityPushTestCard[];
   onAdd: () => void;
   onEdit: (cfg: SecurityPushConfig) => void;
 }) {
@@ -93,7 +109,7 @@ function ConfigList({
 
   const handleTest = async (id: string) => {
     try {
-      const resp = await test.mutateAsync(id);
+      const resp = await test.mutateAsync({ id, cards: pendingCards });
       if (resp.errors.length > 0) {
         toast(`已送出 ${resp.sent} 則,${resp.errors.length} 則失敗`, "error");
       } else {

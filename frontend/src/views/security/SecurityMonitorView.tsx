@@ -19,7 +19,13 @@ import { useMemo, useState } from "react";
 import { AlertAccountPanel } from "../alerts/AlertAccountPanel";
 import { SecurityCampaignRow } from "./SecurityCampaignRow";
 import { SecurityPushSettingsModal } from "./SecurityPushSettingsModal";
-import { buildSecurityDays, formatDayLabel, resolveBounds } from "./securityData";
+import {
+  buildSecurityDays,
+  effectiveDailyBudget,
+  formatDayLabel,
+  resolveBounds,
+} from "./securityData";
+import type { SecurityPushTestCard } from "@/api/client";
 
 type SecurityTab = "pending" | "safe";
 
@@ -176,6 +182,29 @@ export function SecurityMonitorView() {
     return map;
   }, [activityQueries]);
 
+  // Snapshot of the 待查看 cards — passed into the push-settings modal
+  // so the「測試」button can echo exactly what the user sees on screen
+  // without backend re-scanning FB.
+  const pendingCardsSnapshot = useMemo<SecurityPushTestCard[]>(() => {
+    const out: SecurityPushTestCard[] = [];
+    for (const day of allDays) {
+      for (const r of day.rows) {
+        if (safeIds.has(r.campaign.id)) continue;
+        const c = r.campaign;
+        out.push({
+          id: c.id,
+          name: c.name,
+          created_time: c.created_time ?? r.createdAt.toISOString(),
+          daily_budget: effectiveDailyBudget(c),
+          account_name: c._accountName ?? "",
+          anomalies: r.anomalies,
+          creator: creatorByCampaignId.get(c.id) ?? null,
+        });
+      }
+    }
+    return out;
+  }, [allDays, safeIds, creatorByCampaignId]);
+
   // Show the loading state whenever:
   //   1. Settings are still hydrating (no idea which accounts to show), or
   //   2. The hook is in the loading phase, or
@@ -231,7 +260,11 @@ export function SecurityMonitorView() {
           </button>
         </div>
       </Topbar>
-      <SecurityPushSettingsModal open={pushModalOpen} onOpenChange={setPushModalOpen} />
+      <SecurityPushSettingsModal
+        open={pushModalOpen}
+        onOpenChange={setPushModalOpen}
+        pendingCards={pendingCardsSnapshot}
+      />
 
       <div className="flex min-w-0 items-start md:flex-row">
         {/* Desktop sidebar (≥768px) */}
