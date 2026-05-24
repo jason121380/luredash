@@ -31,9 +31,10 @@ type SecurityTab = "pending" | "safe";
  *
  * The DatePicker state is LOCAL (not the shared `filtersStore.date`)
  * because this view interprets the range as "campaigns created in this
- * window", not "insights for this window" — and defaults to last 7
- * days rather than 30. Keeping it local avoids mutating the shared
- * preset for other views when the user opens 安全監控.
+ * window", not "insights for this window" — and defaults to 本月
+ * (this_month) so the operator sees the full review surface for the
+ * current month. Keeping it local avoids mutating the shared preset
+ * for other views when the user opens 安全監控.
  *
  * Operators triage by tab:
  *   - 待查看: campaigns not yet marked safe
@@ -53,7 +54,7 @@ export function SecurityMonitorView() {
   const [pushModalOpen, setPushModalOpen] = useState(false);
 
   const [date, setDate] = useState<DateConfig>({
-    preset: "last_7d",
+    preset: "this_month",
     from: null,
     to: null,
   });

@@ -34,10 +34,12 @@ const OBJECTIVE_LABELS: Record<string, string> = {
   REACH: "觸及人數",
 };
 
-function fmtTimeHM(d: Date): string {
+function fmtCreatedAt(d: Date): string {
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
   const h = String(d.getHours()).padStart(2, "0");
   const m = String(d.getMinutes()).padStart(2, "0");
-  return `${h}:${m}`;
+  return `${mm}/${dd} ${h}:${m}`;
 }
 
 function fmtBudget(n: number | null | undefined): string {
@@ -167,7 +169,10 @@ export function SecurityCampaignRow({
             <span>編號 {campaign.id}</span>
             {campaign._accountName && <span>{campaign._accountName}</span>}
             <span>{objLabel}</span>
-            <span>{fmtTimeHM(row.createdAt)} 建立</span>
+            <span>
+              <span className="font-bold text-orange">{fmtCreatedAt(row.createdAt)}</span>{" "}
+              最初已建立行銷活動
+            </span>
             <span>
               建立者 <span className="font-semibold text-ink">{creator || "—"}</span>
             </span>
