@@ -7193,7 +7193,7 @@ async def test_security_push_config(
 
     if payload and payload.cards:
         # Snapshot path — zero FB calls. Just transcode the cards
-        # into the shape `_format_security_push_text` expects.
+        # into the shape `build_security_alert_flex` expects.
         matches = [
             {
                 "campaign": {
@@ -7234,17 +7234,21 @@ async def test_security_push_config(
             detail="近 30 天沒有可用的活動可供測試。請先在所選帳戶建立一些活動。",
         )
 
-    text = _format_security_push_text(matches)
-    if payload and payload.cards:
-        prefix = "🧪 [測試推播] 以下為目前「待查看」清單上的活動:\n\n"
-    elif fallback_used:
-        prefix = "🧪 [測試推播] 近 30 天沒有命中異常條件的活動,以下用最近建立的活動示範卡片格式:\n\n"
-    else:
-        prefix = "🧪 [測試推播] 以下為近 30 天命中異常條件的真實活動:\n\n"
-    text = prefix + text
-
     if _http_client is None:
         raise HTTPException(status_code=503, detail="伺服器尚未初始化,請稍後再試")
+
+    # Build flex card carousel (one bubble per campaign) — same shape
+    # the scheduler ships, so the test preview matches a real push.
+    flex = line_client.build_security_alert_flex(matches, tz_name=str(_scheduler_tz()))
+
+    # Mark test pushes in the altText so recipients can tell sample
+    # from production. (Body text already says 「Meta後台系統警示」.)
+    if payload and payload.cards:
+        flex["altText"] = f"[測試] {flex.get('altText', '')}"
+    elif fallback_used:
+        flex["altText"] = f"[測試 · 示範格式] {flex.get('altText', '')}"
+    else:
+        flex["altText"] = f"[測試] {flex.get('altText', '')}"
 
     errors: List[str] = []
     sent = 0
@@ -7253,7 +7257,7 @@ async def test_security_push_config(
             await line_client.line_push(
                 _http_client,
                 gid,
-                [{"type": "text", "text": text}],
+                [flex],
                 access_token=ch_row["access_token"],
             )
             sent += 1
@@ -7663,48 +7667,6 @@ _ANOMALY_LABELS = {
 }
 
 
-def _format_security_push_text(matches: List[dict]) -> str:
-    """Render plain-text LINE message for a batch of flagged campaigns.
-
-    Each match dict has keys: campaign (raw FB campaign dict),
-    account_name (str), anomalies (list[str]), creator (str | None).
-    Up to 5 campaigns per message; trims with "...還有 N 則" when more.
-    """
-    lines: List[str] = ["🚨 新建立活動異常通知", ""]
-    shown = matches[:5]
-    for idx, m in enumerate(shown, 1):
-        c = m["campaign"]
-        budget_v = _effective_daily_budget(c)
-        budget_txt = f"${budget_v:,}" if budget_v else "—"
-        anomaly_txt = "、".join(_ANOMALY_LABELS.get(t, t) for t in m["anomalies"])
-        creator = m.get("creator") or "—"
-        created_local = ""
-        try:
-            iso = c.get("created_time") or ""
-            if len(iso) >= 5 and iso[-5] in ("+", "-") and iso[-3] != ":":
-                iso = iso[:-2] + ":" + iso[-2:]
-            local = datetime.fromisoformat(iso).astimezone(_scheduler_tz())
-            created_local = local.strftime("%m/%d %H:%M")
-        except (TypeError, ValueError):
-            pass
-        name = c.get("name") or "(未命名)"
-        cid = c.get("id") or ""
-        acct_name = m.get("account_name") or ""
-        lines.append(f"{idx}. {name}")
-        lines.append(f"   帳戶：{acct_name}")
-        if created_local:
-            lines.append(f"   建立時間：{created_local}")
-        lines.append(f"   建立者：{creator}")
-        lines.append(f"   日預算：{budget_txt}")
-        lines.append(f"   標記：{anomaly_txt}")
-        lines.append(f"   編號：{cid}")
-        lines.append("")
-    extra = len(matches) - len(shown)
-    if extra > 0:
-        lines.append(f"...另有 {extra} 則新建立活動觸發告警")
-    return "\n".join(lines).rstrip()
-
-
 async def _load_safe_campaign_ids() -> set:
     """Team-wide set of campaign ids the user has explicitly marked
     「沒問題」 in the security view. Stored in
@@ -7929,13 +7891,16 @@ async def _security_push_run_one(cfg: dict) -> None:
         if not matches:
             return
 
-        text = _format_security_push_text(matches)
+        # Flex card carousel — one bubble per campaign. Matches the
+        # shape the test endpoint sends so the production push looks
+        # identical to what the user saw in the test preview.
+        flex = line_client.build_security_alert_flex(matches, tz_name=str(_scheduler_tz()))
         for gid in cfg.get("group_ids") or []:
             try:
                 await line_client.line_push(
                     _http_client,
                     gid,
-                    [{"type": "text", "text": text}],
+                    [flex],
                     access_token=access_token,
                 )
             except line_client.LinePushError as e:
