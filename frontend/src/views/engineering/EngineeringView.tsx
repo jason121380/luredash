@@ -177,6 +177,12 @@ function FbUsagePanel() {
   // FB's X-Business-Use-Case-Usage header keys entries by BM id, so
   // matching the numeric id back to the BM display name makes the
   // panel readable instead of just digits.
+  //
+  // Caveat — IDs may not always align. A BUC entry can come from
+  // calling a *shared* ad account whose owner BM isn't yours, and
+  // `me/adaccounts` may not surface that owner BM. We still show
+  // the mismatch row so the operator knows usage exists for that
+  // BM even without a name.
   const bizNameById = useMemo(() => {
     const m = new Map<string, string>();
     for (const a of accountsQuery.data ?? []) {
@@ -185,6 +191,28 @@ function FbUsagePanel() {
     }
     return m;
   }, [accountsQuery.data]);
+
+  // Dev hint: when nothing matches, the IDs are coming from BMs
+  // outside the user's `me/adaccounts` view (typically shared
+  // accounts). Log once so the operator can confirm.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    if (!usageQuery.data || !accountsQuery.data) return;
+    const bucIds = Object.keys(usageQuery.data.data ?? {});
+    const myBmIds = new Set<string>();
+    for (const a of accountsQuery.data) {
+      if (a.business?.id) myBmIds.add(a.business.id);
+    }
+    const unmatched = bucIds.filter((id) => !myBmIds.has(id));
+    if (unmatched.length > 0) {
+      console.log(
+        "[fb-usage] BUC BM ids without matching me/adaccounts business.id:",
+        unmatched,
+        "your BM ids:",
+        [...myBmIds],
+      );
+    }
+  }, [usageQuery.data, accountsQuery.data]);
 
   return (
     <Card
