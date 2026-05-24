@@ -7059,6 +7059,63 @@ async def delete_security_push_config(config_id: str, fb_user_id: str = Query(..
     return {"ok": True}
 
 
+@app.post("/api/security-push/configs/{config_id}/test")
+async def test_security_push_config(config_id: str, fb_user_id: str = Query(...)):
+    """Fire a placeholder push to every group in this config so the
+    user can verify channel access + group membership without waiting
+    for the next anomaly to trigger. Does NOT advance `last_run_at`,
+    so the next scheduler tick still processes real events normally."""
+    _assert_known_user(fb_user_id)
+    pool = _require_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM security_push_configs WHERE id = $1::uuid",
+            config_id,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="config 不存在")
+    if row["owner_fb_user_id"] != fb_user_id:
+        raise HTTPException(status_code=403, detail="無權測試此 config")
+
+    async with pool.acquire() as conn:
+        ch_row = await conn.fetchrow(
+            "SELECT access_token FROM line_channels WHERE id = $1 AND enabled",
+            row["channel_id"],
+        )
+    if not ch_row or not ch_row["access_token"]:
+        raise HTTPException(status_code=400, detail="LINE channel 已停用或缺 access_token")
+
+    filter_labels = "、".join(
+        _ANOMALY_LABELS.get(t, t) for t in (row["anomaly_filters"] or [])
+    ) or "(尚未選擇)"
+    text = (
+        "🧪 [測試推播] 安全監控設定可正常運作\n"
+        f"設定名稱:{row['name']}\n"
+        f"目標群組:{len(row['group_ids'] or [])} 個\n"
+        f"異常條件:{filter_labels}\n"
+        f"檢查頻率:每 {row['poll_interval_minutes']} 分鐘\n\n"
+        "實際推播會在偵測到新建立活動命中以上條件時自動發出。"
+    )
+
+    errors: List[str] = []
+    sent = 0
+    for gid in (row["group_ids"] or []):
+        try:
+            await line_client.line_push(
+                _http_client,
+                gid,
+                [{"type": "text", "text": text}],
+                access_token=ch_row["access_token"],
+            )
+            sent += 1
+        except line_client.LinePushError as e:
+            errors.append(f"group {gid}: {e}")
+
+    if errors and sent == 0:
+        raise HTTPException(status_code=502, detail="; ".join(errors))
+    return {"ok": True, "sent": sent, "errors": errors}
+
+
 # ── Scheduler loop ────────────────────────────────────────────
 
 async def _scheduler_tick() -> None:
