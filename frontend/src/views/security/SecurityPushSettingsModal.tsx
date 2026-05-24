@@ -99,7 +99,13 @@ function ConfigList({
         toast(`已送出測試推播到 ${resp.sent} 個群組`, "success");
       }
     } catch (e) {
-      toast(`測試失敗:${e instanceof Error ? e.message : "未知錯誤"}`, "error");
+      const raw = e instanceof Error ? e.message : "未知錯誤";
+      // LINE 400 通常代表 bot 不在那個群組,或選錯了 channel
+      // (此 group 屬於別的 OA,access_token 對不上)
+      const friendly = /400|Failed to send/.test(raw)
+        ? "推播失敗:bot 可能不在所選群組,或群組屬於不同的 LINE 官方帳號。請檢查 channel 與群組的搭配。"
+        : `測試失敗:${raw}`;
+      toast(friendly, "error");
     }
   };
 
@@ -304,23 +310,34 @@ function ConfigForm({
           </p>
         ) : (
           <div className="flex max-h-[160px] flex-col gap-1.5 overflow-y-auto rounded-md border border-border bg-white p-2">
-            {groupsForChannel.map((g) => (
-              <label
-                key={g.group_id}
-                className="flex cursor-pointer items-center gap-2 text-[13px]"
-              >
-                <input
-                  type="checkbox"
-                  className="custom-cb"
-                  checked={groupIds.has(g.group_id)}
-                  onChange={() => toggleGroup(g.group_id)}
-                />
-                <span>{g.group_name || g.group_id}</span>
-                {g.channel_name && (
-                  <span className="text-[11px] text-gray-400">· {g.channel_name}</span>
-                )}
-              </label>
-            ))}
+            {groupsForChannel.map((g) => {
+              const channelMismatch = !!g.channel_id && g.channel_id !== channelId;
+              return (
+                <label
+                  key={g.group_id}
+                  className="flex cursor-pointer items-center gap-2 text-[13px]"
+                >
+                  <input
+                    type="checkbox"
+                    className="custom-cb"
+                    checked={groupIds.has(g.group_id)}
+                    onChange={() => toggleGroup(g.group_id)}
+                  />
+                  <span>{g.group_name || g.group_id}</span>
+                  {g.channel_name && (
+                    <span
+                      className={cn(
+                        "text-[11px]",
+                        channelMismatch ? "font-semibold text-red-600" : "text-gray-400",
+                      )}
+                    >
+                      · {g.channel_name}
+                      {channelMismatch && " (非當前 channel,可能推不出去)"}
+                    </span>
+                  )}
+                </label>
+              );
+            })}
           </div>
         )}
       </Field>
