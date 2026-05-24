@@ -7152,15 +7152,19 @@ async def test_security_push_config(config_id: str, fb_user_id: str = Query(...)
     since_dt = datetime.now(timezone.utc) - timedelta(days=30)
 
     fallback_used = False
+    # Cap test-time fan-out at 10 accounts: test is meant to verify
+    # plumbing (channel, group, push format) — not exhaustively scan
+    # the entire workspace. 80-account scans were timing out HTTP
+    # requests and also stressing FB rate limits.
     ctx_token = _current_fb_user_id.set(owner_uid)
     try:
         matches = await _collect_security_matches(
-            cfg, since_dt, require_anomaly=True, limit=2
+            cfg, since_dt, require_anomaly=True, limit=2, max_accounts=10
         )
         if not matches:
             fallback_used = True
             matches = await _collect_security_matches(
-                cfg, since_dt, require_anomaly=False, limit=2
+                cfg, since_dt, require_anomaly=False, limit=2, max_accounts=10
             )
     finally:
         _current_fb_user_id.reset(ctx_token)
@@ -7641,11 +7645,19 @@ async def _collect_security_matches(
     *,
     require_anomaly: bool = True,
     limit: Optional[int] = None,
+    max_accounts: Optional[int] = None,
 ) -> List[dict]:
     """Pull campaigns created since `since_dt` for the config's accounts
     and (optionally) filter to those whose anomalies intersect
     `cfg["anomaly_filters"]`. Each match is enriched with
     `account_name` + `creator` via FB Activity Log.
+
+    Account fetches run IN PARALLEL via asyncio.gather so an 80-account
+    scan completes in roughly the time of the slowest single account
+    instead of the sum. `max_accounts` caps the scan width — set it
+    to a small number (e.g. 10) for the test endpoint so it returns
+    within HTTP timeout instead of fanning out to every selected
+    account.
 
     Assumes the caller has already set the `_current_fb_user_id`
     contextvar to the config's owner so FB calls go through the right
@@ -7669,10 +7681,13 @@ async def _collect_security_matches(
     if not account_ids:
         return []
 
+    if max_accounts is not None and max_accounts > 0:
+        account_ids = account_ids[:max_accounts]
+
     filters = set(cfg.get("anomaly_filters") or [])
 
-    matches: List[dict] = []
-    for aid in account_ids:
+    async def _scan_one(aid: str) -> list:
+        out: list = []
         try:
             camps = await _fetch_campaigns_for_account(
                 aid,
@@ -7683,7 +7698,7 @@ async def _collect_security_matches(
             )
         except HTTPException as e:
             print(f"[security-push] fetch {aid} failed: {e.detail}", flush=True)
-            continue
+            return out
         for c in camps:
             created = c.get("created_time")
             if not created:
@@ -7701,19 +7716,30 @@ async def _collect_security_matches(
             hit = [t for t in tags if t in filters]
             if require_anomaly and not hit:
                 continue
-            matches.append(
+            out.append(
                 {
                     "campaign": c,
                     "account_id": aid,
                     "account_name": "",
-                    # When `require_anomaly=False` and no tag hit, leave
-                    # anomalies empty so the formatter doesn't claim a
-                    # false-positive flag.
                     "anomalies": hit,
                     "creator": None,
                     "_created_dt": created_dt,
                 }
             )
+        return out
+
+    # Parallel fan-out. return_exceptions=True so one bad account
+    # doesn't tank the whole gather; we already swallow HTTPException
+    # inside _scan_one but a stray exception type would otherwise
+    # propagate and kill the test endpoint.
+    per_account = await asyncio.gather(
+        *(_scan_one(aid) for aid in account_ids),
+        return_exceptions=True,
+    )
+    matches: List[dict] = []
+    for r in per_account:
+        if isinstance(r, list):
+            matches.extend(r)
 
     if not matches:
         return []
@@ -7737,11 +7763,11 @@ async def _collect_security_matches(
 
     since_epoch = int(since_dt.timestamp())
     until_epoch = int(datetime.now(timezone.utc).timestamp())
-    affected_aids = {m["account_id"] for m in matches}
-    creator_by_cid: dict = {}
-    for aid in affected_aids:
+    affected_aids = list({m["account_id"] for m in matches})
+
+    async def _fetch_activities(aid: str) -> list:
         try:
-            acts = await fb_get_paginated(
+            return await fb_get_paginated(
                 f"{aid}/activities",
                 {
                     "since": str(since_epoch),
@@ -7751,6 +7777,15 @@ async def _collect_security_matches(
                 },
             )
         except HTTPException:
+            return []
+
+    activities_per_aid = await asyncio.gather(
+        *(_fetch_activities(aid) for aid in affected_aids),
+        return_exceptions=True,
+    )
+    creator_by_cid: dict = {}
+    for acts in activities_per_aid:
+        if not isinstance(acts, list):
             continue
         for a in acts:
             if not isinstance(a, dict):
