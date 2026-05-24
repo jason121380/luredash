@@ -173,12 +173,12 @@ function ConfigForm({
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [error, setError] = useState<string | null>(null);
 
-  // Filter groups by selected channel so the user only sees groups
-  // belonging to the channel they're sending FROM.
-  const groupsForChannel = useMemo(
-    () => groups.filter((g) => g.channel_id === channelId),
-    [groups, channelId],
-  );
+  // Show all live groups regardless of which channel they're nominally
+  // attached to. Legacy groups have `channel_id === null` (LINE 推播設定
+  // page also lists them), and we don't want to silently hide a group
+  // the user can see elsewhere. The channel-name suffix on each row
+  // makes the binding visible so the user can pick the matching pair.
+  const groupsForChannel = groups;
 
   const toggleGroup = (gid: string) => {
     const next = new Set(groupIds);
@@ -262,7 +262,7 @@ function ConfigForm({
       <Field label="LINE 群組" hint="發給哪些群組(可複選)">
         {groupsForChannel.length === 0 ? (
           <p className="text-[12px] text-gray-500">
-            這個 channel 下還沒有任何 group。請先把 bot 加進 LINE 群組。
+            尚未在任何 LINE 群組中發現 bot。請先把 bot 加進 LINE 群組。
           </p>
         ) : (
           <div className="flex max-h-[160px] flex-col gap-1.5 overflow-y-auto rounded-md border border-border bg-white p-2">
@@ -278,6 +278,9 @@ function ConfigForm({
                   onChange={() => toggleGroup(g.group_id)}
                 />
                 <span>{g.group_name || g.group_id}</span>
+                {g.channel_name && (
+                  <span className="text-[11px] text-gray-400">· {g.channel_name}</span>
+                )}
               </label>
             ))}
           </div>
