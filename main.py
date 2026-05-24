@@ -6966,7 +6966,12 @@ class SecurityPushConfigPayload(BaseModel):
     group_ids: List[str] = []
     account_ids: List[str] = []
     anomaly_filters: List[str] = []
-    poll_interval_minutes: int = 10
+    # Minimum 10 minutes default so even a 80-account workspace stays
+    # well under FB's per-user Graph API call budget (each tick fires
+    # 1 campaigns fetch per account; at 5 min it's 960/hr just for
+    # this view, which trips the app-level rate limit and even
+    # blocks /me login).
+    poll_interval_minutes: int = 30
     enabled: bool = True
 
 
