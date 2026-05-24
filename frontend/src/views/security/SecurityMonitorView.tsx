@@ -9,7 +9,7 @@ import { LoadingState } from "@/components/LoadingState";
 import { MobileAccountPicker } from "@/components/MobileAccountPicker";
 import { Topbar, TopbarSeparator } from "@/layout/Topbar";
 import { cn } from "@/lib/cn";
-import type { DateConfig } from "@/lib/datePicker";
+import { type DateConfig, toShortLabel } from "@/lib/datePicker";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -190,7 +190,9 @@ export function SecurityMonitorView() {
 
   // Snapshot of the 待查看 cards — passed into the push-settings modal
   // so the「測試」button can echo exactly what the user sees on screen
-  // without backend re-scanning FB.
+  // without backend re-scanning FB. Spend + range label travel along
+  // so the LINE card shows「已花費 $X(本月)」exactly like the table.
+  const spendRangeLabel = useMemo(() => toShortLabel(date), [date]);
   const pendingCardsSnapshot = useMemo<SecurityPushTestCard[]>(() => {
     const out: SecurityPushTestCard[] = [];
     for (const day of allDays) {
@@ -202,6 +204,8 @@ export function SecurityMonitorView() {
           name: c.name,
           created_time: c.created_time ?? r.createdAt.toISOString(),
           daily_budget: effectiveDailyBudget(c),
+          spend: spendByCampaignId.get(c.id) ?? null,
+          spend_range_label: spendRangeLabel,
           account_name: c._accountName ?? "",
           anomalies: r.anomalies,
           creator: creatorByCampaignId.get(c.id) ?? null,
@@ -209,7 +213,7 @@ export function SecurityMonitorView() {
       }
     }
     return out;
-  }, [allDays, safeIds, creatorByCampaignId]);
+  }, [allDays, safeIds, creatorByCampaignId, spendByCampaignId, spendRangeLabel]);
 
   // Show the loading state whenever:
   //   1. Settings are still hydrating (no idea which accounts to show), or

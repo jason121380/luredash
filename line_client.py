@@ -723,7 +723,13 @@ def build_security_alert_flex(
         ]
         spend = m.get("spend")
         if spend is not None:
-            body_contents.append(_sec_kpi_row("已花費", _sec_fmt_money(spend)))
+            spend_val = _sec_fmt_money(spend)
+            range_label = (m.get("spend_range_label") or "").strip()
+            # Append the date-range hint inline so recipients know which
+            # window the spend covers (matches the DatePicker on /security).
+            if range_label and spend_val != "—":
+                spend_val = f"{spend_val}({range_label})"
+            body_contents.append(_sec_kpi_row("已花費", spend_val))
         body_contents.append(_sec_kpi_row("編號", cid))
 
         bubbles.append(
