@@ -217,12 +217,14 @@ function ConfigForm({
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [error, setError] = useState<string | null>(null);
 
-  // Show all live groups regardless of which channel they're nominally
-  // attached to. Legacy groups have `channel_id === null` (LINE 推播設定
-  // page also lists them), and we don't want to silently hide a group
-  // the user can see elsewhere. The channel-name suffix on each row
-  // makes the binding visible so the user can pick the matching pair.
-  const groupsForChannel = groups;
+  // Only show groups belonging to the selected channel. LINE's push
+  // API uses the channel's access_token, and a bot can only push to
+  // groups it has joined under that channel — listing groups from
+  // other channels just creates 400-failure traps.
+  const groupsForChannel = useMemo(
+    () => groups.filter((g) => g.channel_id === channelId),
+    [groups, channelId],
+  );
 
   const toggleGroup = (gid: string) => {
     const next = new Set(groupIds);
@@ -306,38 +308,24 @@ function ConfigForm({
       <Field label="LINE 群組" hint="發給哪些群組(可複選)">
         {groupsForChannel.length === 0 ? (
           <p className="text-[12px] text-gray-500">
-            尚未在任何 LINE 群組中發現 bot。請先把 bot 加進 LINE 群組。
+            此 channel 下還沒有任何群組。請先把 bot 加入 LINE 群組,或切到其他 channel 試試。
           </p>
         ) : (
           <div className="flex max-h-[160px] flex-col gap-1.5 overflow-y-auto rounded-md border border-border bg-white p-2">
-            {groupsForChannel.map((g) => {
-              const channelMismatch = !!g.channel_id && g.channel_id !== channelId;
-              return (
-                <label
-                  key={g.group_id}
-                  className="flex cursor-pointer items-center gap-2 text-[13px]"
-                >
-                  <input
-                    type="checkbox"
-                    className="custom-cb"
-                    checked={groupIds.has(g.group_id)}
-                    onChange={() => toggleGroup(g.group_id)}
-                  />
-                  <span>{g.group_name || g.group_id}</span>
-                  {g.channel_name && (
-                    <span
-                      className={cn(
-                        "text-[11px]",
-                        channelMismatch ? "font-semibold text-red-600" : "text-gray-400",
-                      )}
-                    >
-                      · {g.channel_name}
-                      {channelMismatch && " (非當前 channel,可能推不出去)"}
-                    </span>
-                  )}
-                </label>
-              );
-            })}
+            {groupsForChannel.map((g) => (
+              <label
+                key={g.group_id}
+                className="flex cursor-pointer items-center gap-2 text-[13px]"
+              >
+                <input
+                  type="checkbox"
+                  className="custom-cb"
+                  checked={groupIds.has(g.group_id)}
+                  onChange={() => toggleGroup(g.group_id)}
+                />
+                <span>{g.group_name || g.group_id}</span>
+              </label>
+            ))}
           </div>
         )}
       </Field>
