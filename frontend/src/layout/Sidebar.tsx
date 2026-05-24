@@ -88,6 +88,26 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    to: "/security",
+    label: "安全監控",
+    icon: (
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z" />
+        <polyline points="9 12 11 14 15 10" />
+      </svg>
+    ),
+  },
+  {
     to: "/optimization",
     label: "AI 幕僚",
     icon: (

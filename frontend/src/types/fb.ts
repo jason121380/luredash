@@ -48,10 +48,29 @@ export interface FbCampaign extends FbBaseEntity {
   objective?: string;
   daily_budget?: string;
   lifetime_budget?: string;
+  // ISO 8601 timestamps from FB ("2026-05-22T15:30:00+0000"). created_time
+  // is used by 安全監控 to group by creation day; updated_time is used by
+  // the LINE flex push to render "M/D 已暫停".
+  created_time?: string;
+  updated_time?: string;
   // injected client-side during normalization so we can render the
   // account name on multi-account rows
   _accountId?: string;
   _accountName?: string;
+}
+
+/** One row from FB Activity Log (`act_X/activities`). The `extra_data`
+ * field is a JSON-encoded string whose shape FB does not document;
+ * the security view treats it as opaque text. */
+export interface FbActivity {
+  actor_name?: string;
+  event_time?: string;
+  event_type?: string;
+  translated_event_type?: string;
+  object_id?: string;
+  object_name?: string;
+  object_type?: string;
+  extra_data?: string;
 }
 
 export interface FbAdset extends FbBaseEntity {
