@@ -197,9 +197,20 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
     ensureSdkLoaded().then(() => {
       window.FB?.getLoginStatus((resp) => {
         if (resp.status === "connected" && resp.authResponse) {
-          localStorage.setItem("meta_dash_fb_token", resp.authResponse.accessToken);
-          if (!cached) {
-            void exchangeToken(resp.authResponse.accessToken);
+          const fresh = resp.authResponse.accessToken;
+          const cachedNow = localStorage.getItem("meta_dash_fb_token");
+          localStorage.setItem("meta_dash_fb_token", fresh);
+          // Retry with the FRESH token when:
+          //   - no cached token at all (first load), OR
+          //   - the cached attempt already failed and wiped its entry,
+          //     leaving us in "unauth" with an error — FB still has a
+          //     live session so we can self-heal without making the user
+          //     click anything.
+          //   - cached value differs from the fresh one (cached was stale)
+          const cachedWasCleared = !!cached && !cachedNow;
+          const cachedStale = !!cached && !!cachedNow && cachedNow !== fresh;
+          if (!cached || cachedWasCleared || cachedStale) {
+            void exchangeToken(fresh);
           }
         } else if (!cached) {
           setStatus((prev) => (prev === "checking" ? "unauth" : prev));

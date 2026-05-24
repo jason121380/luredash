@@ -2151,9 +2151,21 @@ async def set_token(payload: TokenPayload):
     except Exception as e:
         _runtime_token = None
         # Don't leak FB error internals (URLs, app secret hints) to the
-        # client — log internally, surface a generic message.
+        # client — log internally, surface a categorised hint based on
+        # the FB error code so the user knows what to do next.
         print(f"[auth] token verify failed: {e!r}", flush=True)
-        raise HTTPException(status_code=400, detail="Token verification failed")
+        err_text = str(e)
+        if "190" in err_text or "OAuthException" in err_text or "expired" in err_text.lower():
+            # 190 = "Invalid OAuth access token" — typically expired
+            # cached token. FB.login() will mint a fresh one.
+            detail = "FB token 已過期。請再次點擊登入按鈕重新授權。"
+        elif "104" in err_text or "appsecret_proof" in err_text:
+            detail = "FB App 設定問題,請聯絡管理員。"
+        elif "Could not connect" in err_text or "timeout" in err_text.lower():
+            detail = "無法連線到 Facebook,請稍後再試。"
+        else:
+            detail = "Token 驗證失敗。請清除瀏覽器資料後重新登入。"
+        raise HTTPException(status_code=400, detail=detail)
 
 
 @app.delete("/api/auth/token")
