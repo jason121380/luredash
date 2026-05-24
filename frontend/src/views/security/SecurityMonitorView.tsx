@@ -198,11 +198,15 @@ export function SecurityMonitorView() {
 
         <div className="min-w-0 flex-1 p-3 md:p-5">
           {showLoading ? (
+            // Don't pass loaded/total — once `isLoading` flips false
+            // (lite returned with empty data) the hook reports
+            // loadedCount=accounts.length, which the LoadingState
+            // treats as "honest mode 100%". The fake time-based
+            // curve is more honest here since we don't have real
+            // per-account progress to surface.
             <LoadingState
               title="載入廣告資料中..."
               subtitle="正在從 Facebook 拉取活動清單"
-              loaded={overview.loadedCount}
-              total={overview.totalCount}
             />
           ) : visibleAll.length === 0 ? (
             <EmptyState>請先在設定中啟用廣告帳戶</EmptyState>
