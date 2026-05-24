@@ -23,6 +23,39 @@ export type SecurityAnomaly = "deep_night" | "weekend" | "burst" | "high_budget"
  * the comparison divides by 100 before checking. */
 export const HIGH_DAILY_BUDGET_DOLLARS = 2000;
 
+/** Return the effective daily budget in CENTS for a campaign.
+ *
+ *   - CBO (Campaign Budget Optimization): campaign.daily_budget is set
+ *     directly. Return it.
+ *   - ABO (Adset Budget Optimization): campaign.daily_budget is empty
+ *     and each adset has its own daily_budget. Return the SUM of
+ *     active adsets' daily_budget so 安全監控 can still surface a
+ *     meaningful total for the "已花費 > $2000/日" check.
+ *   - Neither set (lifetime budget, no budget): return null.
+ *
+ * Returns `null` rather than `0` so callers can distinguish "no
+ * budget data" from "$0 budget".
+ */
+export function effectiveDailyBudgetCents(c: FbCampaign): number | null {
+  const campaignBudget = Number(c.daily_budget);
+  if (Number.isFinite(campaignBudget) && campaignBudget > 0) {
+    return campaignBudget;
+  }
+  const adsets = c.adsets?.data ?? [];
+  let sum = 0;
+  let any = false;
+  for (const a of adsets) {
+    // Skip archived/deleted adsets — their budget isn't actually spending.
+    if (a.status === "ARCHIVED" || a.status === "DELETED") continue;
+    const v = Number(a.daily_budget);
+    if (Number.isFinite(v) && v > 0) {
+      sum += v;
+      any = true;
+    }
+  }
+  return any ? sum : null;
+}
+
 export interface SecurityRow {
   campaign: FbCampaign;
   createdAt: Date;
@@ -126,11 +159,9 @@ export function buildSecurityDays(
     const anomalies: SecurityAnomaly[] = [];
     if (hour < 6) anomalies.push("deep_night");
     if (weekday === 0 || weekday === 6) anomalies.push("weekend");
-    if (c.daily_budget) {
-      const dollars = Number(c.daily_budget) / 100;
-      if (Number.isFinite(dollars) && dollars > HIGH_DAILY_BUDGET_DOLLARS) {
-        anomalies.push("high_budget");
-      }
+    const effective = effectiveDailyBudgetCents(c);
+    if (effective !== null && effective / 100 > HIGH_DAILY_BUDGET_DOLLARS) {
+      anomalies.push("high_budget");
     }
     rows.push({ campaign: c, createdAt: created, anomalies });
   }

@@ -1,5 +1,7 @@
+import { api } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
+import { useFbAuth } from "@/auth/FbAuthProvider";
 import { AcctSidebarToggle } from "@/components/AcctSidebarToggle";
 import { DatePicker } from "@/components/DatePicker";
 import { EmptyState } from "@/components/EmptyState";
@@ -11,6 +13,8 @@ import type { DateConfig } from "@/lib/datePicker";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
+import type { FbActivity } from "@/types/fb";
+import { useQueries } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { AlertAccountPanel } from "../alerts/AlertAccountPanel";
 import { SecurityCampaignRow } from "./SecurityCampaignRow";
@@ -96,6 +100,47 @@ export function SecurityMonitorView() {
     return { since: Math.floor(from / 1000), until: Math.floor(to / 1000) };
   }, [date]);
 
+  // Eager activity-log prefetch per visible account so we can show the
+  // creator name on every card without waiting for the user to expand.
+  // Uses the SAME queryKey as `useAccountActivities` in the row so the
+  // expand path hits the warmed cache (no double fetch).
+  const { status: authStatus } = useFbAuth();
+  const activityQueries = useQueries({
+    queries: visibleAll.map((acc) => ({
+      queryKey: ["activities", acc.id, activitiesBounds.since, activitiesBounds.until],
+      queryFn: async (): Promise<FbActivity[]> => {
+        const resp = await api.accounts.activities(
+          acc.id,
+          activitiesBounds.since,
+          activitiesBounds.until,
+        );
+        return resp.data ?? [];
+      },
+      enabled: authStatus === "auth" && !!acc.id,
+      staleTime: 2 * 60 * 1000,
+    })),
+  });
+
+  // campaign_id → actor_name of the user who created it. Filter on
+  // event_type matching "create" + object_type === "CAMPAIGN" so we
+  // don't accidentally pick up adset / ad creates.
+  const creatorByCampaignId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const q of activityQueries) {
+      if (!q.data) continue;
+      for (const a of q.data) {
+        if (a.object_type !== "CAMPAIGN") continue;
+        if (!a.object_id || map.has(a.object_id)) continue;
+        const evt = a.event_type ?? "";
+        const tEvt = a.translated_event_type ?? "";
+        if (evt.startsWith("create") || tEvt.includes("已建立")) {
+          map.set(a.object_id, a.actor_name ?? "");
+        }
+      }
+    }
+    return map;
+  }, [activityQueries]);
+
   // Show the loading state whenever:
   //   1. Settings are still hydrating (no idea which accounts to show), or
   //   2. The hook is in the loading phase, or
@@ -160,6 +205,8 @@ export function SecurityMonitorView() {
               ) : (
                 <SecurityDayList
                   days={visibleDays}
+                  creatorByCampaignId={creatorByCampaignId}
+                  defaultExpanded={tab === "pending"}
                   activitiesSince={activitiesBounds.since}
                   activitiesUntil={activitiesBounds.until}
                 />
@@ -236,11 +283,19 @@ function TabButton({
 
 interface SecurityDayListProps {
   days: ReturnType<typeof buildSecurityDays>;
+  creatorByCampaignId: Map<string, string>;
+  defaultExpanded: boolean;
   activitiesSince: number;
   activitiesUntil: number;
 }
 
-function SecurityDayList({ days, activitiesSince, activitiesUntil }: SecurityDayListProps) {
+function SecurityDayList({
+  days,
+  creatorByCampaignId,
+  defaultExpanded,
+  activitiesSince,
+  activitiesUntil,
+}: SecurityDayListProps) {
   return (
     <div className="flex flex-col gap-4">
       {days.map((day) => (
@@ -254,6 +309,8 @@ function SecurityDayList({ days, activitiesSince, activitiesUntil }: SecurityDay
               <SecurityCampaignRow
                 key={row.campaign.id}
                 row={row}
+                creator={creatorByCampaignId.get(row.campaign.id)}
+                defaultExpanded={defaultExpanded}
                 activitiesSince={activitiesSince}
                 activitiesUntil={activitiesUntil}
               />

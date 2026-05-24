@@ -392,12 +392,6 @@ export const api = {
       request<{ data: FbActivity[] }>("GET", `/api/accounts/${accountId}/activities`, {
         query: { since: String(since), until: String(until) },
       }),
-    /** FB user ids with permission on this ad account (BM-assigned
-     * users, falling back to legacy `users` for non-BM accounts).
-     * Used by 安全監控 to flag activities whose actor_id isn't on the
-     * roster. */
-    assignedUsers: (accountId: string) =>
-      request<{ data: string[] }>("GET", `/api/accounts/${accountId}/assigned-users`),
   },
 
   campaigns: {

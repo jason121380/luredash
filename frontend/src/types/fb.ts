@@ -53,6 +53,17 @@ export interface FbCampaign extends FbBaseEntity {
   // the LINE flex push to render "M/D 已暫停".
   created_time?: string;
   updated_time?: string;
+  // Nested adset budgets — populated when the backend asks for
+  // `adsets{daily_budget,lifetime_budget,status}`. Used by 安全監控 to
+  // compute an "effective" daily budget when the campaign uses ABO
+  // (per-adset budgets) instead of CBO (campaign-level budget).
+  adsets?: {
+    data?: Array<{
+      daily_budget?: string;
+      lifetime_budget?: string;
+      status?: FbEntityStatus;
+    }>;
+  };
   // injected client-side during normalization so we can render the
   // account name on multi-account rows
   _accountId?: string;

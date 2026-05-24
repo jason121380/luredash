@@ -1,12 +1,16 @@
 import { useAccountActivities } from "@/api/hooks/useAccountActivities";
-import { useAccountAssignedUsers } from "@/api/hooks/useAccountAssignedUsers";
 import { Badge } from "@/components/Badge";
 import { cn } from "@/lib/cn";
 import { fM } from "@/lib/format";
 import { useSecurityStore } from "@/stores/securityStore";
 import type { FbActivity } from "@/types/fb";
 import { useMemo, useState } from "react";
-import { type SecurityAnomaly, anomalyLabel, summariseExtraData } from "./securityData";
+import {
+  type SecurityAnomaly,
+  anomalyLabel,
+  effectiveDailyBudgetCents,
+  summariseExtraData,
+} from "./securityData";
 import type { SecurityRow } from "./securityData";
 
 /**
@@ -36,12 +40,8 @@ function fmtTimeHM(d: Date): string {
   return `${h}:${m}`;
 }
 
-function fmtDailyBudget(raw: string | undefined): string {
-  if (!raw) return "—";
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return "—";
-  // FB returns budget in minor units (cents). The dashboard divides
-  // by 100 for display; mirror that here.
+function fmtCents(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n) || n <= 0) return "—";
   return `$${fM(n / 100)}`;
 }
 
@@ -54,6 +54,14 @@ const ANOMALY_CLASS: Record<SecurityAnomaly, string> = {
 
 export interface SecurityCampaignRowProps {
   row: SecurityRow;
+  /** Name of the FB user who created this campaign (read from the
+   * Activity Log's `create_campaign_group` event). Empty when the
+   * creator event is missing from the fetched window (e.g. campaign
+   * was created before the date range). */
+  creator?: string;
+  /** Initial value of the expanded state. Set to true for the 待查看
+   * tab so the editor's history is visible without an extra click. */
+  defaultExpanded?: boolean;
   /** Lower bound for the activities fetch (epoch seconds). Shared with
    * the day-group's date range so we only load activities relevant to
    * the user's filter window. */
@@ -64,26 +72,42 @@ export interface SecurityCampaignRowProps {
 
 export function SecurityCampaignRow({
   row,
+  creator,
+  defaultExpanded,
   activitiesSince,
   activitiesUntil,
 }: SecurityCampaignRowProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded ?? false);
   const campaign = row.campaign;
   const accountId = campaign._accountId ?? null;
   const isSafe = useSecurityStore((s) => s.safeIds.has(campaign.id));
   const toggleSafe = useSecurityStore((s) => s.toggleSafe);
 
+  // Activity log fetch — shares its React Query cache key with the
+  // view-level multi-account fetch, so by the time this row mounts
+  // the data is typically already in cache.
   const activitiesQuery = useAccountActivities(
     accountId,
     activitiesSince,
     activitiesUntil,
     expanded,
   );
-  const assignedUsersQuery = useAccountAssignedUsers(accountId, expanded);
 
   const objLabel = campaign.objective
     ? (OBJECTIVE_LABELS[campaign.objective] ?? campaign.objective)
     : "—";
+
+  // Daily budget: prefer campaign-level (CBO); fall back to summed
+  // active-adset budgets (ABO). Returns cents.
+  const dailyBudgetCents = effectiveDailyBudgetCents(campaign);
+  const dailyBudgetIsAggregate = dailyBudgetCents !== null && !campaign.daily_budget;
+
+  // Spend so far in the date-range window. FB insights return spend
+  // as a string IN DOLLARS (not cents). Undefined until the full
+  // overview query resolves.
+  const spendRaw = campaign.insights?.data?.[0]?.spend;
+  const spendDollars = spendRaw ? Number(spendRaw) : Number.NaN;
+  const spendLabel = Number.isFinite(spendDollars) ? `$${fM(spendDollars)}` : "—";
 
   const matchedActivities = useMemo<FbActivity[]>(() => {
     if (!activitiesQuery.data) return [];
@@ -105,10 +129,6 @@ export function SecurityCampaignRow({
             <span className="truncate text-[14px] font-semibold text-ink" title={campaign.name}>
               {campaign.name}
             </span>
-            {/* Baseline reason badge — every campaign in this view is
-                here because it was newly created in the chosen window.
-                Showing it explicitly makes "no anomaly badges" read as
-                "normal new creation" rather than "missing label". */}
             <span className="rounded-full bg-gray-100 px-2 py-[2px] text-[10px] font-semibold text-gray-600">
               新建立
             </span>
@@ -129,7 +149,18 @@ export function SecurityCampaignRow({
             {campaign._accountName && <span>{campaign._accountName}</span>}
             <span>{objLabel}</span>
             <span>{fmtTimeHM(row.createdAt)} 建立</span>
-            <span>日預算 {fmtDailyBudget(campaign.daily_budget)}</span>
+            <span>
+              建立者 <span className="font-semibold text-ink">{creator || "—"}</span>
+            </span>
+            <span>
+              日預算 {fmtCents(dailyBudgetCents)}
+              {dailyBudgetIsAggregate && (
+                <span className="ml-1 text-[10px] text-gray-300">(廣告組合加總)</span>
+              )}
+            </span>
+            <span>
+              已花費 <span className="font-semibold text-ink">{spendLabel}</span>
+            </span>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5 self-start md:self-center">
@@ -159,11 +190,6 @@ export function SecurityCampaignRow({
 
       {expanded && (
         <div className="border-t border-border bg-bg/40 px-3 py-2 md:px-3.5">
-          <RosterStatus
-            isLoading={assignedUsersQuery.isLoading}
-            isError={assignedUsersQuery.isError}
-            size={assignedUsersQuery.data?.size ?? 0}
-          />
           {!accountId ? (
             <p className="text-[11px] text-gray-500">無帳戶資訊,無法載入編輯紀錄</p>
           ) : activitiesQuery.isLoading ? (
@@ -177,11 +203,7 @@ export function SecurityCampaignRow({
           ) : (
             <ul className="flex flex-col gap-1.5">
               {matchedActivities.map((a, i) => (
-                <ActivityLine
-                  key={`${a.event_time ?? ""}-${i}`}
-                  activity={a}
-                  assignedUsers={assignedUsersQuery.data}
-                />
+                <ActivityLine key={`${a.event_time ?? ""}-${i}`} activity={a} />
               ))}
             </ul>
           )}
@@ -191,14 +213,7 @@ export function SecurityCampaignRow({
   );
 }
 
-interface ActivityLineProps {
-  activity: FbActivity;
-  /** Set of FB user ids permitted on this account. `undefined` while
-   * loading — don't flag until we know the roster. */
-  assignedUsers: Set<string> | undefined;
-}
-
-function ActivityLine({ activity, assignedUsers }: ActivityLineProps) {
+function ActivityLine({ activity }: { activity: FbActivity }) {
   const when = activity.event_time ? new Date(activity.event_time) : null;
   const whenLabel = when
     ? `${String(when.getMonth() + 1).padStart(2, "0")}/${String(when.getDate()).padStart(2, "0")} ${String(
@@ -207,50 +222,14 @@ function ActivityLine({ activity, assignedUsers }: ActivityLineProps) {
     : "—";
   const what = activity.translated_event_type ?? activity.event_type ?? "—";
   const who = activity.actor_name ?? "—";
-  // Only flag when we have a non-empty roster AND the actor isn't on
-  // it. Empty roster (FB returned 0 or the call errored) means we
-  // don't know who's authorised — don't show false positives.
-  const isExternalActor =
-    assignedUsers !== undefined &&
-    assignedUsers.size > 0 &&
-    !!activity.actor_id &&
-    !assignedUsers.has(activity.actor_id);
   return (
     <li className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px] leading-relaxed">
       <span className="text-gray-500">{whenLabel}</span>
       <span className="font-medium text-ink">{what}</span>
       <span className="text-gray-500">· {who}</span>
-      {isExternalActor && (
-        <span className="rounded-full bg-red-100 px-1.5 py-[1px] text-[10px] font-semibold text-red-700">
-          非 BM 成員
-        </span>
-      )}
       {activity.extra_data && <ActivityExtra raw={activity.extra_data} />}
     </li>
   );
-}
-
-function RosterStatus({
-  isLoading,
-  isError,
-  size,
-}: {
-  isLoading: boolean;
-  isError: boolean;
-  size: number;
-}) {
-  if (isLoading) {
-    return <p className="mb-1.5 text-[10px] text-gray-500">載入 BM 名單...</p>;
-  }
-  if (isError || size === 0) {
-    return (
-      <p className="mb-1.5 text-[10px] text-orange">
-        BM 名單載入不到 — 跳過「非 BM 成員」檢查(可能是帳戶非 BM-managed 或 token 缺
-        business_management 權限)
-      </p>
-    );
-  }
-  return <p className="mb-1.5 text-[10px] text-gray-500">BM 名單:{size} 人 · 比對中</p>;
 }
 
 function ActivityExtra({ raw }: { raw: string }) {

@@ -3632,8 +3632,20 @@ async def _fetch_campaigns_for_account(
         date_preset,
         time_range,
     )
-    full_fields = f"id,name,status,objective,daily_budget,lifetime_budget,created_time,updated_time,{ins}"
-    no_ins_fields = "id,name,status,objective,daily_budget,lifetime_budget,created_time,updated_time"
+    # `adsets{daily_budget,lifetime_budget,status}` nests the per-adset
+    # budgets so the security view can compute an "effective" daily
+    # budget when the campaign itself uses ABO (budget set on adsets
+    # instead of the campaign). limit(50) caps payload — campaigns
+    # with more adsets than that are rare and will just under-report.
+    adset_nest = "adsets.limit(50){daily_budget,lifetime_budget,status}"
+    full_fields = (
+        f"id,name,status,objective,daily_budget,lifetime_budget,"
+        f"created_time,updated_time,{adset_nest},{ins}"
+    )
+    no_ins_fields = (
+        f"id,name,status,objective,daily_budget,lifetime_budget,"
+        f"created_time,updated_time,{adset_nest}"
+    )
     archived_filter = {"effective_status": '["ACTIVE","PAUSED","ARCHIVED","DELETED"]'}
 
     # Lite mode: skip insights entirely for fast first-paint.
@@ -3722,82 +3734,6 @@ async def get_account_activities(
         },
     )
     return {"data": data}
-
-
-@app.get("/api/accounts/{account_id}/assigned-users")
-async def get_account_assigned_users(account_id: str):
-    """Return the FB user ids permitted to edit this ad account.
-
-    Powers the 安全監控 view's「外部編輯者」 warning — any actor in the
-    Activity Log whose `actor_id` is NOT in this set is flagged.
-
-    Unions three sources so the resulting set is as complete as
-    possible:
-
-      1. `<business_id>/business_users` — every member of the parent
-         Business Manager (the broadest signal; covers BM admins who
-         can edit any account but aren't individually assigned).
-      2. `act_X/assigned_users` — BM-level user assignments directly
-         on the account.
-      3. `act_X/users` — legacy non-BM users edge (for personal /
-         non-BM ad accounts).
-
-    Each source can fail independently (permissions, account shape);
-    failures are swallowed and the function returns whatever ids it
-    could collect. Empty result means none of the three calls
-    succeeded — the frontend interprets that as "unknown roster" and
-    skips the check rather than flagging every editor as external.
-    """
-    user_ids: "set[str]" = set()
-
-    # 1. Parent BM's business_users — the broadest signal.
-    try:
-        acct_data = await fb_get(account_id, {"fields": "business"})
-        business = acct_data.get("business") if isinstance(acct_data, dict) else None
-        bid = business.get("id") if isinstance(business, dict) else None
-        if bid:
-            try:
-                rows = await fb_get_paginated(
-                    f"{bid}/business_users",
-                    {"fields": "id", "limit": "500"},
-                )
-                for r in rows:
-                    uid = r.get("id") if isinstance(r, dict) else None
-                    if uid:
-                        user_ids.add(str(uid))
-            except HTTPException:
-                pass
-    except HTTPException:
-        pass
-
-    # 2. Account-level assigned_users (BM-managed accounts).
-    try:
-        rows = await fb_get_paginated(
-            f"{account_id}/assigned_users",
-            {"fields": "id", "limit": "500"},
-        )
-        for r in rows:
-            uid = r.get("id") if isinstance(r, dict) else None
-            if uid:
-                user_ids.add(str(uid))
-    except HTTPException:
-        pass
-
-    # 3. Legacy users edge — only meaningful for non-BM accounts but
-    #    cheap to include for the union.
-    try:
-        rows = await fb_get_paginated(
-            f"{account_id}/users",
-            {"fields": "id", "limit": "500"},
-        )
-        for r in rows:
-            uid = r.get("id") if isinstance(r, dict) else None
-            if uid:
-                user_ids.add(str(uid))
-    except HTTPException:
-        pass
-
-    return {"data": sorted(user_ids)}
 
 
 @app.post("/api/campaigns/{campaign_id}/status")
