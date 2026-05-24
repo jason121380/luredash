@@ -3632,8 +3632,8 @@ async def _fetch_campaigns_for_account(
         date_preset,
         time_range,
     )
-    full_fields = f"id,name,status,objective,daily_budget,lifetime_budget,updated_time,{ins}"
-    no_ins_fields = "id,name,status,objective,daily_budget,lifetime_budget,updated_time"
+    full_fields = f"id,name,status,objective,daily_budget,lifetime_budget,created_time,updated_time,{ins}"
+    no_ins_fields = "id,name,status,objective,daily_budget,lifetime_budget,created_time,updated_time"
     archived_filter = {"effective_status": '["ACTIVE","PAUSED","ARCHIVED","DELETED"]'}
 
     # Lite mode: skip insights entirely for fast first-paint.
@@ -3690,6 +3690,38 @@ async def get_campaigns(account_id: str, date_preset: str = "last_30d", time_ran
         account_id, date_preset, time_range, include_archived
     )
     return {"data": camps}
+
+
+@app.get("/api/accounts/{account_id}/activities")
+async def get_account_activities(
+    account_id: str,
+    since: int = Query(..., description="Unix timestamp (inclusive) lower bound"),
+    until: int = Query(..., description="Unix timestamp (exclusive) upper bound"),
+):
+    """Proxy the FB Activity Log for an ad account.
+
+    Powers the 安全監控 view's per-campaign edit-history expand. Returns
+    raw activity rows so the frontend can group by ``object_id``.
+
+    Activity fields requested: who (actor_name), what (event_type +
+    translated_event_type), when (event_time), which object
+    (object_id, object_name, object_type), and a JSON-string
+    ``extra_data`` blob with before/after for status / budget / name
+    changes (FB's shape is unstable so we surface it verbatim).
+    """
+    data = await fb_get_paginated(
+        f"{account_id}/activities",
+        {
+            "since": str(since),
+            "until": str(until),
+            "fields": (
+                "actor_name,event_time,event_type,extra_data,"
+                "object_id,object_name,object_type,translated_event_type"
+            ),
+            "limit": "500",
+        },
+    )
+    return {"data": data}
 
 
 @app.post("/api/campaigns/{campaign_id}/status")

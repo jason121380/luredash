@@ -17,6 +17,7 @@ import { toApiParams } from "@/lib/datePicker";
 
 import type {
   FbAccount,
+  FbActivity,
   FbAdset,
   FbBaseEntity,
   FbCampaign,
@@ -383,6 +384,13 @@ export const api = {
     campaigns: (accountId: string, date: DateConfig, includeArchived = false) =>
       request<{ data: FbCampaign[] }>("GET", `/api/accounts/${accountId}/campaigns`, {
         query: { ...dateParams(date), include_archived: includeArchived ? "true" : undefined },
+      }),
+    /** FB Activity Log proxy — used by 安全監控 to display per-campaign
+     * edit history (status / budget / name / pacing changes). `since`
+     * and `until` are unix seconds. */
+    activities: (accountId: string, since: number, until: number) =>
+      request<{ data: FbActivity[] }>("GET", `/api/accounts/${accountId}/activities`, {
+        query: { since: String(since), until: String(until) },
       }),
   },
 
