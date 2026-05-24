@@ -31,9 +31,10 @@ type SecurityTab = "pending" | "safe";
  *
  * The DatePicker state is LOCAL (not the shared `filtersStore.date`)
  * because this view interprets the range as "campaigns created in this
- * window", not "insights for this window" — and defaults to last 7
- * days rather than 30. Keeping it local avoids mutating the shared
- * preset for other views when the user opens 安全監控.
+ * window", not "insights for this window" — and defaults to 本月
+ * (this_month) so the operator sees the full review surface for the
+ * current month. Keeping it local avoids mutating the shared preset
+ * for other views when the user opens 安全監控.
  *
  * Operators triage by tab:
  *   - 待查看: campaigns not yet marked safe
@@ -53,7 +54,7 @@ export function SecurityMonitorView() {
   const [pushModalOpen, setPushModalOpen] = useState(false);
 
   const [date, setDate] = useState<DateConfig>({
-    preset: "last_7d",
+    preset: "this_month",
     from: null,
     to: null,
   });
@@ -198,11 +199,15 @@ export function SecurityMonitorView() {
 
         <div className="min-w-0 flex-1 p-3 md:p-5">
           {showLoading ? (
+            // Don't pass loaded/total — once `isLoading` flips false
+            // (lite returned with empty data) the hook reports
+            // loadedCount=accounts.length, which the LoadingState
+            // treats as "honest mode 100%". The fake time-based
+            // curve is more honest here since we don't have real
+            // per-account progress to surface.
             <LoadingState
               title="載入廣告資料中..."
               subtitle="正在從 Facebook 拉取活動清單"
-              loaded={overview.loadedCount}
-              total={overview.totalCount}
             />
           ) : visibleAll.length === 0 ? (
             <EmptyState>請先在設定中啟用廣告帳戶</EmptyState>
