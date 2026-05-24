@@ -7114,16 +7114,42 @@ async def delete_security_push_config(config_id: str, fb_user_id: str = Query(..
     return {"ok": True}
 
 
+class _TestCardPayload(BaseModel):
+    id: str
+    name: str
+    created_time: str
+    daily_budget: Optional[int] = None  # raw FB value, same scale as dashboard
+    account_name: str = ""
+    anomalies: List[str] = []
+    creator: Optional[str] = None
+
+
+class SecurityPushTestPayload(BaseModel):
+    # Snapshot of the cards the user is currently looking at on the
+    # 待查看 tab. When provided, backend pushes these directly without
+    # touching FB at all — avoids the test 5x re-scanning the entire
+    # account list and getting rate-limited.
+    cards: List[_TestCardPayload] = []
+
+
 @app.post("/api/security-push/configs/{config_id}/test")
-async def test_security_push_config(config_id: str, fb_user_id: str = Query(...)):
-    """Fire a "live sample" push: run the actual anomaly detection over
-    the last 30 days and push up to 2 matching campaigns to every
-    group in this config — exactly the shape of a real alert. If
-    zero matches found, fall back to the 2 most-recently-created
-    campaigns (regardless of anomaly) so the user still sees real
-    card data, prepended with a notice. Does NOT advance
-    `last_run_at`, so the next scheduler tick processes real events
-    normally."""
+async def test_security_push_config(
+    config_id: str,
+    fb_user_id: str = Query(...),
+    payload: Optional[SecurityPushTestPayload] = None,
+):
+    """Fire a "live sample" push to every group in this config.
+
+    Preferred path: caller posts `cards` (the campaigns currently
+    visible in the 待查看 tab) and we push exactly those — zero FB
+    calls, instant.
+
+    Fallback (no `cards` in body): re-scan up to 10 accounts on FB to
+    find sample data, falling back to most-recent if no anomaly hits.
+    Used when called from a context that doesn't have a view snapshot.
+
+    Does NOT advance `last_run_at`, so the next scheduler tick
+    processes real events normally."""
     _assert_known_user(fb_user_id)
     pool = _require_db()
     async with pool.acquire() as conn:
@@ -7147,27 +7173,44 @@ async def test_security_push_config(config_id: str, fb_user_id: str = Query(...)
     cfg = dict(row)
     owner_uid = cfg["owner_fb_user_id"]
 
-    # Look back 30 days for sample data — wide enough to find at
-    # least a couple of recent creations even on quiet accounts.
-    since_dt = datetime.now(timezone.utc) - timedelta(days=30)
-
     fallback_used = False
-    # Cap test-time fan-out at 10 accounts: test is meant to verify
-    # plumbing (channel, group, push format) — not exhaustively scan
-    # the entire workspace. 80-account scans were timing out HTTP
-    # requests and also stressing FB rate limits.
-    ctx_token = _current_fb_user_id.set(owner_uid)
-    try:
-        matches = await _collect_security_matches(
-            cfg, since_dt, require_anomaly=True, limit=2, max_accounts=10
-        )
-        if not matches:
-            fallback_used = True
+
+    if payload and payload.cards:
+        # Snapshot path — zero FB calls. Just transcode the cards
+        # into the shape `_format_security_push_text` expects.
+        matches = [
+            {
+                "campaign": {
+                    "id": c.id,
+                    "name": c.name,
+                    "created_time": c.created_time,
+                    "daily_budget": str(c.daily_budget) if c.daily_budget else None,
+                },
+                "account_id": "",
+                "account_name": c.account_name,
+                "anomalies": list(c.anomalies),
+                "creator": c.creator,
+            }
+            for c in payload.cards
+        ]
+    else:
+        # Fallback: no snapshot supplied → scan FB. Look back 30 days
+        # wide enough to find samples even on quiet accounts. Cap
+        # fan-out at 10 accounts (test is just plumbing verification,
+        # not full audit).
+        since_dt = datetime.now(timezone.utc) - timedelta(days=30)
+        ctx_token = _current_fb_user_id.set(owner_uid)
+        try:
             matches = await _collect_security_matches(
-                cfg, since_dt, require_anomaly=False, limit=2, max_accounts=10
+                cfg, since_dt, require_anomaly=True, limit=2, max_accounts=10
             )
-    finally:
-        _current_fb_user_id.reset(ctx_token)
+            if not matches:
+                fallback_used = True
+                matches = await _collect_security_matches(
+                    cfg, since_dt, require_anomaly=False, limit=2, max_accounts=10
+                )
+        finally:
+            _current_fb_user_id.reset(ctx_token)
 
     if not matches:
         raise HTTPException(
@@ -7176,13 +7219,13 @@ async def test_security_push_config(config_id: str, fb_user_id: str = Query(...)
         )
 
     text = _format_security_push_text(matches)
-    if fallback_used:
-        text = (
-            "🧪 [測試推播] 近 30 天沒有命中異常條件的活動,以下用最近建立的活動示範卡片格式:\n\n"
-            + text
-        )
+    if payload and payload.cards:
+        prefix = "🧪 [測試推播] 以下為目前「待查看」清單上的活動:\n\n"
+    elif fallback_used:
+        prefix = "🧪 [測試推播] 近 30 天沒有命中異常條件的活動,以下用最近建立的活動示範卡片格式:\n\n"
     else:
-        text = "🧪 [測試推播] 以下為近 30 天命中異常條件的真實活動:\n\n" + text
+        prefix = "🧪 [測試推播] 以下為近 30 天命中異常條件的真實活動:\n\n"
+    text = prefix + text
 
     errors: List[str] = []
     sent = 0
@@ -7639,6 +7682,25 @@ def _format_security_push_text(matches: List[dict]) -> str:
     return "\n".join(lines).rstrip()
 
 
+async def _load_safe_campaign_ids() -> set:
+    """Team-wide set of campaign ids the user has explicitly marked
+    「沒問題」 in the security view. Stored in
+    `shared_settings.security_safe_campaigns` as a JSONB string array.
+    Scheduler should NOT push these — they're already reviewed."""
+    if _db_pool is None:
+        return set()
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT value FROM shared_settings WHERE key = 'security_safe_campaigns'"
+        )
+    if not row or not row["value"]:
+        return set()
+    try:
+        return {str(x) for x in row["value"] if x}
+    except (TypeError, ValueError):
+        return set()
+
+
 async def _collect_security_matches(
     cfg: dict,
     since_dt: datetime,
@@ -7646,6 +7708,7 @@ async def _collect_security_matches(
     require_anomaly: bool = True,
     limit: Optional[int] = None,
     max_accounts: Optional[int] = None,
+    exclude_safe: bool = True,
 ) -> List[dict]:
     """Pull campaigns created since `since_dt` for the config's accounts
     and (optionally) filter to those whose anomalies intersect
@@ -7685,6 +7748,7 @@ async def _collect_security_matches(
         account_ids = account_ids[:max_accounts]
 
     filters = set(cfg.get("anomaly_filters") or [])
+    safe_ids = await _load_safe_campaign_ids() if exclude_safe else set()
 
     async def _scan_one(aid: str) -> list:
         out: list = []
@@ -7700,6 +7764,9 @@ async def _collect_security_matches(
             print(f"[security-push] fetch {aid} failed: {e.detail}", flush=True)
             return out
         for c in camps:
+            cid = c.get("id")
+            if cid and cid in safe_ids:
+                continue  # already reviewed by the team
             created = c.get("created_time")
             if not created:
                 continue

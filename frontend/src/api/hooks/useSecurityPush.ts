@@ -1,4 +1,4 @@
-import { type SecurityPushConfigInput, api } from "@/api/client";
+import { type SecurityPushConfigInput, type SecurityPushTestCard, api } from "@/api/client";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -57,9 +57,9 @@ export function useTestSecurityPushConfig() {
   const { user } = useFbAuth();
   const uid = user?.id ?? "";
   return useMutation({
-    mutationFn: async (id: string) => {
+    mutationFn: async (args: { id: string; cards?: SecurityPushTestCard[] }) => {
       if (!uid) throw new Error("not signed in");
-      return await api.securityPush.test(uid, id);
+      return await api.securityPush.test(uid, args.id, args.cards);
     },
   });
 }
