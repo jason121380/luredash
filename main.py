@@ -3657,7 +3657,10 @@ async def get_accounts():
     accounts = await fb_get_paginated(
         "me/adaccounts",
         {
-            "fields": "id,name,account_status,currency,timezone_name,business",
+            # Nested `business{id,name}` — without explicit sub-fields,
+            # FB returns just `{id}` for the business object, so the
+            # engineering panel was stuck showing every BM as "未知".
+            "fields": "id,name,account_status,currency,timezone_name,business{id,name}",
             "limit": "500",
         },
         ttl=_ACCOUNTS_CACHE_TTL_SECONDS,
