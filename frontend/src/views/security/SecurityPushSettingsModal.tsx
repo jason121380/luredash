@@ -213,7 +213,7 @@ function ConfigForm({
   const [filters, setFilters] = useState<Set<SecurityAnomalyTag>>(
     new Set(initial?.anomaly_filters ?? ["deep_night", "weekend", "high_budget"]),
   );
-  const [pollMinutes, setPollMinutes] = useState(initial?.poll_interval_minutes ?? 30);
+  const [pollMinutes, setPollMinutes] = useState(initial?.poll_interval_minutes ?? 60);
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [error, setError] = useState<string | null>(null);
 
@@ -347,7 +347,7 @@ function ConfigForm({
         </div>
       </Field>
 
-      <Field label="檢查頻率" hint="後端輪詢間隔(分鐘),建議 5–30">
+      <Field label="檢查頻率" hint="後端輪詢間隔(分鐘),建議 60(過低會撞 FB rate limit)">
         <input
           type="number"
           min={1}
