@@ -7061,10 +7061,14 @@ async def delete_security_push_config(config_id: str, fb_user_id: str = Query(..
 
 @app.post("/api/security-push/configs/{config_id}/test")
 async def test_security_push_config(config_id: str, fb_user_id: str = Query(...)):
-    """Fire a placeholder push to every group in this config so the
-    user can verify channel access + group membership without waiting
-    for the next anomaly to trigger. Does NOT advance `last_run_at`,
-    so the next scheduler tick still processes real events normally."""
+    """Fire a "live sample" push: run the actual anomaly detection over
+    the last 30 days and push up to 2 matching campaigns to every
+    group in this config — exactly the shape of a real alert. If
+    zero matches found, fall back to the 2 most-recently-created
+    campaigns (regardless of anomaly) so the user still sees real
+    card data, prepended with a notice. Does NOT advance
+    `last_run_at`, so the next scheduler tick processes real events
+    normally."""
     _assert_known_user(fb_user_id)
     pool = _require_db()
     async with pool.acquire() as conn:
@@ -7085,21 +7089,45 @@ async def test_security_push_config(config_id: str, fb_user_id: str = Query(...)
     if not ch_row or not ch_row["access_token"]:
         raise HTTPException(status_code=400, detail="LINE channel 已停用或缺 access_token")
 
-    filter_labels = "、".join(
-        _ANOMALY_LABELS.get(t, t) for t in (row["anomaly_filters"] or [])
-    ) or "(尚未選擇)"
-    text = (
-        "🧪 [測試推播] 安全監控設定可正常運作\n"
-        f"設定名稱:{row['name']}\n"
-        f"目標群組:{len(row['group_ids'] or [])} 個\n"
-        f"異常條件:{filter_labels}\n"
-        f"檢查頻率:每 {row['poll_interval_minutes']} 分鐘\n\n"
-        "實際推播會在偵測到新建立活動命中以上條件時自動發出。"
-    )
+    cfg = dict(row)
+    owner_uid = cfg["owner_fb_user_id"]
+
+    # Look back 30 days for sample data — wide enough to find at
+    # least a couple of recent creations even on quiet accounts.
+    since_dt = datetime.now(timezone.utc) - timedelta(days=30)
+
+    fallback_used = False
+    ctx_token = _current_fb_user_id.set(owner_uid)
+    try:
+        matches = await _collect_security_matches(
+            cfg, since_dt, require_anomaly=True, limit=2
+        )
+        if not matches:
+            fallback_used = True
+            matches = await _collect_security_matches(
+                cfg, since_dt, require_anomaly=False, limit=2
+            )
+    finally:
+        _current_fb_user_id.reset(ctx_token)
+
+    if not matches:
+        raise HTTPException(
+            status_code=404,
+            detail="近 30 天沒有可用的活動可供測試。請先在所選帳戶建立一些活動。",
+        )
+
+    text = _format_security_push_text(matches)
+    if fallback_used:
+        text = (
+            "🧪 [測試推播] 近 30 天沒有命中異常條件的活動,以下用最近建立的活動示範卡片格式:\n\n"
+            + text
+        )
+    else:
+        text = "🧪 [測試推播] 以下為近 30 天命中異常條件的真實活動:\n\n" + text
 
     errors: List[str] = []
     sent = 0
-    for gid in (row["group_ids"] or []):
+    for gid in row["group_ids"] or []:
         try:
             await line_client.line_push(
                 _http_client,
@@ -7113,7 +7141,7 @@ async def test_security_push_config(config_id: str, fb_user_id: str = Query(...)
 
     if errors and sent == 0:
         raise HTTPException(status_code=502, detail="; ".join(errors))
-    return {"ok": True, "sent": sent, "errors": errors}
+    return {"ok": True, "sent": sent, "errors": errors, "fallback": fallback_used}
 
 
 # ── Scheduler loop ────────────────────────────────────────────
@@ -7535,6 +7563,143 @@ def _format_security_push_text(matches: List[dict]) -> str:
     return "\n".join(lines).rstrip()
 
 
+async def _collect_security_matches(
+    cfg: dict,
+    since_dt: datetime,
+    *,
+    require_anomaly: bool = True,
+    limit: Optional[int] = None,
+) -> List[dict]:
+    """Pull campaigns created since `since_dt` for the config's accounts
+    and (optionally) filter to those whose anomalies intersect
+    `cfg["anomaly_filters"]`. Each match is enriched with
+    `account_name` + `creator` via FB Activity Log.
+
+    Assumes the caller has already set the `_current_fb_user_id`
+    contextvar to the config's owner so FB calls go through the right
+    token.
+    """
+    if _db_pool is None:
+        return []
+    owner_uid = cfg["owner_fb_user_id"]
+    account_ids = list(cfg.get("account_ids") or [])
+    if not account_ids:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value FROM user_settings WHERE fb_user_id = $1 AND key = 'selected_accounts'",
+                owner_uid,
+            )
+        if row and row["value"]:
+            try:
+                account_ids = [str(x) for x in row["value"] if x]
+            except (TypeError, ValueError):
+                account_ids = []
+    if not account_ids:
+        return []
+
+    filters = set(cfg.get("anomaly_filters") or [])
+
+    matches: List[dict] = []
+    for aid in account_ids:
+        try:
+            camps = await _fetch_campaigns_for_account(
+                aid,
+                date_preset="last_7d",
+                time_range=None,
+                include_archived=True,
+                lite=True,
+            )
+        except HTTPException as e:
+            print(f"[security-push] fetch {aid} failed: {e.detail}", flush=True)
+            continue
+        for c in camps:
+            created = c.get("created_time")
+            if not created:
+                continue
+            try:
+                iso = created
+                if len(iso) >= 5 and iso[-5] in ("+", "-") and iso[-3] != ":":
+                    iso = iso[:-2] + ":" + iso[-2:]
+                created_dt = datetime.fromisoformat(iso)
+            except (TypeError, ValueError):
+                continue
+            if created_dt <= since_dt:
+                continue
+            tags = _evaluate_campaign_anomalies(c)
+            hit = [t for t in tags if t in filters]
+            if require_anomaly and not hit:
+                continue
+            matches.append(
+                {
+                    "campaign": c,
+                    "account_id": aid,
+                    "account_name": "",
+                    # When `require_anomaly=False` and no tag hit, leave
+                    # anomalies empty so the formatter doesn't claim a
+                    # false-positive flag.
+                    "anomalies": hit,
+                    "creator": None,
+                    "_created_dt": created_dt,
+                }
+            )
+
+    if not matches:
+        return []
+
+    # Sort newest-first then trim.
+    matches.sort(key=lambda m: m["_created_dt"], reverse=True)
+    if limit is not None:
+        matches = matches[:limit]
+
+    # Enrich: account names + creator from Activity Log. Best-effort.
+    try:
+        accts_raw = await fb_get_paginated(
+            "me/adaccounts",
+            {"fields": "id,name", "limit": "500"},
+        )
+        name_by_aid = {a.get("id"): a.get("name", "") for a in accts_raw if isinstance(a, dict)}
+    except HTTPException:
+        name_by_aid = {}
+    for m in matches:
+        m["account_name"] = name_by_aid.get(m["account_id"], "")
+
+    since_epoch = int(since_dt.timestamp())
+    until_epoch = int(datetime.now(timezone.utc).timestamp())
+    affected_aids = {m["account_id"] for m in matches}
+    creator_by_cid: dict = {}
+    for aid in affected_aids:
+        try:
+            acts = await fb_get_paginated(
+                f"{aid}/activities",
+                {
+                    "since": str(since_epoch),
+                    "until": str(until_epoch),
+                    "fields": "actor_name,event_type,object_id,translated_event_type",
+                    "limit": "500",
+                },
+            )
+        except HTTPException:
+            continue
+        for a in acts:
+            if not isinstance(a, dict):
+                continue
+            oid = a.get("object_id")
+            if not oid or oid in creator_by_cid:
+                continue
+            evt = (a.get("event_type") or "").lower()
+            tEvt = a.get("translated_event_type") or ""
+            if "create" in evt or "建立" in tEvt:
+                nm = (a.get("actor_name") or "").strip()
+                if nm:
+                    creator_by_cid[oid] = nm
+    for m in matches:
+        m["creator"] = creator_by_cid.get(m["campaign"].get("id"))
+        # Drop the internal sort key before returning.
+        m.pop("_created_dt", None)
+
+    return matches
+
+
 async def _security_push_run_one(cfg: dict) -> None:
     """Process a single security_push_configs row: fetch campaigns
     created since last_run_at, flag matches, push LINE message."""
@@ -7554,128 +7719,18 @@ async def _security_push_run_one(cfg: dict) -> None:
         raise RuntimeError("channel disabled or missing access_token")
     access_token = ch_row["access_token"]
 
-    # Determine account scope. Empty array → all of the owner's
-    # currently-enabled accounts (intersected with their actual FB
-    # account list to drop stale ids).
-    account_ids = list(cfg.get("account_ids") or [])
-    if not account_ids:
-        # Pull the owner's selected_accounts from user_settings
-        async with _db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT value FROM user_settings WHERE fb_user_id = $1 AND key = 'selected_accounts'",
-                owner_uid,
-            )
-        if row and row["value"]:
-            try:
-                account_ids = [str(x) for x in row["value"] if x]
-            except (TypeError, ValueError):
-                account_ids = []
-    if not account_ids:
-        # Nothing to scan; still bump next_run_at so we don't busy-loop.
-        return
-
     since_dt = cfg.get("last_run_at") or (datetime.now(timezone.utc) - timedelta(hours=24))
     if since_dt.tzinfo is None:
         since_dt = since_dt.replace(tzinfo=timezone.utc)
 
-    filters = set(cfg.get("anomaly_filters") or [])
-
-    # Pull campaigns under the owner's FB token context. Use lite
-    # mode (no insights) for speed — we only need name / created_time
-    # / daily_budget / adsets.
+    # Pull campaigns under the owner's FB token context.
     ctx_token = _current_fb_user_id.set(owner_uid)
     try:
-        matches: List[dict] = []
-        for aid in account_ids:
-            try:
-                camps = await _fetch_campaigns_for_account(
-                    aid,
-                    date_preset="last_7d",
-                    time_range=None,
-                    include_archived=True,
-                    lite=True,
-                )
-            except HTTPException as e:
-                print(f"[security-push] fetch {aid} failed: {e.detail}", flush=True)
-                continue
-            for c in camps:
-                created = c.get("created_time")
-                if not created:
-                    continue
-                try:
-                    iso = created
-                    if len(iso) >= 5 and iso[-5] in ("+", "-") and iso[-3] != ":":
-                        iso = iso[:-2] + ":" + iso[-2:]
-                    created_dt = datetime.fromisoformat(iso)
-                except (TypeError, ValueError):
-                    continue
-                if created_dt <= since_dt:
-                    continue
-                tags = _evaluate_campaign_anomalies(c)
-                hit = [t for t in tags if t in filters]
-                if not hit:
-                    continue
-                matches.append(
-                    {
-                        "campaign": c,
-                        "account_id": aid,
-                        "account_name": "",
-                        "anomalies": hit,
-                        "creator": None,
-                    }
-                )
-
+        matches = await _collect_security_matches(
+            cfg, since_dt, require_anomaly=True, limit=None
+        )
         if not matches:
             return
-
-        # Fetch account names + recent create-event actors. Best-effort.
-        async with _db_pool.acquire() as conn:
-            pass  # placeholder, names enriched below from FB
-        # Account names: cheap re-fetch via FB
-        try:
-            accts_raw = await fb_get_paginated(
-                "me/adaccounts",
-                {"fields": "id,name", "limit": "500"},
-            )
-            name_by_aid = {a.get("id"): a.get("name", "") for a in accts_raw if isinstance(a, dict)}
-        except HTTPException:
-            name_by_aid = {}
-        for m in matches:
-            m["account_name"] = name_by_aid.get(m["account_id"], "")
-
-        # Activity-log lookup for creator names. One call per affected
-        # account; bounded by the date-range since last_run_at.
-        since_epoch = int(since_dt.timestamp())
-        until_epoch = int(datetime.now(timezone.utc).timestamp())
-        affected_aids = {m["account_id"] for m in matches}
-        creator_by_cid: dict = {}
-        for aid in affected_aids:
-            try:
-                acts = await fb_get_paginated(
-                    f"{aid}/activities",
-                    {
-                        "since": str(since_epoch),
-                        "until": str(until_epoch),
-                        "fields": "actor_name,event_type,object_id,translated_event_type",
-                        "limit": "500",
-                    },
-                )
-            except HTTPException:
-                continue
-            for a in acts:
-                if not isinstance(a, dict):
-                    continue
-                oid = a.get("object_id")
-                if not oid or oid in creator_by_cid:
-                    continue
-                evt = (a.get("event_type") or "").lower()
-                tEvt = a.get("translated_event_type") or ""
-                if "create" in evt or "建立" in tEvt:
-                    nm = (a.get("actor_name") or "").strip()
-                    if nm:
-                        creator_by_cid[oid] = nm
-        for m in matches:
-            m["creator"] = creator_by_cid.get(m["campaign"].get("id"))
 
         text = _format_security_push_text(matches)
         for gid in cfg.get("group_ids") or []:
