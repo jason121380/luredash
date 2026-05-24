@@ -7227,6 +7227,9 @@ async def test_security_push_config(
         prefix = "🧪 [測試推播] 以下為近 30 天命中異常條件的真實活動:\n\n"
     text = prefix + text
 
+    if _http_client is None:
+        raise HTTPException(status_code=503, detail="伺服器尚未初始化,請稍後再試")
+
     errors: List[str] = []
     sent = 0
     for gid in row["group_ids"] or []:
@@ -7239,7 +7242,11 @@ async def test_security_push_config(
             )
             sent += 1
         except line_client.LinePushError as e:
-            errors.append(f"group {gid}: {e}")
+            errors.append(f"group {gid}: {e.friendly_message or e}")
+        except httpx.HTTPError as e:
+            errors.append(f"group {gid}: 連線錯誤 ({type(e).__name__})")
+        except Exception as e:  # final safety net
+            errors.append(f"group {gid}: {type(e).__name__}: {e}")
 
     if errors and sent == 0:
         raise HTTPException(status_code=502, detail="; ".join(errors))

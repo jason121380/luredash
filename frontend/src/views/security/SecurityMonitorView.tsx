@@ -127,12 +127,18 @@ export function SecurityMonitorView() {
       .filter((d) => d.rows.length > 0);
   }, [allDays, tab, safeIds]);
 
-  // Convert the date range to unix seconds once — shared by every row's
-  // activities query so they all hit the same React Query cache entry.
+  // Activities use the SAME fixed wide window as the campaign fetch
+  // (last_90d), NOT the user-selected `date`. Reason: tying activities
+  // to the date picker meant every preset switch fired 14 parallel
+  // FB Activity Log requests with new bounds → frequent failures
+  // (FB Activity Log has its own per-account budget separate from
+  // the campaigns edge, easier to trip). With a fixed window the
+  // queries hit cache and date switching is purely a client-side
+  // filter on `created_time` — no re-fetch.
   const activitiesBounds = useMemo(() => {
-    const { from, to } = resolveBounds(date);
+    const { from, to } = resolveBounds(fetchDate);
     return { since: Math.floor(from / 1000), until: Math.floor(to / 1000) };
-  }, [date]);
+  }, [fetchDate]);
 
   // Eager activity-log prefetch per visible account so we can show the
   // creator name on every card without waiting for the user to expand.

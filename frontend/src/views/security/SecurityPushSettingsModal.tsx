@@ -111,18 +111,20 @@ function ConfigList({
     try {
       const resp = await test.mutateAsync({ id, cards: pendingCards });
       if (resp.errors.length > 0) {
-        toast(`已送出 ${resp.sent} 則,${resp.errors.length} 則失敗`, "error");
+        toast(
+          `已送出 ${resp.sent} 則,${resp.errors.length} 則失敗:${resp.errors[0] ?? ""}`,
+          "error",
+          6000,
+        );
       } else {
         toast(`已送出測試推播到 ${resp.sent} 個群組`, "success");
       }
     } catch (e) {
       const raw = e instanceof Error ? e.message : "未知錯誤";
-      // LINE 400 通常代表 bot 不在那個群組,或選錯了 channel
-      // (此 group 屬於別的 OA,access_token 對不上)
-      const friendly = /400|Failed to send/.test(raw)
-        ? "推播失敗:bot 可能不在所選群組,或群組屬於不同的 LINE 官方帳號。請檢查 channel 與群組的搭配。"
-        : `測試失敗:${raw}`;
-      toast(friendly, "error");
+      // Surface the raw backend error so the user can tell us what
+      // went wrong — pattern-matching to "friendly" text was hiding
+      // useful detail (rate limit codes, validation errors, etc.).
+      toast(`測試失敗:${raw}`, "error", 8000);
     }
   };
 
