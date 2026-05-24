@@ -6,13 +6,17 @@ import { EmptyState } from "@/components/EmptyState";
 import { LoadingState } from "@/components/LoadingState";
 import { MobileAccountPicker } from "@/components/MobileAccountPicker";
 import { Topbar, TopbarSeparator } from "@/layout/Topbar";
+import { cn } from "@/lib/cn";
 import type { DateConfig } from "@/lib/datePicker";
 import { useAccountsStore } from "@/stores/accountsStore";
+import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useMemo, useState } from "react";
 import { AlertAccountPanel } from "../alerts/AlertAccountPanel";
 import { SecurityCampaignRow } from "./SecurityCampaignRow";
 import { buildSecurityDays, formatDayLabel, resolveBounds } from "./securityData";
+
+type SecurityTab = "pending" | "safe";
 
 /**
  * 安全監控 — surfaces newly-created campaigns grouped by day so the
@@ -25,6 +29,10 @@ import { buildSecurityDays, formatDayLabel, resolveBounds } from "./securityData
  * window", not "insights for this window" — and defaults to last 7
  * days rather than 30. Keeping it local avoids mutating the shared
  * preset for other views when the user opens 安全監控.
+ *
+ * Operators triage by tab:
+ *   - 待查看: campaigns not yet marked safe
+ *   - 已標記安全: campaigns the team has cleared via the per-row button
  */
 export function SecurityMonitorView() {
   const accountsQuery = useAccounts();
@@ -34,6 +42,9 @@ export function SecurityMonitorView() {
   const selectedAcctId = useUiStore((s) => s.alertSelectedAcctId);
   const setSelectedAcctId = useUiStore((s) => s.setAlertSelectedAcctId);
   const settingsReady = useUiStore((s) => s.settingsReady);
+
+  const safeIds = useSecurityStore((s) => s.safeIds);
+  const [tab, setTab] = useState<SecurityTab>("pending");
 
   const [date, setDate] = useState<DateConfig>({
     preset: "last_7d",
@@ -52,7 +63,31 @@ export function SecurityMonitorView() {
     return overview.campaigns.filter((c) => c._accountId === selectedAcctId);
   }, [overview.campaigns, selectedAcctId]);
 
-  const days = useMemo(() => buildSecurityDays(scopedCampaigns, date), [scopedCampaigns, date]);
+  const allDays = useMemo(() => buildSecurityDays(scopedCampaigns, date), [scopedCampaigns, date]);
+
+  // Per-tab counts (drive the tab labels) — computed once from `allDays`
+  // so both numbers always sum to the unfiltered total.
+  const pendingCount = useMemo(
+    () => allDays.reduce((n, d) => n + d.rows.filter((r) => !safeIds.has(r.campaign.id)).length, 0),
+    [allDays, safeIds],
+  );
+  const safeCount = useMemo(
+    () => allDays.reduce((n, d) => n + d.rows.filter((r) => safeIds.has(r.campaign.id)).length, 0),
+    [allDays, safeIds],
+  );
+
+  // Filter days by tab. We drop a day group entirely when none of its
+  // rows match — avoids showing empty headers.
+  const visibleDays = useMemo(() => {
+    return allDays
+      .map((d) => ({
+        ...d,
+        rows: d.rows.filter((r) =>
+          tab === "safe" ? safeIds.has(r.campaign.id) : !safeIds.has(r.campaign.id),
+        ),
+      }))
+      .filter((d) => d.rows.length > 0);
+  }, [allDays, tab, safeIds]);
 
   // Convert the date range to unix seconds once — shared by every row's
   // activities query so they all hit the same React Query cache entry.
@@ -60,6 +95,18 @@ export function SecurityMonitorView() {
     const { from, to } = resolveBounds(date);
     return { since: Math.floor(from / 1000), until: Math.floor(to / 1000) };
   }, [date]);
+
+  // Show the loading state whenever:
+  //   1. Settings are still hydrating (no idea which accounts to show), or
+  //   2. The hook is in the loading phase, or
+  //   3. Campaigns are empty but a fetch is still in flight (placeholder
+  //      flipped isLoading false but real data hasn't arrived).
+  // The third condition catches the "I see empty state but it's actually
+  // still loading" UX bug from the previous build.
+  const showLoading =
+    !settingsReady ||
+    overview.isLoading ||
+    (overview.campaigns.length === 0 && overview.isFetching);
 
   return (
     <>
@@ -87,32 +134,103 @@ export function SecurityMonitorView() {
         </div>
 
         <div className="min-w-0 flex-1 p-3 md:p-5">
-          {!settingsReady ? (
+          {showLoading ? (
             <LoadingState
               title="載入廣告資料中..."
+              subtitle="正在從 Facebook 拉取活動清單"
               loaded={overview.loadedCount}
               total={overview.totalCount}
             />
           ) : visibleAll.length === 0 ? (
             <EmptyState>請先在設定中啟用廣告帳戶</EmptyState>
-          ) : overview.isLoading ? (
-            <LoadingState
-              title="載入廣告資料中..."
-              loaded={overview.loadedCount}
-              total={overview.totalCount}
-            />
-          ) : days.length === 0 ? (
-            <EmptyState>所選日期區間內沒有新建立的行銷活動</EmptyState>
           ) : (
-            <SecurityDayList
-              days={days}
-              activitiesSince={activitiesBounds.since}
-              activitiesUntil={activitiesBounds.until}
-            />
+            <div className="flex flex-col gap-3">
+              <SecurityTabs
+                tab={tab}
+                onChange={setTab}
+                pendingCount={pendingCount}
+                safeCount={safeCount}
+              />
+              {visibleDays.length === 0 ? (
+                <EmptyState>
+                  {tab === "pending"
+                    ? "✓ 所選日期區間內所有新建立活動皆已查看"
+                    : "目前沒有已標記為安全的活動"}
+                </EmptyState>
+              ) : (
+                <SecurityDayList
+                  days={visibleDays}
+                  activitiesSince={activitiesBounds.since}
+                  activitiesUntil={activitiesBounds.until}
+                />
+              )}
+            </div>
           )}
         </div>
       </div>
     </>
+  );
+}
+
+interface SecurityTabsProps {
+  tab: SecurityTab;
+  onChange: (t: SecurityTab) => void;
+  pendingCount: number;
+  safeCount: number;
+}
+
+function SecurityTabs({ tab, onChange, pendingCount, safeCount }: SecurityTabsProps) {
+  return (
+    <div className="flex items-center gap-1 border-b border-border" role="tablist">
+      <TabButton
+        active={tab === "pending"}
+        label="待查看"
+        count={pendingCount}
+        onClick={() => onChange("pending")}
+      />
+      <TabButton
+        active={tab === "safe"}
+        label="已標記安全"
+        count={safeCount}
+        onClick={() => onChange("safe")}
+      />
+    </div>
+  );
+}
+
+function TabButton({
+  active,
+  label,
+  count,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  count: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={cn(
+        "relative flex items-center gap-1.5 px-3 py-2 text-[13px] font-semibold transition-colors",
+        active ? "text-orange" : "text-gray-500 hover:text-ink",
+      )}
+    >
+      <span>{label}</span>
+      <span
+        className={cn(
+          "rounded-full px-1.5 py-[1px] text-[10px] font-semibold tabular-nums",
+          active ? "bg-orange-bg text-orange" : "bg-gray-100 text-gray-500",
+        )}
+      >
+        {count}
+      </span>
+      {active && <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-orange" />}
+    </button>
   );
 }
 

@@ -3,6 +3,7 @@ import { useAccountAssignedUsers } from "@/api/hooks/useAccountAssignedUsers";
 import { Badge } from "@/components/Badge";
 import { cn } from "@/lib/cn";
 import { fM } from "@/lib/format";
+import { useSecurityStore } from "@/stores/securityStore";
 import type { FbActivity } from "@/types/fb";
 import { useMemo, useState } from "react";
 import { type SecurityAnomaly, anomalyLabel, summariseExtraData } from "./securityData";
@@ -69,6 +70,8 @@ export function SecurityCampaignRow({
   const [expanded, setExpanded] = useState(false);
   const campaign = row.campaign;
   const accountId = campaign._accountId ?? null;
+  const isSafe = useSecurityStore((s) => s.safeIds.has(campaign.id));
+  const toggleSafe = useSecurityStore((s) => s.toggleSafe);
 
   const activitiesQuery = useAccountActivities(
     accountId,
@@ -129,13 +132,29 @@ export function SecurityCampaignRow({
             <span>日預算 {fmtDailyBudget(campaign.daily_budget)}</span>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="shrink-0 self-start rounded-md border border-border bg-white px-2.5 py-1 text-[11px] font-medium text-gray-500 hover:bg-orange-bg hover:text-orange md:self-center"
-        >
-          {expanded ? "收合編輯紀錄" : "編輯紀錄"}
-        </button>
+        <div className="flex shrink-0 items-center gap-1.5 self-start md:self-center">
+          <button
+            type="button"
+            onClick={() => toggleSafe(campaign.id)}
+            aria-pressed={isSafe}
+            title={isSafe ? "取消標記" : "標記此活動為沒問題"}
+            className={cn(
+              "rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors",
+              isSafe
+                ? "border-green-600 bg-green-50 text-green-700 hover:bg-green-100"
+                : "border-border bg-white text-gray-500 hover:bg-orange-bg hover:text-orange",
+            )}
+          >
+            {isSafe ? "✓ 已標記安全" : "標記為沒問題"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="rounded-md border border-border bg-white px-2.5 py-1 text-[11px] font-medium text-gray-500 hover:bg-orange-bg hover:text-orange"
+          >
+            {expanded ? "收合編輯紀錄" : "編輯紀錄"}
+          </button>
+        </div>
       </div>
 
       {expanded && (
