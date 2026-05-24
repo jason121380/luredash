@@ -189,7 +189,7 @@ function FbUsagePanel() {
   return (
     <Card
       title="FB API 節流狀態"
-      subtitle="X-Business-Use-Case-Usage 即時快照,每 10 秒更新。「冷卻時間」由 Facebook 依目前用量+衰減速度估算,僅供參考。"
+      subtitle="X-Business-Use-Case-Usage 即時快照,每 10 秒更新。FB 是按 Business Manager(BM)計算 rate limit,不是按廣告帳戶;一個 BM 底下的所有廣告帳戶共用同一個額度。冷卻時間由 Facebook 估算,僅供參考。"
       action={
         <Button
           size="sm"
@@ -249,9 +249,19 @@ function UsageRow({
         {bizName ? (
           <span className="font-semibold text-ink">{bizName}</span>
         ) : (
-          <span className="text-gray-400">(未綁定的 BM)</span>
+          <span
+            className="text-gray-400"
+            title="這個 BM 的 ID 沒對到你登入帳號的廣告帳戶 owner。常見原因:你的某個廣告帳戶是被『共用』過來、不屬於你的 BM 成員身分"
+          >
+            (BM 名稱未知 — 共用帳戶或非成員)
+          </span>
         )}
-        <span className="font-mono text-gray-400">{bizId}</span>
+        <span
+          className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-500"
+          title="Business Manager ID(非廣告帳戶 ID)。FB rate limit 按 BM 計算。"
+        >
+          BM {bizId}
+        </span>
         {usage.type ? (
           <span className="rounded-full bg-orange-bg px-2 py-0.5 font-semibold text-orange">
             {usage.type}
