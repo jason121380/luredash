@@ -103,11 +103,20 @@ export function SecurityCampaignRow({
   const dailyBudgetIsAggregate = dailyBudgetCents !== null && !campaign.daily_budget;
 
   // Spend so far in the date-range window. FB insights return spend
-  // as a string IN DOLLARS (not cents). Undefined until the full
-  // overview query resolves.
+  // as a string IN DOLLARS. When the campaign object has an `insights`
+  // envelope (full-phase query resolved) but no spend data, the
+  // campaign genuinely hasn't spent anything yet — render $0 instead
+  // of "—" so the operator can distinguish "still loading" from "real
+  // zero". `campaign.insights === undefined` means full-phase is
+  // still pending.
+  const insightsLoaded = campaign.insights !== undefined;
   const spendRaw = campaign.insights?.data?.[0]?.spend;
-  const spendDollars = spendRaw ? Number(spendRaw) : Number.NaN;
-  const spendLabel = Number.isFinite(spendDollars) ? `$${fM(spendDollars)}` : "—";
+  const spendDollars = spendRaw !== undefined ? Number(spendRaw) : Number.NaN;
+  const spendLabel = !insightsLoaded
+    ? "—"
+    : Number.isFinite(spendDollars)
+      ? `$${fM(spendDollars)}`
+      : "$0";
 
   const matchedActivities = useMemo<FbActivity[]>(() => {
     if (!activitiesQuery.data) return [];

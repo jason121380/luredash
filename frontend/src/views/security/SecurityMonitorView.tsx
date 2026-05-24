@@ -121,21 +121,28 @@ export function SecurityMonitorView() {
     })),
   });
 
-  // campaign_id → actor_name of the user who created it. Filter on
-  // event_type matching "create" + object_type === "CAMPAIGN" so we
-  // don't accidentally pick up adset / ad creates.
+  // campaign_id → actor_name of the user who created it. Filter is
+  // intentionally permissive: FB has emitted multiple event_type
+  // shapes over the years ("create_campaign", "create_campaign_group",
+  // and locale-prefixed variants), so we match on either the raw
+  // event_type containing "create" OR the translated label containing
+  // "建立". We don't filter on object_type because that field's casing
+  // and naming has also varied (CAMPAIGN vs AD_CAMPAIGN); the
+  // object_id → campaign.id lookup at render time gives us the
+  // disambiguation we need.
   const creatorByCampaignId = useMemo(() => {
     const map = new Map<string, string>();
     for (const q of activityQueries) {
       if (!q.data) continue;
       for (const a of q.data) {
-        if (a.object_type !== "CAMPAIGN") continue;
-        if (!a.object_id || map.has(a.object_id)) continue;
-        const evt = a.event_type ?? "";
+        const oid = a.object_id;
+        if (!oid || map.has(oid)) continue;
+        const evt = (a.event_type ?? "").toLowerCase();
         const tEvt = a.translated_event_type ?? "";
-        if (evt.startsWith("create") || tEvt.includes("已建立")) {
-          map.set(a.object_id, a.actor_name ?? "");
-        }
+        const isCreate = evt.includes("create") || tEvt.includes("建立");
+        if (!isCreate) continue;
+        const name = a.actor_name?.trim();
+        if (name) map.set(oid, name);
       }
     }
     return map;
