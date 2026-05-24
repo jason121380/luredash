@@ -1,4 +1,5 @@
 import { api } from "@/api/client";
+import { useAccounts } from "@/api/hooks/useAccounts";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { Button } from "@/components/Button";
 import { toast } from "@/components/Toast";
@@ -167,14 +168,28 @@ function FbUsagePanel() {
     refetchInterval: 10_000,
     staleTime: 0,
   });
+  const accountsQuery = useAccounts();
   const data = usageQuery.data?.data ?? {};
   const peak = usageQuery.data?.peak_regain_minutes ?? 0;
   const entries = Object.entries(data);
 
+  // Build a map<business_id, business_name> from the user's accounts.
+  // FB's X-Business-Use-Case-Usage header keys entries by BM id, so
+  // matching the numeric id back to the BM display name makes the
+  // panel readable instead of just digits.
+  const bizNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const a of accountsQuery.data ?? []) {
+      const b = a.business;
+      if (b?.id && b.name && !m.has(b.id)) m.set(b.id, b.name);
+    }
+    return m;
+  }, [accountsQuery.data]);
+
   return (
     <Card
       title="FB API 節流狀態"
-      subtitle="X-Business-Use-Case-Usage 即時快照，每 10 秒更新"
+      subtitle="X-Business-Use-Case-Usage 即時快照,每 10 秒更新。「冷卻時間」由 Facebook 依目前用量+衰減速度估算,僅供參考。"
       action={
         <Button
           size="sm"
@@ -188,7 +203,7 @@ function FbUsagePanel() {
     >
       {peak > 0 && (
         <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-700">
-          ⚠ 部分業務已達節流閾值，預估 <b>{peak}</b> 分鐘後可恢復呼叫
+          ⚠ 部分業務已達節流閾值,Facebook 預估約 <b>{peak}</b> 分鐘後可恢復呼叫(此為 FB 的估算值,非精確倒數)
         </div>
       )}
       {usageQuery.isLoading ? (
@@ -198,7 +213,12 @@ function FbUsagePanel() {
       ) : (
         <div className="flex flex-col gap-3">
           {entries.map(([bizId, u]) => (
-            <UsageRow key={bizId} bizId={bizId} usage={u} />
+            <UsageRow
+              key={bizId}
+              bizId={bizId}
+              bizName={bizNameById.get(bizId) ?? ""}
+              usage={u}
+            />
           ))}
         </div>
       )}
@@ -208,9 +228,11 @@ function FbUsagePanel() {
 
 function UsageRow({
   bizId,
+  bizName,
   usage,
 }: {
   bizId: string;
+  bizName: string;
   usage: {
     call_count: number;
     total_cputime: number;
@@ -224,7 +246,12 @@ function UsageRow({
   return (
     <div className="rounded-lg border border-border bg-bg p-3">
       <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-        <span className="font-mono font-semibold text-ink">{bizId}</span>
+        {bizName ? (
+          <span className="font-semibold text-ink">{bizName}</span>
+        ) : (
+          <span className="text-gray-400">(未綁定的 BM)</span>
+        )}
+        <span className="font-mono text-gray-400">{bizId}</span>
         {usage.type ? (
           <span className="rounded-full bg-orange-bg px-2 py-0.5 font-semibold text-orange">
             {usage.type}
@@ -232,15 +259,18 @@ function UsageRow({
         ) : null}
         <span className="text-gray-400">{observedAgoSec}s 前更新</span>
         {usage.estimated_time_to_regain_access > 0 ? (
-          <span className="ml-auto rounded-full bg-red-100 px-2 py-0.5 font-semibold text-red-700">
-            冷卻 {usage.estimated_time_to_regain_access} 分鐘
+          <span
+            className="ml-auto rounded-full bg-red-100 px-2 py-0.5 font-semibold text-red-700"
+            title="Facebook 估算約多久後可恢復呼叫,非精確倒數"
+          >
+            冷卻 約 {usage.estimated_time_to_regain_access} 分鐘
           </span>
         ) : null}
       </div>
       <div className="grid gap-1.5 text-[12px]">
-        <UsageBar label="call_count" value={usage.call_count} />
-        <UsageBar label="total_cputime" value={usage.total_cputime} />
-        <UsageBar label="total_time" value={usage.total_time} />
+        <UsageBar label="呼叫次數" value={usage.call_count} />
+        <UsageBar label="CPU 用量" value={usage.total_cputime} />
+        <UsageBar label="處理時間" value={usage.total_time} />
       </div>
     </div>
   );
@@ -251,7 +281,7 @@ function UsageBar({ label, value }: { label: string; value: number }) {
   const color = pct >= 80 ? "bg-red-500" : pct >= 50 ? "bg-amber-400" : "bg-emerald-500";
   return (
     <div className="flex items-center gap-2">
-      <span className="w-[88px] shrink-0 text-gray-500">{label}</span>
+      <span className="w-[72px] shrink-0 text-gray-500">{label}</span>
       <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-gray-200">
         <div
           className={cn("absolute inset-y-0 left-0 rounded-full", color)}
