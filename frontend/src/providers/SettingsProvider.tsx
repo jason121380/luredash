@@ -3,6 +3,7 @@ import { useFbAuth } from "@/auth/FbAuthProvider";
 import { setAccountsUserId, useAccountsStore } from "@/stores/accountsStore";
 import { useFinanceStore } from "@/stores/financeStore";
 import { type PaymentAccount, usePaymentStore } from "@/stores/paymentStore";
+import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
 import { type ReactNode, useEffect, useState } from "react";
 
@@ -98,6 +99,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         })
       : [];
     usePaymentStore.getState().hydrateFromServer(paymentAccounts);
+
+    const safeCampaignIds = Array.isArray(s.security_safe_campaigns)
+      ? (s.security_safe_campaigns as unknown[]).filter((v): v is string => typeof v === "string")
+      : [];
+    useSecurityStore.getState().hydrateFromServer(safeCampaignIds);
 
     setSeeded(true);
     setSettingsReady(true);
