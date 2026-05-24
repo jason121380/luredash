@@ -7332,12 +7332,14 @@ async def _scheduler_loop() -> None:
 # both surfaces flag the same campaigns. Keep the two in sync when
 # adding new anomaly rules.
 
-# Daily-budget threshold in cents (FB stores budget × 100).
-_SECURITY_HIGH_BUDGET_CENTS = 200_000  # $2,000 / day
+# Daily-budget threshold — RAW FB value (matches dashboard's
+# `fM(campaign.daily_budget)`, no /100 transform).
+_SECURITY_HIGH_BUDGET = 2000
 
 
-def _effective_daily_budget_cents(c: dict) -> Optional[int]:
-    """Return effective daily budget for a campaign in cents.
+def _effective_daily_budget(c: dict) -> Optional[int]:
+    """Return effective daily budget for a campaign in the RAW FB
+    value (same scale dashboard renders directly).
 
     CBO: campaign.daily_budget is set. Use it.
     ABO: campaign budget is empty; sum ACTIVE adsets' daily_budget.
@@ -7392,8 +7394,8 @@ def _evaluate_campaign_anomalies(c: dict) -> List[str]:
         tags.append("deep_night")
     if local.weekday() in (5, 6):  # Sat=5, Sun=6
         tags.append("weekend")
-    budget = _effective_daily_budget_cents(c)
-    if budget is not None and budget > _SECURITY_HIGH_BUDGET_CENTS:
+    budget = _effective_daily_budget(c)
+    if budget is not None and budget > _SECURITY_HIGH_BUDGET:
         tags.append("high_budget")
     return tags
 
@@ -7417,8 +7419,8 @@ def _format_security_push_text(matches: List[dict]) -> str:
     shown = matches[:5]
     for idx, m in enumerate(shown, 1):
         c = m["campaign"]
-        budget_c = _effective_daily_budget_cents(c)
-        budget_txt = f"${budget_c // 100:,}" if budget_c else "—"
+        budget_v = _effective_daily_budget(c)
+        budget_txt = f"${budget_v:,}" if budget_v else "—"
         anomaly_txt = "、".join(_ANOMALY_LABELS.get(t, t) for t in m["anomalies"])
         creator = m.get("creator") or "—"
         created_local = ""

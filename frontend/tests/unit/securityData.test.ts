@@ -121,11 +121,11 @@ describe("buildSecurityDays — anomaly tagging", () => {
     expect(byId.z).not.toContain("burst");
   });
 
-  it("tags high_budget when daily_budget > $2000/day (FB cents)", () => {
+  it("tags high_budget when daily_budget > 2000 (raw FB value, no /100)", () => {
     const camps = [
-      campaign("low", "1", "2026-05-22T10:00", { daily_budget: "150000" }), // $1500
-      campaign("at", "2", "2026-05-22T10:00", { daily_budget: "200000" }), // $2000 — exactly threshold, NOT flagged
-      campaign("high", "3", "2026-05-22T10:00", { daily_budget: "250000" }), // $2500
+      campaign("low", "1", "2026-05-22T10:00", { daily_budget: "1500" }),
+      campaign("at", "2", "2026-05-22T10:00", { daily_budget: "2000" }), // exactly threshold, NOT flagged
+      campaign("high", "3", "2026-05-22T10:00", { daily_budget: "2500" }),
       campaign("missing", "4", "2026-05-22T10:00"),
     ];
     const days = buildSecurityDays(camps, customRange("2026-05-01", "2026-05-31"));
@@ -139,7 +139,10 @@ describe("buildSecurityDays — anomaly tagging", () => {
   });
 
   it("tags high_budget when CBO is off and summed ACTIVE adset budgets exceed threshold", () => {
-    const cbosOff = (id: string, adsets: Array<{ daily?: string; status?: "ACTIVE" | "PAUSED" | "ARCHIVED" }>): FbCampaign => ({
+    const cbosOff = (
+      id: string,
+      adsets: Array<{ daily?: string; status?: "ACTIVE" | "PAUSED" | "ARCHIVED" }>,
+    ): FbCampaign => ({
       id,
       name: id,
       status: "ACTIVE",
@@ -150,22 +153,22 @@ describe("buildSecurityDays — anomaly tagging", () => {
       },
     });
     const camps = [
-      // CBO off, 3 active adsets summing to $2400 > $2000 → flagged
+      // CBO off, 3 active adsets summing to 2400 > 2000 → flagged
       cbosOff("over", [
-        { daily: "80000", status: "ACTIVE" },
-        { daily: "80000", status: "ACTIVE" },
-        { daily: "80000", status: "ACTIVE" },
+        { daily: "800", status: "ACTIVE" },
+        { daily: "800", status: "ACTIVE" },
+        { daily: "800", status: "ACTIVE" },
       ]),
-      // CBO off, 3 active adsets summing to $1500 → NOT flagged
+      // CBO off, 3 active adsets summing to 1500 → NOT flagged
       cbosOff("under", [
-        { daily: "50000", status: "ACTIVE" },
-        { daily: "50000", status: "ACTIVE" },
-        { daily: "50000", status: "ACTIVE" },
+        { daily: "500", status: "ACTIVE" },
+        { daily: "500", status: "ACTIVE" },
+        { daily: "500", status: "ACTIVE" },
       ]),
-      // CBO off, the big adsets are ARCHIVED → only $500 counts → NOT flagged
+      // CBO off, the big adsets are ARCHIVED → only 500 counts → NOT flagged
       cbosOff("ignore-archived", [
-        { daily: "1000000", status: "ARCHIVED" },
-        { daily: "50000", status: "ACTIVE" },
+        { daily: "100000", status: "ARCHIVED" },
+        { daily: "500", status: "ACTIVE" },
       ]),
     ];
     const days = buildSecurityDays(camps, customRange("2026-05-01", "2026-05-31"));

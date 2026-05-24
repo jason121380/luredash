@@ -8,7 +8,7 @@ import { useMemo, useState } from "react";
 import {
   type SecurityAnomaly,
   anomalyLabel,
-  effectiveDailyBudgetCents,
+  effectiveDailyBudget,
   summariseExtraData,
 } from "./securityData";
 import type { SecurityRow } from "./securityData";
@@ -40,9 +40,12 @@ function fmtTimeHM(d: Date): string {
   return `${h}:${m}`;
 }
 
-function fmtCents(n: number | null | undefined): string {
+function fmtBudget(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n) || n <= 0) return "—";
-  return `$${fM(n / 100)}`;
+  // Match dashboard: render the raw FB-stored value with $ prefix,
+  // no /100 transformation (FB returns budget in the account's
+  // currency major unit for TWD-style currencies).
+  return `$${fM(n)}`;
 }
 
 const ANOMALY_CLASS: Record<SecurityAnomaly, string> = {
@@ -105,9 +108,10 @@ export function SecurityCampaignRow({
     : "—";
 
   // Daily budget: prefer campaign-level (CBO); fall back to summed
-  // active-adset budgets (ABO). Returns cents.
-  const dailyBudgetCents = effectiveDailyBudgetCents(campaign);
-  const dailyBudgetIsAggregate = dailyBudgetCents !== null && !campaign.daily_budget;
+  // active-adset budgets (ABO). Returns raw FB value, same scale
+  // dashboard renders directly.
+  const dailyBudget = effectiveDailyBudget(campaign);
+  const dailyBudgetIsAggregate = dailyBudget !== null && !campaign.daily_budget;
 
   // Spend so far in the date-range window. FB insights return spend
   // as a string IN DOLLARS. The full-phase overview query may omit
@@ -168,7 +172,7 @@ export function SecurityCampaignRow({
               建立者 <span className="font-semibold text-ink">{creator || "—"}</span>
             </span>
             <span>
-              日預算 {fmtCents(dailyBudgetCents)}
+              日預算 {fmtBudget(dailyBudget)}
               {dailyBudgetIsAggregate && (
                 <span className="ml-1 text-[10px] text-gray-300">(廣告組合加總)</span>
               )}

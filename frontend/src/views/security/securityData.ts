@@ -19,24 +19,23 @@ import type { FbCampaign } from "@/types/fb";
 
 export type SecurityAnomaly = "deep_night" | "weekend" | "burst" | "high_budget";
 
-/** Daily budget threshold in dollars. FB stores budget in cents so
- * the comparison divides by 100 before checking. */
-export const HIGH_DAILY_BUDGET_DOLLARS = 2000;
+/** Daily budget threshold — RAW FB value (same scale as
+ * dashboard's `fM(campaign.daily_budget)`). FB returns budget as
+ * integer in the account's currency; no /100 transformation. */
+export const HIGH_DAILY_BUDGET = 2000;
 
-/** Return the effective daily budget in CENTS for a campaign.
+/** Return the effective daily budget for a campaign in the RAW FB
+ * value (same scale dashboard renders directly via `fM`).
  *
- *   - CBO (Campaign Budget Optimization): campaign.daily_budget is set
- *     directly. Return it.
- *   - ABO (Adset Budget Optimization): campaign.daily_budget is empty
- *     and each adset has its own daily_budget. Return the SUM of
- *     active adsets' daily_budget so 安全監控 can still surface a
- *     meaningful total for the "已花費 > $2000/日" check.
- *   - Neither set (lifetime budget, no budget): return null.
+ *   - CBO: campaign.daily_budget is set. Use it.
+ *   - ABO: campaign budget is empty; sum ACTIVE / PAUSED adsets'
+ *     daily_budget so the security view can still surface a total.
+ *   - Neither set: return null.
  *
  * Returns `null` rather than `0` so callers can distinguish "no
  * budget data" from "$0 budget".
  */
-export function effectiveDailyBudgetCents(c: FbCampaign): number | null {
+export function effectiveDailyBudget(c: FbCampaign): number | null {
   const campaignBudget = Number(c.daily_budget);
   if (Number.isFinite(campaignBudget) && campaignBudget > 0) {
     return campaignBudget;
@@ -45,7 +44,7 @@ export function effectiveDailyBudgetCents(c: FbCampaign): number | null {
   let sum = 0;
   let any = false;
   for (const a of adsets) {
-    // Skip archived/deleted adsets — their budget isn't actually spending.
+    // Archived / deleted adsets aren't actively spending — skip.
     if (a.status === "ARCHIVED" || a.status === "DELETED") continue;
     const v = Number(a.daily_budget);
     if (Number.isFinite(v) && v > 0) {
@@ -159,8 +158,8 @@ export function buildSecurityDays(
     const anomalies: SecurityAnomaly[] = [];
     if (hour < 6) anomalies.push("deep_night");
     if (weekday === 0 || weekday === 6) anomalies.push("weekend");
-    const effective = effectiveDailyBudgetCents(c);
-    if (effective !== null && effective / 100 > HIGH_DAILY_BUDGET_DOLLARS) {
+    const effective = effectiveDailyBudget(c);
+    if (effective !== null && effective > HIGH_DAILY_BUDGET) {
       anomalies.push("high_budget");
     }
     rows.push({ campaign: c, createdAt: created, anomalies });
@@ -203,7 +202,7 @@ const ANOMALY_LABELS: Record<SecurityAnomaly, string> = {
   deep_night: "深夜創建",
   weekend: "週末創建",
   burst: "短時間高頻",
-  high_budget: `日預算 > $${HIGH_DAILY_BUDGET_DOLLARS}`,
+  high_budget: `日預算 > $${HIGH_DAILY_BUDGET}`,
 };
 
 export function anomalyLabel(a: SecurityAnomaly): string {
