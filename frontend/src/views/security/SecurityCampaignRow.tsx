@@ -225,9 +225,7 @@ export function SecurityCampaignRow({
           ) : activitiesQuery.isLoading ? (
             <p className="text-[11px] text-gray-500">載入編輯紀錄...</p>
           ) : activitiesQuery.isError ? (
-            <p className="text-[11px] text-red-700">
-              編輯紀錄載入失敗。FB Activity Log 需要 ads_management 權限。
-            </p>
+            <ActivityErrorHint error={activitiesQuery.error} />
           ) : matchedActivities.length === 0 ? (
             <p className="text-[11px] text-gray-500">此活動在所選日期區間內沒有編輯紀錄</p>
           ) : (
@@ -239,6 +237,35 @@ export function SecurityCampaignRow({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Render the actual FB / network error in plain Chinese instead of
+ * a hardcoded "needs ads_management" message. Activity log fetches
+ * fail intermittently for several distinct reasons — surfacing the
+ * real cause helps the operator know whether to wait (rate limit)
+ * or escalate (token scope). */
+function ActivityErrorHint({ error }: { error: unknown }) {
+  const raw = error instanceof Error ? error.message : String(error);
+  let hint: string;
+  if (/rate|throttle|限流|頻率/i.test(raw)) {
+    hint = "FB 暫時限流(BM 用量已達上限),稍候 30–60 分鐘後再試。";
+  } else if (/permission|ads_management|需要.*權限|code 200|code 100/i.test(raw)) {
+    hint = "權限不足:此帳戶可能未授予 ads_management,或非你直接擁有的 BM。";
+  } else if (/timeout|連線錯誤|TimeoutError/i.test(raw)) {
+    hint = "連線到 Facebook 超時,請稍後再試。";
+  } else if (/HTTP\s+5\d\d/i.test(raw)) {
+    hint = "Facebook 端暫時錯誤,稍後再試。";
+  } else {
+    hint = "編輯紀錄載入失敗。";
+  }
+  return (
+    <div className="text-[11px] text-red-700">
+      <div>{hint}</div>
+      <div className="mt-0.5 text-[10px] text-gray-400">
+        ({raw.slice(0, 200)})
+      </div>
     </div>
   );
 }
