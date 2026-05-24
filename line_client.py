@@ -23,7 +23,9 @@ import hashlib
 import hmac
 import json
 import os
+from datetime import datetime
 from typing import Any, List, Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -484,3 +486,274 @@ def build_flex_report(
         }
 
     return {"type": "flex", "altText": alt[:400], "contents": bubble}
+
+
+# ── 安全監控 alert flex ─────────────────────────────────────────
+
+
+_SEC_ANOMALY_LABELS = {
+    "deep_night": "深夜創建",
+    "weekend": "週末創建",
+    "high_budget": "日預算 > $2000",
+    "burst": "短時間高頻",
+    "abnormal_language": "異常語言",
+}
+# Time-based signals (orange) vs financial/security signals (red).
+_SEC_ANOMALY_COLORS = {
+    "deep_night": "#FF6B2C",
+    "weekend": "#FF6B2C",
+    "high_budget": "#DC2626",
+    "burst": "#DC2626",
+    "abnormal_language": "#DC2626",
+}
+
+# Plain status → (label, chip color).
+_SEC_STATUS_DISPLAY = {
+    "ACTIVE": ("進行中", "#16A34A"),
+    "PAUSED": ("已暫停", "#DC2626"),
+    "ARCHIVED": ("已封存", "#888888"),
+    "DELETED": ("已刪除", "#888888"),
+}
+
+
+def _sec_pill(text: str, color: str) -> dict:
+    return {
+        "type": "box",
+        "layout": "vertical",
+        "flex": 0,
+        "cornerRadius": "md",
+        "backgroundColor": color,
+        "paddingStart": "sm",
+        "paddingEnd": "sm",
+        "paddingTop": "xs",
+        "paddingBottom": "xs",
+        "contents": [
+            {
+                "type": "text",
+                "text": text,
+                "size": "xxs",
+                "weight": "bold",
+                "color": "#FFFFFF",
+            }
+        ],
+    }
+
+
+def _sec_kpi_row(label: str, value: str) -> dict:
+    return {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "contents": [
+            {
+                "type": "text",
+                "text": label,
+                "size": "sm",
+                "color": "#888888",
+                "flex": 2,
+            },
+            {
+                "type": "text",
+                "text": value or "—",
+                "size": "sm",
+                "color": "#1A1A1A",
+                "weight": "bold",
+                "flex": 5,
+                "wrap": True,
+            },
+        ],
+    }
+
+
+def _sec_fmt_money(raw) -> str:
+    """Render raw FB-stored daily_budget (TWD-style, NOT cents) as
+    `$1,503,500`. Returns "—" when missing / zero."""
+    if raw is None:
+        return "—"
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        try:
+            n = int(float(raw))
+        except (TypeError, ValueError):
+            return "—"
+    if n <= 0:
+        return "—"
+    return f"${n:,}"
+
+
+def _sec_fmt_local_time(iso: str, tz_name: str = "Asia/Taipei") -> str:
+    """Parse FB ISO timestamp and render as `05/23 12:34` in the
+    operator's timezone."""
+    if not iso:
+        return "—"
+    try:
+        s = iso
+        # Python 3.9 doesn't accept "+0000" suffix in fromisoformat —
+        # normalise to "+00:00".
+        if len(s) >= 5 and s[-5] in ("+", "-") and s[-3] != ":":
+            s = s[:-2] + ":" + s[-2:]
+        dt = datetime.fromisoformat(s)
+        try:
+            local = dt.astimezone(ZoneInfo(tz_name))
+        except Exception:
+            local = dt
+        return local.strftime("%m/%d %H:%M")
+    except (TypeError, ValueError):
+        return "—"
+
+
+def build_security_alert_flex(
+    matches: List[dict],
+    *,
+    tz_name: str = "Asia/Taipei",
+) -> dict:
+    """Build a LINE Flex carousel for 安全監控 anomaly alerts.
+
+    Each bubble = one flagged campaign:
+        Header (orange — 🚨 Meta後台系統警示!! / 新建立廣告異常回報)
+        Body:
+            campaign name (bold, large)
+            row of status pill + anomaly pills
+            KPI rows: 帳戶 / 建立時間 / 建立者 / 日預算 / 已花費 / 編號
+
+    Matches list shape (mirrors what `_format_security_push_text`
+    consumed): each dict has `campaign` (FB-shape dict with id, name,
+    status, daily_budget, created_time), `account_name`, `anomalies`,
+    `creator`.
+
+    Carousel cap is 10 (LINE allows 12, leave headroom). Caller is
+    responsible for sorting matches in priority order before passing in.
+    """
+    if not matches:
+        # Empty alert shouldn't happen but return a stub so caller
+        # doesn't crash trying to push.
+        return {
+            "type": "flex",
+            "altText": "Meta後台系統警示(無內容)",
+            "contents": {
+                "type": "bubble",
+                "size": "kilo",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {"type": "text", "text": "無內容", "size": "sm"}
+                    ],
+                },
+            },
+        }
+
+    bubbles: list[dict] = []
+    total = len(matches)
+    for idx, m in enumerate(matches[:10], 1):
+        c = m.get("campaign") or {}
+        status = (c.get("status") or "").upper()
+        status_label, status_color = _SEC_STATUS_DISPLAY.get(status, (status or "—", "#888888"))
+
+        # Header — same title across the carousel so swiping keeps the
+        # brand consistent. `idx / total` lets the recipient know how
+        # many alerts in this batch.
+        position_chip = f"{idx} / {min(total, 10)}" if total > 1 else ""
+        header_contents: list[dict] = [
+            {
+                "type": "text",
+                "text": "🚨 Meta後台系統警示!!",
+                "size": "lg",
+                "color": "#FFFFFF",
+                "weight": "bold",
+                "wrap": True,
+            },
+            {
+                "type": "text",
+                "text": "新建立廣告異常回報",
+                "size": "md",
+                "color": "#FFE8D9",
+                "weight": "bold",
+                "margin": "xs",
+            },
+        ]
+        if position_chip:
+            header_contents.append(
+                {
+                    "type": "text",
+                    "text": position_chip,
+                    "size": "xs",
+                    "color": "#FFE8D9",
+                    "margin": "sm",
+                }
+            )
+
+        # Status + anomaly pills row.
+        pills: list[dict] = [_sec_pill(status_label, status_color)]
+        for tag in m.get("anomalies") or []:
+            label = _SEC_ANOMALY_LABELS.get(tag, tag)
+            color = _SEC_ANOMALY_COLORS.get(tag, "#FF6B2C")
+            pills.append(_sec_pill(label, color))
+        # filler pushes pills to the left and lets them wrap naturally
+        pills_row = {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "xs",
+            "contents": [*pills, {"type": "filler"}],
+        }
+
+        name = c.get("name") or "(未命名)"
+        cid = c.get("id") or "—"
+        created_local = _sec_fmt_local_time(c.get("created_time") or "", tz_name=tz_name)
+        budget_txt = _sec_fmt_money(c.get("daily_budget"))
+        creator = (m.get("creator") or "").strip() or "—"
+        account_name = (m.get("account_name") or "").strip() or "—"
+
+        body_contents: list[dict] = [
+            {
+                "type": "text",
+                "text": name,
+                "size": "md",
+                "weight": "bold",
+                "color": "#1A1A1A",
+                "wrap": True,
+            },
+            pills_row,
+            {"type": "separator", "margin": "md", "color": "#F0F0F0"},
+            _sec_kpi_row("帳戶", account_name),
+            _sec_kpi_row("建立時間", created_local),
+            _sec_kpi_row("建立者", creator),
+            _sec_kpi_row("日預算", budget_txt),
+        ]
+        spend = m.get("spend")
+        if spend is not None:
+            body_contents.append(_sec_kpi_row("已花費", _sec_fmt_money(spend)))
+        body_contents.append(_sec_kpi_row("編號", cid))
+
+        bubbles.append(
+            {
+                "type": "bubble",
+                "size": "mega",
+                "header": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#FF6B2C",
+                    "paddingAll": "16px",
+                    "contents": header_contents,
+                },
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "paddingAll": "16px",
+                    "contents": body_contents,
+                },
+            }
+        )
+
+    if len(bubbles) == 1:
+        contents: dict = bubbles[0]
+    else:
+        contents = {"type": "carousel", "contents": bubbles}
+
+    extra = ""
+    if total > 10:
+        extra = f"(+ 另有 {total - 10} 則)"
+    alt = f"Meta後台系統警示 — 新建立廣告異常回報,共 {total} 則{extra}"[:400]
+    return {"type": "flex", "altText": alt, "contents": contents}
