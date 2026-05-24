@@ -213,7 +213,6 @@ function ConfigForm({
   const [filters, setFilters] = useState<Set<SecurityAnomalyTag>>(
     new Set(initial?.anomaly_filters ?? ["deep_night", "weekend", "high_budget"]),
   );
-  const [pollMinutes, setPollMinutes] = useState(initial?.poll_interval_minutes ?? 60);
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [error, setError] = useState<string | null>(null);
 
@@ -265,7 +264,6 @@ function ConfigForm({
       group_ids: [...groupIds],
       account_ids: [],
       anomaly_filters: [...filters],
-      poll_interval_minutes: pollMinutes,
       enabled,
     };
     try {
@@ -347,18 +345,7 @@ function ConfigForm({
         </div>
       </Field>
 
-      <Field label="檢查頻率" hint="後端輪詢間隔(分鐘),建議 60(過低會撞 FB rate limit)">
-        <input
-          type="number"
-          min={1}
-          max={1440}
-          value={pollMinutes}
-          onChange={(e) =>
-            setPollMinutes(Math.max(1, Math.min(1440, Number(e.target.value) || 10)))
-          }
-          className="w-24 rounded-md border border-border bg-white px-2.5 py-1.5 text-[13px] outline-none focus:border-orange"
-        />
-      </Field>
+      <p className="text-[11px] text-gray-500">後端每 60 分鐘檢查一次新建立的活動(系統固定值)</p>
 
       <label className="flex cursor-pointer items-center gap-2 text-[13px]">
         <input

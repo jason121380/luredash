@@ -7005,8 +7005,6 @@ def _validate_security_push_payload(p: SecurityPushConfigPayload) -> None:
     bad = [t for t in p.anomaly_filters if t not in _ALLOWED_ANOMALY_TAGS]
     if bad:
         raise HTTPException(status_code=400, detail=f"未知的 anomaly tag: {bad}")
-    if not (1 <= p.poll_interval_minutes <= 1440):
-        raise HTTPException(status_code=400, detail="poll_interval_minutes 必須在 1-1440 之間")
 
 
 @app.get("/api/security-push/configs")
@@ -7039,6 +7037,11 @@ async def upsert_security_push_config(
         if payload.anomaly_filters
         else ["deep_night", "weekend", "high_budget"]
     )
+    # Hard-coded poll interval — exposed to users would let them set
+    # 5 min and trip FB's per-user rate limit (locks /me login for
+    # ~1 hr). 60 min keeps total FB calls per workspace well under
+    # budget regardless of account count.
+    poll_minutes = 60
     async with pool.acquire() as conn:
         if payload.id:
             row = await conn.fetchrow(
@@ -7065,7 +7068,7 @@ async def upsert_security_push_config(
                 payload.group_ids,
                 payload.account_ids,
                 filters,
-                payload.poll_interval_minutes,
+                poll_minutes,
                 payload.enabled,
             )
             return {"ok": True, "data": _sec_push_row_to_dict(updated)}
