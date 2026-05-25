@@ -38,6 +38,30 @@ const ANOMALY_OPTIONS: Array<{ value: SecurityAnomalyTag; label: string; hint: s
 
 type EditingState = { mode: "list" } | { mode: "new" } | { mode: "edit"; cfg: SecurityPushConfig };
 
+// Relative-time helpers used to surface the scheduler's progress
+// ("上次檢查 5 分鐘前 · 下次 55 分鐘後") in the config list. Source
+// of truth is the `last_run_at` / `next_run_at` columns the
+// scheduler tick writes after each `_security_push_run_one()`.
+function formatRelativeTime(iso: string | null): string {
+  if (!iso) return "尚未檢查";
+  const diffSec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (diffSec < 0) return "剛剛";
+  if (diffSec < 60) return `${diffSec} 秒前`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分鐘前`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小時前`;
+  return `${Math.floor(diffSec / 86400)} 天前`;
+}
+
+function formatRelativeFuture(iso: string | null): string {
+  if (!iso) return "排程中";
+  const diffSec = Math.floor((new Date(iso).getTime() - Date.now()) / 1000);
+  if (diffSec < 0) return "即將觸發";
+  if (diffSec < 60) return `${diffSec} 秒後`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分鐘後`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小時後`;
+  return `${Math.floor(diffSec / 86400)} 天後`;
+}
+
 export interface SecurityPushSettingsModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -190,6 +214,26 @@ function ConfigList({
                     {cfg.anomaly_filters
                       .map((t) => ANOMALY_OPTIONS.find((o) => o.value === t)?.label ?? t)
                       .join("、")}
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-gray-500">
+                    <span>
+                      上次檢查:
+                      <b className={cfg.last_run_at ? "text-ink" : "text-gray-400"}>
+                        {formatRelativeTime(cfg.last_run_at)}
+                      </b>
+                    </span>
+                    <span className="text-gray-300">·</span>
+                    <span>
+                      下次:
+                      <b className={cfg.enabled ? "text-ink" : "text-gray-400"}>
+                        {cfg.enabled ? formatRelativeFuture(cfg.next_run_at) : "已停用"}
+                      </b>
+                    </span>
+                    {cfg.fail_count > 0 && (
+                      <span className="rounded-full bg-amber-100 px-1.5 py-[1px] text-[10px] font-semibold text-amber-700">
+                        失敗 {cfg.fail_count}/5 次
+                      </span>
+                    )}
                   </div>
                   {cfg.last_error && (
                     <div className="mt-1 text-[11px] text-red-700">上次錯誤:{cfg.last_error}</div>
