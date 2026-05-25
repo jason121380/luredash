@@ -1329,6 +1329,34 @@ def _peak_bucu_pct() -> int:
     return peak
 
 
+# Self-imposed BUCU ceiling for ALL background tasks (warm loop +
+# scheduler + security push). When any account / BM crosses this
+# threshold on any metric, we pause background work so we don't keep
+# pushing the same account higher until FB explicitly throttles.
+# User-facing requests are NOT gated here — they still go through
+# (with per-request retry + per-account throttle deadline doing
+# defense-in-depth).
+_BUCU_BACKGROUND_GATE_PCT = 80
+
+
+def _background_gate_reason() -> Optional[str]:
+    """Reason to skip background tasks, or None to proceed. Combines:
+      1. FB-reported `estimated_time_to_regain_access` (the
+         conservative gate — only fires when FB itself tells us to
+         wait).
+      2. Self-imposed BUCU ceiling. The peak_bucu_pct snapshot is
+         already the max-across-metrics; if anything ≥80% we pause
+         until natural decay brings it back down.
+    """
+    regain = _peak_regain_minutes()
+    if regain > 0:
+        return f"FB BUCU regain={regain}min"
+    peak = _peak_bucu_pct()
+    if peak >= _BUCU_BACKGROUND_GATE_PCT:
+        return f"self-throttle: BUCU peak {peak}% ≥ {_BUCU_BACKGROUND_GATE_PCT}%"
+    return None
+
+
 def _log_fb_call(
     *,
     path: str,
@@ -8307,11 +8335,9 @@ async def _scheduler_loop() -> None:
     try:
         while True:
             try:
-                if _peak_regain_minutes() > 0:
-                    print(
-                        f"[scheduler] skipping tick — FB BUCU regain={_peak_regain_minutes()}min",
-                        flush=True,
-                    )
+                gate_reason = _background_gate_reason()
+                if gate_reason:
+                    print(f"[scheduler] skipping tick — {gate_reason}", flush=True)
                 else:
                     await _scheduler_tick()
             except asyncio.CancelledError:
@@ -8324,9 +8350,10 @@ async def _scheduler_loop() -> None:
             await asyncio.sleep(SCHEDULER_TICK_SECONDS // 2)
             if not env_off and await _security_push_enabled():
                 try:
-                    if _peak_regain_minutes() > 0:
+                    gate_reason = _background_gate_reason()
+                    if gate_reason:
                         print(
-                            f"[security-push] skipping tick — FB BUCU regain={_peak_regain_minutes()}min",
+                            f"[security-push] skipping tick — {gate_reason}",
                             flush=True,
                         )
                     else:
@@ -8886,10 +8913,15 @@ async def _cache_warm_tick() -> None:
     now = time.monotonic()
     if _last_ads_throttle_at and (now - _last_ads_throttle_at) < _WARM_THROTTLE_BACKOFF_S:
         return
-    # Proactive BUCU gate — when Facebook itself says "wait N minutes",
-    # the warm loop has no business issuing more calls. The next tick
-    # in 60s will re-check.
-    if _peak_regain_minutes() > 0:
+    # Self-imposed BUCU gate — pauses background work when any account
+    # crosses 80% on any metric, even if FB hasn't explicitly told us
+    # to wait yet. Without this, the warm loop keeps pushing already-
+    # hot accounts higher (處理時間 climbs faster than CPU / count
+    # for heavy accounts like !B 新城區) until FB finally throttles —
+    # by which point BUCU is at 95%+ and recovery takes ages.
+    reason = _background_gate_reason()
+    if reason:
+        print(f"[warm-loop] skipping tick — {reason}", flush=True)
         return
 
     # Pick up to _WARM_MAX_PER_TICK candidates: most-recently-accessed
