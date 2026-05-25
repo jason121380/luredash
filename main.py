@@ -4317,13 +4317,22 @@ async def _fetch_campaigns_for_account(
         # swallowed inside _fetch_campaign_insights_bulk.
         raise
 
-    # Stitch insights into metadata to match the shape the frontend's
-    # `getIns(c)` reads (`c.insights.data[0]`).
+    # CRITICAL: shallow-copy each campaign dict before stitching.
+    # `metadata` is the SHARED reference from the metadata cache —
+    # writing `c["insights"]` directly mutates the cached list, so
+    # parallel callers with different date ranges would end up
+    # cross-contaminating each other's insights. The 歷史花費 view
+    # fires 6 parallel queries (one per month) against the same
+    # cached metadata; without this copy, all 6 months ended up
+    # showing whichever month's insights stitched last.
+    stitched: List[dict] = []
     for c in metadata:
-        cid = c.get("id")
+        c_copy = dict(c)
+        cid = c_copy.get("id")
         if cid and cid in insights_by_id:
-            c["insights"] = {"data": [insights_by_id[cid]]}
-    return metadata
+            c_copy["insights"] = {"data": [insights_by_id[cid]]}
+        stitched.append(c_copy)
+    return stitched
 
 
 @app.get("/api/accounts/{account_id}/campaigns")
