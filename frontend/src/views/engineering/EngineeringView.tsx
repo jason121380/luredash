@@ -2,8 +2,8 @@ import { api } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { Button } from "@/components/Button";
+import { Modal } from "@/components/Modal";
 import { toast } from "@/components/Toast";
-import { Topbar } from "@/layout/Topbar";
 import { cn } from "@/lib/cn";
 import { queryClient } from "@/lib/queryClient";
 import { useQuery } from "@tanstack/react-query";
@@ -33,31 +33,46 @@ function useTabVisible(): boolean {
 /**
  * 工程模式 (Engineering Mode) — internal health / diagnostic view.
  *
- * Not linked from the main nav; entered via the user avatar dropdown
- * so only power users / on-call operators see it. Panels are all
- * read-only observers of state that already exists somewhere —
- * adding this view did NOT add new data collection. Each panel auto-
- * refreshes its own source; the page doesn't poll globally.
+ * Rendered as a Modal (opened from the avatar dropdown) instead of a
+ * full page route — the operator usually wants to glance at the
+ * diagnostics without leaving whatever view they were on. Panels are
+ * all read-only observers of state that already exists somewhere;
+ * each panel auto-refreshes its own source.
+ *
+ * Polling panels gate their `refetchInterval` on tab visibility so a
+ * closed modal stops issuing requests immediately (the Modal unmounts
+ * children when `open` flips false).
  */
-export function EngineeringView() {
+function EngineeringPanels() {
   return (
-    <>
-      <Topbar title="工程模式" />
-      <div className="flex flex-col gap-4 p-4 md:p-6">
-        <IdentityPanel />
-        <MemoryPanel />
-        <FbUsagePanel />
-        <FbCallsPanel />
-        <div className="grid gap-4 md:grid-cols-2">
-          <ReactQueryPanel />
-          <BrowserPanel />
-        </div>
-        <div className="grid gap-4 md:grid-cols-2">
-          <ApiHealthPanel />
-          <StoragePanel />
-        </div>
+    <div className="flex flex-col gap-4">
+      <IdentityPanel />
+      <MemoryPanel />
+      <FbUsagePanel />
+      <FbCallsPanel />
+      <div className="grid gap-4 md:grid-cols-2">
+        <ReactQueryPanel />
+        <BrowserPanel />
       </div>
-    </>
+      <div className="grid gap-4 md:grid-cols-2">
+        <ApiHealthPanel />
+        <StoragePanel />
+      </div>
+    </div>
+  );
+}
+
+export function EngineeringModal({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Modal open={open} onOpenChange={onOpenChange} title="工程模式" width={1100}>
+      <EngineeringPanels />
+    </Modal>
   );
 }
 
@@ -573,6 +588,14 @@ function FbCallsPanel() {
                             </span>
                           )}
                           {e.path}
+                          {e.error_code !== null && !e.cache_hit && (
+                            <span
+                              className="ml-1 rounded bg-amber-100 px-1 font-mono text-[9px] text-amber-700"
+                              title={`FB error code ${e.error_code}`}
+                            >
+                              fb={e.error_code}
+                            </span>
+                          )}
                           {e.retried && (
                             <span className="ml-1 rounded bg-amber-100 px-1 text-[9px] text-amber-700">
                               retry

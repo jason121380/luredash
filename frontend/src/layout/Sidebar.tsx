@@ -3,8 +3,13 @@ import { useFbAuth } from "@/auth/FbAuthProvider";
 import { TierBadge } from "@/components/TierBadge";
 import { cn } from "@/lib/cn";
 import { prefetchView } from "@/router";
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
+
+const importEngineeringModal = () => import("@/views/engineering/EngineeringView");
+const EngineeringModal = lazy(() =>
+  importEngineeringModal().then((m) => ({ default: m.EngineeringModal })),
+);
 
 /**
  * Left sidebar — 180px fixed on desktop (`w-sidebar`, see
@@ -247,6 +252,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
   const sub = subQuery.data;
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [engineeringOpen, setEngineeringOpen] = useState(false);
   const menuWrapRef = useRef<HTMLDivElement | null>(null);
 
   // Close the user menu on click-outside. Hover-close (onMouseLeave)
@@ -387,11 +393,15 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
               </button>
               <button
                 type="button"
-                onMouseEnter={() => prefetchView("/engineering")}
-                onFocus={() => prefetchView("/engineering")}
+                onMouseEnter={() => {
+                  void importEngineeringModal();
+                }}
+                onFocus={() => {
+                  void importEngineeringModal();
+                }}
                 onClick={() => {
                   setMenuOpen(false);
-                  navigate("/engineering");
+                  setEngineeringOpen(true);
                 }}
                 className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-[13px] text-gray-500 hover:bg-orange-bg hover:text-orange"
               >
@@ -411,6 +421,11 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
           )}
         </div>
       </div>
+      {engineeringOpen && (
+        <Suspense fallback={null}>
+          <EngineeringModal open={engineeringOpen} onOpenChange={setEngineeringOpen} />
+        </Suspense>
+      )}
     </aside>
   );
 }
