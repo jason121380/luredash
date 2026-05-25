@@ -1,8 +1,6 @@
-import { api } from "@/api/client";
 import type { SecurityPushTestCard } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
-import { useFbAuth } from "@/auth/FbAuthProvider";
 import { AcctSidebarToggle } from "@/components/AcctSidebarToggle";
 import { DatePicker } from "@/components/DatePicker";
 import { EmptyState } from "@/components/EmptyState";
@@ -11,12 +9,9 @@ import { MobileAccountPicker } from "@/components/MobileAccountPicker";
 import { Topbar, TopbarSeparator } from "@/layout/Topbar";
 import { cn } from "@/lib/cn";
 import { type DateConfig, toShortLabel } from "@/lib/datePicker";
-import { Semaphore } from "@/lib/semaphore";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
-import type { FbActivity } from "@/types/fb";
-import { useQueries } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { AlertAccountPanel } from "../alerts/AlertAccountPanel";
 import { SecurityCampaignRow } from "./SecurityCampaignRow";
@@ -29,10 +24,6 @@ import {
 } from "./securityData";
 
 type SecurityTab = "pending" | "safe";
-
-// Module-level cap so the gate is shared across re-renders / re-mounts.
-// Sized to match the backend's `_collect_security_matches` scan_sem(5).
-const activityPrefetchSem = new Semaphore(5);
 
 /**
  * 安全監控 — surfaces newly-created campaigns grouped by day so the
@@ -149,71 +140,13 @@ export function SecurityMonitorView() {
     return { since: Math.floor(from / 1000), until: Math.floor(to / 1000) };
   }, [fetchDate]);
 
-  // Eager activity-log prefetch per visible account so we can show the
-  // creator name on every card without waiting for the user to expand.
-  //
-  // Two-tier strategy to keep BUCU bounded:
-  //   1. Prefetch uses `event_types=create_campaign_group` so FB only
-  //      returns campaign-create events (rare — usually <50/account/90d
-  //      even for very active accounts). Backend caps to 2 pages.
-  //   2. Per-row expand keeps using the unfiltered endpoint via
-  //      `useAccountActivities` — different cache key — and gets the
-  //      full edit history with the backend's 3-page safety cap.
-  //
-  // Throttled via a module-level Semaphore(5) so a 30-account view
-  // doesn't open 30 concurrent /activities sockets the moment the
-  // page mounts.
-  const { status: authStatus } = useFbAuth();
-  const activityQueries = useQueries({
-    queries: visibleAll.map((acc) => ({
-      queryKey: [
-        "activities",
-        acc.id,
-        activitiesBounds.since,
-        activitiesBounds.until,
-        "creators",
-      ],
-      queryFn: (): Promise<FbActivity[]> =>
-        activityPrefetchSem.run(async () => {
-          const resp = await api.accounts.activities(
-            acc.id,
-            activitiesBounds.since,
-            activitiesBounds.until,
-            "create_campaign_group",
-          );
-          return resp.data ?? [];
-        }),
-      enabled: authStatus === "auth" && !!acc.id,
-      staleTime: 5 * 60 * 1000,
-    })),
-  });
-
-  // campaign_id → actor_name of the user who created it. Filter is
-  // intentionally permissive: FB has emitted multiple event_type
-  // shapes over the years ("create_campaign", "create_campaign_group",
-  // and locale-prefixed variants), so we match on either the raw
-  // event_type containing "create" OR the translated label containing
-  // "建立". We don't filter on object_type because that field's casing
-  // and naming has also varied (CAMPAIGN vs AD_CAMPAIGN); the
-  // object_id → campaign.id lookup at render time gives us the
-  // disambiguation we need.
-  const creatorByCampaignId = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const q of activityQueries) {
-      if (!q.data) continue;
-      for (const a of q.data) {
-        const oid = a.object_id;
-        if (!oid || map.has(oid)) continue;
-        const evt = (a.event_type ?? "").toLowerCase();
-        const tEvt = a.translated_event_type ?? "";
-        const isCreate = evt.includes("create") || tEvt.includes("建立");
-        if (!isCreate) continue;
-        const name = a.actor_name?.trim();
-        if (name) map.set(oid, name);
-      }
-    }
-    return map;
-  }, [activityQueries]);
+  // Creator-name eager prefetch removed (was a BUCU sinkhole — 30+
+  // /activities calls fired on every view mount, each 5-20s on heavy
+  // accounts like !B 新城區). Cards now show「建立者:—」on first
+  // render; when user expands a row, SecurityCampaignRow's
+  // `useAccountActivities` lazily pulls the full activity log for
+  // that ONE account and surfaces the creator on demand.
+  const creatorByCampaignId = useMemo(() => new Map<string, string>(), []);
 
   // Snapshot of the 待查看 cards — passed into the push-settings modal
   // so the「測試」button can echo exactly what the user sees on screen
