@@ -10,8 +10,9 @@ import { useQuery } from "@tanstack/react-query";
  *
  * `enabled` is gated on auth + a non-empty account id so we never fire
  * unauthenticated and can be conditionally suspended when the user
- * collapses the expand. Cached for 2 minutes so re-opening the expand
- * is instant.
+ * collapses the expand. Cached for 5 minutes (aligned with the rest
+ * of the data layer) — activity log doesn't change fast enough to
+ * justify the 2× extra FB calls a 2-minute window costs.
  */
 export function useAccountActivities(
   accountId: string | null | undefined,
@@ -28,6 +29,6 @@ export function useAccountActivities(
       return resp.data ?? [];
     },
     enabled: status === "auth" && !!accountId && enabled,
-    staleTime: 2 * 60 * 1000,
+    staleTime: 5 * 60 * 1000,
   });
 }

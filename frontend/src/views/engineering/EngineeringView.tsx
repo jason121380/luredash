@@ -10,6 +10,27 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 /**
+ * Returns true when the tab is currently visible (i.e. user is looking
+ * at this page). All polling panels use this to STOP firing requests
+ * when the user has switched tabs — saves a /api/engineering/memory
+ * (cheap) and /api/engineering/fb-calls (cheap but adds backend load)
+ * call every 10s for every backgrounded EngineeringView tab.
+ */
+const subscribeVisibility = (cb: () => void) => {
+  document.addEventListener("visibilitychange", cb);
+  return () => document.removeEventListener("visibilitychange", cb);
+};
+const getVisibilitySnapshot = () => document.visibilityState === "visible";
+const getVisibilitySnapshotServer = () => true;
+function useTabVisible(): boolean {
+  return useSyncExternalStore(
+    subscribeVisibility,
+    getVisibilitySnapshot,
+    getVisibilitySnapshotServer,
+  );
+}
+
+/**
  * 工程模式 (Engineering Mode) — internal health / diagnostic view.
  *
  * Not linked from the main nav; entered via the user avatar dropdown
@@ -26,6 +47,7 @@ export function EngineeringView() {
         <IdentityPanel />
         <MemoryPanel />
         <FbUsagePanel />
+        <FbCallsPanel />
         <div className="grid gap-4 md:grid-cols-2">
           <ReactQueryPanel />
           <BrowserPanel />
@@ -111,10 +133,11 @@ function Card({
 // during AI 幕僚 / dashboard fan-out spikes.
 
 function MemoryPanel() {
+  const visible = useTabVisible();
   const query = useQuery({
     queryKey: ["engineering-memory"],
     queryFn: () => api.engineering.memory(),
-    refetchInterval: 10_000,
+    refetchInterval: visible ? 10_000 : false,
     staleTime: 0,
   });
   const data = query.data;
@@ -162,10 +185,11 @@ function MemoryPanel() {
 // ── FB rate-limit usage ──────────────────────────────────────
 
 function FbUsagePanel() {
+  const visible = useTabVisible();
   const usageQuery = useQuery({
     queryKey: ["fb-usage"],
     queryFn: () => api.engineering.fbUsage(),
-    refetchInterval: 10_000,
+    refetchInterval: visible ? 10_000 : false,
     staleTime: 0,
   });
   const accountsQuery = useAccounts();
@@ -328,6 +352,243 @@ function UsageBar({ label, value }: { label: string; value: number }) {
       </div>
       <span className="w-[42px] shrink-0 text-right font-mono text-gray-600">{value}%</span>
     </div>
+  );
+}
+
+// ── FB API call log (debug for rate-limit spikes) ────────────
+//
+// Surfaces the ring buffer + 5-min aggregates the backend keeps on
+// every FB Graph API call. The point is to answer "what was the app
+// doing right before FB 80004'd us?" without grepping prod logs.
+//
+// Three sections:
+// 1. Aggregate cards — call count / cache hit rate / error count
+//    over the last 5 minutes, plus a list of accounts currently in
+//    cooldown.
+// 2. Top paths + top accounts — which FB endpoints and which
+//    ad accounts received the most calls in the last 5 minutes. This
+//    is where the actual culprit shows up.
+// 3. Recent calls — newest-first table of individual calls so we can
+//    see the exact ordering / cache-hit pattern leading up to a
+//    throttle event.
+
+function FbCallsPanel() {
+  const visible = useTabVisible();
+  const query = useQuery({
+    queryKey: ["fb-calls"],
+    queryFn: () => api.engineering.fbCalls(),
+    refetchInterval: visible ? 10_000 : false,
+    staleTime: 0,
+  });
+  const data = query.data;
+  const recent = useMemo(() => {
+    const r = data?.recent ?? [];
+    // Newest first for the table — backend returns oldest-first.
+    return [...r].reverse().slice(0, 50);
+  }, [data?.recent]);
+
+  const cooldowns = useMemo(() => {
+    const ent = Object.entries(data?.account_throttle_until ?? {});
+    return ent
+      .map(([aid, deadlineSec]) => ({
+        accountId: aid,
+        remainingSec: Math.max(0, Math.floor(deadlineSec - Date.now() / 1000)),
+      }))
+      .filter((c) => c.remainingSec > 0)
+      .sort((a, b) => b.remainingSec - a.remainingSec);
+  }, [data?.account_throttle_until]);
+
+  const formatTs = (ts: number) => {
+    const d = new Date(ts * 1000);
+    return d.toLocaleTimeString("zh-TW", { hour12: false });
+  };
+  const formatStatusBadge = (e: NonNullable<typeof recent>[number]) => {
+    if (e.cache_hit) {
+      return <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] text-emerald-700">cache</span>;
+    }
+    if (e.error_code === 80004 && e.status === 429 && e.ms === 0) {
+      return <span className="rounded bg-red-100 px-1.5 py-0.5 font-mono text-[10px] text-red-700">gated</span>;
+    }
+    const tone =
+      e.status >= 500
+        ? "bg-red-100 text-red-700"
+        : e.status >= 400
+          ? "bg-amber-100 text-amber-700"
+          : "bg-gray-100 text-gray-700";
+    return (
+      <span className={cn("rounded px-1.5 py-0.5 font-mono text-[10px]", tone)}>{e.status}</span>
+    );
+  };
+
+  return (
+    <Card
+      title="最近 FB 呼叫 / 節流事件"
+      subtitle="後端 ring buffer:每一次 FB Graph API 呼叫(含 cache hit 與 gated)都在這裡。用來追「80004 發生前我們在打誰」。"
+      action={
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => void query.refetch()}
+          disabled={query.isFetching}
+        >
+          {query.isFetching ? "更新中…" : "立即更新"}
+        </Button>
+      }
+    >
+      {query.isLoading ? (
+        <div className="text-sm text-gray-400">載入中…</div>
+      ) : !data ? (
+        <div className="text-sm text-gray-400">無資料</div>
+      ) : (
+        <>
+          {/* Aggregate cards */}
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+            <Stat label="5 分鐘總呼叫" value={data.total_5m} />
+            <Stat
+              label="Cache 命中率"
+              value={Math.round(data.cache_hit_rate_5m * 100)}
+              tone={data.cache_hit_rate_5m >= 0.5 ? "ok" : "warn"}
+            />
+            <Stat
+              label="5 分鐘錯誤"
+              value={data.error_count_5m}
+              tone={data.error_count_5m > 0 ? "err" : "default"}
+            />
+            <Stat label="冷卻中帳戶" value={cooldowns.length} tone={cooldowns.length > 0 ? "err" : "default"} />
+          </div>
+
+          {/* Per-account cooldowns */}
+          {cooldowns.length > 0 && (
+            <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12px]">
+              <div className="mb-1 font-semibold text-red-700">節流冷卻中</div>
+              <ul className="flex flex-col gap-0.5 font-mono text-red-700">
+                {cooldowns.map((c) => (
+                  <li key={c.accountId}>
+                    {c.accountId} — 剩餘 {Math.floor(c.remainingSec / 60)}分{c.remainingSec % 60}秒
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Top paths + Top accounts */}
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <div>
+              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
+                5 分鐘熱門路徑
+              </h3>
+              {data.top_paths_5m.length === 0 ? (
+                <div className="text-[12px] text-gray-400">尚無資料</div>
+              ) : (
+                <ul className="flex flex-col gap-0.5 text-[12px]">
+                  {data.top_paths_5m.slice(0, 10).map((p) => (
+                    <li
+                      key={p.path}
+                      className="flex items-center justify-between gap-2 rounded border border-border bg-bg px-2 py-1"
+                    >
+                      <span className="truncate font-mono text-ink" title={p.path}>
+                        {p.path}
+                      </span>
+                      <span className="shrink-0 font-mono text-gray-500">{p.count}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div>
+              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
+                5 分鐘熱門帳戶
+              </h3>
+              {data.top_accounts_5m.length === 0 ? (
+                <div className="text-[12px] text-gray-400">尚無資料</div>
+              ) : (
+                <ul className="flex flex-col gap-0.5 text-[12px]">
+                  {data.top_accounts_5m.slice(0, 10).map((a) => (
+                    <li
+                      key={a.account_id}
+                      className="flex items-center justify-between gap-2 rounded border border-border bg-bg px-2 py-1"
+                    >
+                      <span className="truncate font-mono text-ink">{a.account_id}</span>
+                      <span className="shrink-0 font-mono text-gray-500">{a.count}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+
+          {/* Recent throttle events */}
+          {data.throttle_events.length > 0 && (
+            <div className="mt-3">
+              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
+                最近節流事件
+              </h3>
+              <ul className="flex flex-col gap-0.5 text-[12px]">
+                {data.throttle_events.slice(0, 8).map((ev, idx) => (
+                  <li
+                    key={`${ev.ts}-${ev.account_id}-${idx}`}
+                    className="flex items-center gap-2 rounded border border-red-200 bg-red-50 px-2 py-1 font-mono text-red-700"
+                  >
+                    <span>{formatTs(ev.ts)}</span>
+                    <span className="rounded bg-red-100 px-1 text-[10px]">code={ev.code}</span>
+                    <span className="truncate" title={ev.path}>
+                      {ev.account_id || "?"} · {ev.path}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Recent calls table */}
+          <div className="mt-3">
+            <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
+              最近 50 筆呼叫(新到舊)
+            </h3>
+            {recent.length === 0 ? (
+              <div className="text-[12px] text-gray-400">尚無呼叫紀錄</div>
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-border">
+                <table className="w-full text-[11px]">
+                  <thead className="bg-bg text-left text-gray-500">
+                    <tr>
+                      <th className="px-2 py-1 font-semibold">時間</th>
+                      <th className="px-2 py-1 font-semibold">狀態</th>
+                      <th className="px-2 py-1 font-semibold">ms</th>
+                      <th className="px-2 py-1 font-semibold">BUCU%</th>
+                      <th className="px-2 py-1 font-semibold">路徑</th>
+                    </tr>
+                  </thead>
+                  <tbody className="font-mono">
+                    {recent.map((e, idx) => (
+                      <tr key={`${e.ts}-${idx}`} className="border-t border-border">
+                        <td className="px-2 py-1 text-gray-500">{formatTs(e.ts)}</td>
+                        <td className="px-2 py-1">{formatStatusBadge(e)}</td>
+                        <td className="px-2 py-1 text-right text-gray-600">{e.ms}</td>
+                        <td className="px-2 py-1 text-right text-gray-600">{e.bucu_peak_pct}</td>
+                        <td className="truncate px-2 py-1 text-ink" title={e.path}>
+                          {e.method !== "GET" && (
+                            <span className="mr-1 rounded bg-orange-bg px-1 text-[9px] text-orange">
+                              {e.method}
+                            </span>
+                          )}
+                          {e.path}
+                          {e.retried && (
+                            <span className="ml-1 rounded bg-amber-100 px-1 text-[9px] text-amber-700">
+                              retry
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </Card>
   );
 }
 

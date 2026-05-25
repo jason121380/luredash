@@ -116,6 +116,19 @@ export function useMultiAccountOverview(
 
   const enabled = status === "auth" && accounts.length > 0;
 
+  // Phase 2 (rate-limit reduction): when a localStorage snapshot is
+  // already on hand for this exact (idsKey, date, archived) tuple,
+  // SKIP the lite call entirely. The snapshot already paints the
+  // UI; firing lite would only duplicate work the full query is
+  // about to redo. Cold-start (no snapshot) still gets the lite +
+  // full two-phase progressive render.
+  //
+  // Saves ~N FB calls per dashboard reload (one per selected account)
+  // for the 99% case where the user has visited the same set of
+  // accounts within the last 24h.
+  const snapHash = snapshotHash(idsKey, date, !!opts.includeArchived);
+  const hasSnapshot = useMemo(() => !!readOverviewSnapshot(snapHash), [snapHash]);
+
   // Phase 1: lite (no insights — fast)
   const liteQuery = useQuery({
     queryKey: ["overview-lite", idsKey, date, !!opts.includeArchived],
@@ -125,7 +138,7 @@ export function useMultiAccountOverview(
       }
       return api.overview.batch(sortedIds, date, { ...opts, lite: true });
     },
-    enabled,
+    enabled: enabled && !hasSnapshot,
     staleTime: 5 * 60_000,
   });
 
@@ -136,7 +149,6 @@ export function useMultiAccountOverview(
   // refresh in place. snapHash is recomputed when accounts or date
   // change so a stale snapshot for a different combo is correctly
   // ignored.
-  const snapHash = snapshotHash(idsKey, date, !!opts.includeArchived);
   const fullQuery = useQuery({
     queryKey: ["overview", idsKey, date, !!opts.includeArchived],
     queryFn: async () => {

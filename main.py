@@ -3,11 +3,13 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from collections import Counter, deque
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, List
 from zoneinfo import ZoneInfo
 import asyncio
+import random
 import traceback
 import base64
 import hashlib
@@ -148,8 +150,33 @@ _warm_targets: dict[tuple[str, str, str, Optional[str], str], float] = {}
 # Set whenever we observe an 80004 throttle response. The warm loop
 # checks this and backs off for 10 minutes — the absolute last thing
 # we want is the warm loop poking the throttled account again and
-# extending the lockout.
+# extending the lockout. This is the global "any account 80004'd
+# recently" flag; the per-account version below lets unrelated
+# accounts keep getting served while the throttled one is gated.
 _last_ads_throttle_at: float = 0.0
+
+# Per-ad-account throttle deadline. When 80000-80014 fires for an
+# account we store `time.monotonic() + cooldown` here; `_fb_request`
+# checks this BEFORE acquiring a semaphore and short-circuits to a
+# 429 instead of issuing a call that would just extend the lockout.
+# Cooldown = max(600s, BUCU regain seconds) so we always wait at
+# least 10 minutes even when FB's header says "0 minutes" (which it
+# sometimes does immediately after the throttle fires).
+_account_throttle_until: dict[str, float] = {}
+
+# Ring buffer of the last N FB Graph API calls (success + error).
+# Each entry: {ts, path, account_id, method, ms, status, bucu_peak_pct,
+# cache_hit, error_code, retried}. Read-only — surfaced via
+# /api/engineering/fb-calls so operators can correlate "rate-limit
+# spike at HH:MM:SS" with the actual paths that were in flight.
+# 500 entries × ~150 bytes ≈ 75 KB, well within budget.
+_fb_call_log: deque = deque(maxlen=500)
+
+# Per-account 80000-80014 throttle event history. Last 20 events per
+# account (timestamp + path + error_code) so the engineering panel
+# can answer "which account is being throttled most often?". Older
+# events fall off the deque automatically.
+_account_throttle_events: dict[str, deque] = {}
 
 # ── LINE push scheduler ─────────────────────────────────────────────
 # `_scheduler_task` holds the background asyncio task started in
@@ -1254,6 +1281,100 @@ def _peak_regain_minutes() -> int:
     )
 
 
+def _peak_bucu_pct() -> int:
+    """Highest of (call_count, total_cputime, total_time) across all
+    BUCU entries. Used in the call log so each row records the BUCU
+    headroom AT THE TIME the call was made, instead of the panel only
+    being able to show the current snapshot.
+    """
+    if not _fb_usage:
+        return 0
+    peak = 0
+    for u in _fb_usage.values():
+        for k in ("call_count", "total_cputime", "total_time"):
+            try:
+                peak = max(peak, int(u.get(k, 0) or 0))
+            except (TypeError, ValueError):
+                continue
+    return peak
+
+
+def _log_fb_call(
+    *,
+    path: str,
+    account_id: Optional[str],
+    method: str,
+    ms: float,
+    status: int,
+    cache_hit: bool,
+    error_code: Optional[int] = None,
+    retried: bool = False,
+) -> None:
+    """Append a single entry to the FB call ring buffer. Best-effort;
+    a failure here must NEVER break the actual FB call path."""
+    try:
+        _fb_call_log.append(
+            {
+                "ts": time.time(),
+                "path": path,
+                "account_id": account_id or "",
+                "method": method,
+                "ms": int(ms),
+                "status": status,
+                "bucu_peak_pct": _peak_bucu_pct(),
+                "cache_hit": cache_hit,
+                "error_code": error_code,
+                "retried": retried,
+            }
+        )
+    except Exception:
+        pass
+
+
+def _record_account_throttle(account_id: Optional[str], path: str, error_code: int) -> None:
+    """Bookkeeping when 80000-80014 hits: append to per-account event
+    history, set the throttle-until deadline (max of 10min and BUCU
+    regain), update the global `_last_ads_throttle_at`, and emit a
+    structured log line so operators can correlate from stderr.
+    """
+    aid = account_id or _extract_account_id_from_path(path) or ""
+    regain_min = _peak_regain_minutes()
+    # Cooldown floor: 10 minutes. FB's BUCU header sometimes reports
+    # 0 minutes IMMEDIATELY after the throttle fires (it's an estimate),
+    # so we always wait at least 10 minutes before talking to that
+    # account again.
+    cooldown_s = max(600.0, float(regain_min) * 60.0)
+    now = time.monotonic()
+    global _last_ads_throttle_at
+    _last_ads_throttle_at = now
+    if aid:
+        _account_throttle_until[aid] = now + cooldown_s
+        events = _account_throttle_events.get(aid)
+        if events is None:
+            events = deque(maxlen=20)
+            _account_throttle_events[aid] = events
+        events.append({"ts": time.time(), "path": path, "code": error_code})
+    print(
+        f"[fb throttle {error_code}] account={aid or '?'} path={path} "
+        f"regain_min={regain_min} cooldown_s={int(cooldown_s)}",
+        flush=True,
+    )
+
+
+def _account_throttle_remaining(account_id: Optional[str]) -> float:
+    """Seconds left on the per-account cooldown, or 0 if not throttled."""
+    if not account_id:
+        return 0.0
+    deadline = _account_throttle_until.get(account_id)
+    if not deadline:
+        return 0.0
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        _account_throttle_until.pop(account_id, None)
+        return 0.0
+    return remaining
+
+
 def _cache_key(token: str, path: str, params: dict, *, kind: str = "single") -> str:
     """Build a stable cache key from token + path + sorted params.
     The token is hashed so it never appears in memory inspection or
@@ -1475,7 +1596,42 @@ async def _fb_request(
         cache_key = _cache_key(token, path, params, kind="single")
         cached = _cache_get(cache_key)
         if cached is not None:
+            _log_fb_call(
+                path=path,
+                account_id=_extract_account_id_from_path(path),
+                method=method,
+                ms=0,
+                status=200,
+                cache_hit=True,
+            )
             return cached
+
+    # Per-account throttle short-circuit. When we've seen 80000-80014
+    # for this account, refuse to issue ANY new call for `cooldown_s`
+    # — continuing to hit FB just extends the lockout. Returns a 429
+    # with the remaining seconds so the frontend can show a friendly
+    # "try again in N minutes" message. This is the dominant lever
+    # against rate-limit escalation: one 80004 = stop talking to that
+    # account for 10+ minutes, full stop.
+    acct_for_gate = _extract_account_id_from_path(path)
+    remaining = _account_throttle_remaining(acct_for_gate)
+    if remaining > 0:
+        _log_fb_call(
+            path=path,
+            account_id=acct_for_gate,
+            method=method,
+            ms=0,
+            status=429,
+            cache_hit=False,
+            error_code=80004,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"廣告帳戶 {acct_for_gate} 仍在 FB 節流冷卻中,約 {int(remaining)} 秒後可重試 "
+                f"[code=80004 retry_after_seconds={int(remaining)}]"
+            ),
+        )
 
     # Serialise concurrent misses on the same key so we only pay the
     # FB round-trip once per window. The cache re-check INSIDE the
@@ -1487,6 +1643,14 @@ async def _fb_request(
         async with lock:
             cached = _cache_get(cache_key)
             if cached is not None:
+                _log_fb_call(
+                    path=path,
+                    account_id=acct_for_gate,
+                    method=method,
+                    ms=0,
+                    status=200,
+                    cache_hit=True,
+                )
                 return cached
             return await _fb_fetch_with_retry(
                 method, path, params, data_payload, token, cache_key, get_timeout
@@ -1520,7 +1684,14 @@ async def _fb_fetch_with_retry(
     for attempt in range(_FB_MAX_RETRIES + 1):
         try:
             return await _fb_fetch_and_cache(
-                method, path, params, data_payload, token, cache_key, get_timeout
+                method,
+                path,
+                params,
+                data_payload,
+                token,
+                cache_key,
+                get_timeout,
+                retried=(attempt > 0),
             )
         except HTTPException as e:
             last_exc = e
@@ -1531,7 +1702,13 @@ async def _fb_fetch_with_retry(
                 f"(attempt {attempt + 1}/{_FB_MAX_RETRIES + 1}): {e.detail}",
                 flush=True,
             )
-            await asyncio.sleep(_FB_RETRY_DELAY_S)
+            # Exponential backoff with jitter: 0.5s × 2^attempt plus
+            # up to 250ms jitter. With _FB_MAX_RETRIES=1 this means
+            # ~0.5-0.75s before the single retry — same ballpark as
+            # the old fixed 0.5s but spread out so a burst of concurrent
+            # transient failures don't all retry on the same tick.
+            delay = _FB_RETRY_DELAY_S * (2**attempt) + random.uniform(0, 0.25)
+            await asyncio.sleep(delay)
     # Unreachable: the loop either returns or raises, but mypy / lint
     # likes an explicit exit.
     raise last_exc if last_exc else HTTPException(status_code=500, detail="fb retry exhausted")
@@ -1545,6 +1722,8 @@ async def _fb_fetch_and_cache(
     token: str,
     cache_key: Optional[str],
     get_timeout: float = _GET_TIMEOUT_FAST,
+    *,
+    retried: bool = False,
 ) -> dict:
     """Inner FB call — issues the actual httpx request, handles the
     usual error pathways, and writes the result to the cache when
@@ -1558,61 +1737,111 @@ async def _fb_fetch_and_cache(
     # pool. Bypass per-account when path doesn't carry act_*.
     account_id = _extract_account_id_from_path(path)
     acct_sem = _account_semaphore(account_id) if account_id else None
-    async with (acct_sem if acct_sem else _NULL_CTX):
-        async with _fb_semaphore:
-            try:
-                if method == "GET":
-                    params = {"access_token": token, **params}
-                    r = await _http_client.get(url, params=params, timeout=get_timeout)
-                else:
-                    data_payload = {"access_token": token, **data_payload}
-                    r = await _http_client.post(url, data=data_payload, timeout=_POST_TIMEOUT)
-            except httpx.TimeoutException as e:
-                raise HTTPException(status_code=504, detail=f"Facebook API timeout: {e}")
-            except httpx.RequestError as e:
-                # Includes ConnectError, ProxyError, NetworkError, etc.
-                raise HTTPException(status_code=502, detail=f"Cannot reach Facebook API: {type(e).__name__}: {e}")
-    # Record rate-limit usage regardless of success/error — the header
-    # is present on error responses too and is how we know when it's
-    # safe to retry.
-    _parse_bucu_header(r.headers.get("x-business-use-case-usage"))
-    # Try to parse JSON response
+    started = time.monotonic()
+    r = None
     try:
-        body = r.json()
-    except Exception:
-        # FB returned non-JSON (rare, usually HTML error page)
-        snippet = (r.text or "")[:300]
-        raise HTTPException(status_code=502, detail=f"Facebook API returned non-JSON (HTTP {r.status_code}): {snippet}")
-    if isinstance(body, dict) and "error" in body:
-        err = body["error"] if isinstance(body["error"], dict) else {}
-        # FB's `message` is usually a generic「Invalid parameter」or
-        # the like. The actually actionable version is in
-        # `error_user_title` + `error_user_msg`, which FB localises and
-        # explicitly intends for operator-facing display. Prefer those
-        # when present so users see「廣告組合無法啟用,因上層行銷活動
-        # 已暫停」 instead of「Invalid parameter」.
-        user_title = (err.get("error_user_title") or "").strip()
-        user_msg = (err.get("error_user_msg") or "").strip()
-        generic_msg = err.get("message", "Facebook API error")
-        if user_msg:
-            msg = f"{user_title}:{user_msg}" if user_title else user_msg
-        else:
-            msg = generic_msg
-        # Re-surface FB error code so frontend can react (e.g. token expired = 190)
-        code = err.get("code")
-        sub = err.get("error_subcode")
-        detail = f"{msg} [code={code}{f' subcode={sub}' if sub else ''}]" if code else msg
-        # Ads-account throttle (80000-80014) — flag globally so the
-        # cache-warm loop backs off and the next 10 minutes of
-        # background activity doesn't extend the lockout.
-        if isinstance(code, int) and 80000 <= code <= 80014:
-            global _last_ads_throttle_at
-            _last_ads_throttle_at = time.monotonic()
-        raise HTTPException(status_code=400, detail=detail)
-    # Cache successful GET responses
-    if cache_key is not None:
-        _cache_put(cache_key, body)
-    return body
+        async with (acct_sem if acct_sem else _NULL_CTX):
+            async with _fb_semaphore:
+                try:
+                    if method == "GET":
+                        params = {"access_token": token, **params}
+                        r = await _http_client.get(url, params=params, timeout=get_timeout)
+                    else:
+                        data_payload = {"access_token": token, **data_payload}
+                        r = await _http_client.post(url, data=data_payload, timeout=_POST_TIMEOUT)
+                except httpx.TimeoutException as e:
+                    _log_fb_call(
+                        path=path,
+                        account_id=account_id,
+                        method=method,
+                        ms=(time.monotonic() - started) * 1000,
+                        status=504,
+                        cache_hit=False,
+                        retried=retried,
+                    )
+                    raise HTTPException(status_code=504, detail=f"Facebook API timeout: {e}")
+                except httpx.RequestError as e:
+                    # Includes ConnectError, ProxyError, NetworkError, etc.
+                    _log_fb_call(
+                        path=path,
+                        account_id=account_id,
+                        method=method,
+                        ms=(time.monotonic() - started) * 1000,
+                        status=502,
+                        cache_hit=False,
+                        retried=retried,
+                    )
+                    raise HTTPException(status_code=502, detail=f"Cannot reach Facebook API: {type(e).__name__}: {e}")
+        # Record rate-limit usage regardless of success/error — the header
+        # is present on error responses too and is how we know when it's
+        # safe to retry.
+        _parse_bucu_header(r.headers.get("x-business-use-case-usage"))
+        # Try to parse JSON response
+        try:
+            body = r.json()
+        except Exception:
+            # FB returned non-JSON (rare, usually HTML error page)
+            snippet = (r.text or "")[:300]
+            _log_fb_call(
+                path=path,
+                account_id=account_id,
+                method=method,
+                ms=(time.monotonic() - started) * 1000,
+                status=502,
+                cache_hit=False,
+                retried=retried,
+            )
+            raise HTTPException(status_code=502, detail=f"Facebook API returned non-JSON (HTTP {r.status_code}): {snippet}")
+        if isinstance(body, dict) and "error" in body:
+            err = body["error"] if isinstance(body["error"], dict) else {}
+            # FB's `message` is usually a generic「Invalid parameter」or
+            # the like. The actually actionable version is in
+            # `error_user_title` + `error_user_msg`, which FB localises and
+            # explicitly intends for operator-facing display. Prefer those
+            # when present so users see「廣告組合無法啟用,因上層行銷活動
+            # 已暫停」 instead of「Invalid parameter」.
+            user_title = (err.get("error_user_title") or "").strip()
+            user_msg = (err.get("error_user_msg") or "").strip()
+            generic_msg = err.get("message", "Facebook API error")
+            if user_msg:
+                msg = f"{user_title}:{user_msg}" if user_title else user_msg
+            else:
+                msg = generic_msg
+            # Re-surface FB error code so frontend can react (e.g. token expired = 190)
+            code = err.get("code")
+            sub = err.get("error_subcode")
+            detail = f"{msg} [code={code}{f' subcode={sub}' if sub else ''}]" if code else msg
+            # Ads-account throttle (80000-80014) — flag the account so
+            # the cache-warm loop and subsequent dashboard hits to THIS
+            # account back off, while unrelated accounts keep working.
+            if isinstance(code, int) and 80000 <= code <= 80014:
+                _record_account_throttle(account_id, path, code)
+            _log_fb_call(
+                path=path,
+                account_id=account_id,
+                method=method,
+                ms=(time.monotonic() - started) * 1000,
+                status=400,
+                cache_hit=False,
+                error_code=code if isinstance(code, int) else None,
+                retried=retried,
+            )
+            raise HTTPException(status_code=400, detail=detail)
+        # Cache successful GET responses
+        if cache_key is not None:
+            _cache_put(cache_key, body)
+        _log_fb_call(
+            path=path,
+            account_id=account_id,
+            method=method,
+            ms=(time.monotonic() - started) * 1000,
+            status=200,
+            cache_hit=False,
+            retried=retried,
+        )
+        return body
+    except HTTPException:
+        raise
 
 
 async def fb_get(path: str, params: Optional[dict] = None, *, slow_ok: bool = False) -> dict:
@@ -1670,7 +1899,38 @@ async def fb_get_paginated(
     cache_key = _cache_key(token, path, params, kind="paged")
     cached = _cache_get(cache_key)
     if cached is not None:
+        _log_fb_call(
+            path=path,
+            account_id=_extract_account_id_from_path(path),
+            method="GET",
+            ms=0,
+            status=200,
+            cache_hit=True,
+        )
         return cached  # already a List[dict]
+
+    # Same per-account throttle gate as `_fb_request`. Catches the
+    # paginated read paths (account list, campaigns, activities)
+    # before they issue a doomed call against a throttled account.
+    acct_for_gate = _extract_account_id_from_path(path)
+    remaining = _account_throttle_remaining(acct_for_gate)
+    if remaining > 0:
+        _log_fb_call(
+            path=path,
+            account_id=acct_for_gate,
+            method="GET",
+            ms=0,
+            status=429,
+            cache_hit=False,
+            error_code=80004,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"廣告帳戶 {acct_for_gate} 仍在 FB 節流冷卻中,約 {int(remaining)} 秒後可重試 "
+                f"[code=80004 retry_after_seconds={int(remaining)}]"
+            ),
+        )
 
     lock = _cache_lock(cache_key)
     async with lock:
@@ -1678,6 +1938,14 @@ async def fb_get_paginated(
         # populated the cache while we were blocked.
         cached = _cache_get(cache_key)
         if cached is not None:
+            _log_fb_call(
+                path=path,
+                account_id=acct_for_gate,
+                method="GET",
+                ms=0,
+                status=200,
+                cache_hit=True,
+            )
             return cached
         return await _fb_get_paginated_fetch(path, params, token, cache_key, ttl)
 
@@ -1695,6 +1963,7 @@ async def _fb_get_paginated_fetch(
     items: List[dict] = []
     next_url: Optional[str] = f"{BASE_URL}/{path}"
     page_params = {"access_token": token, **params}
+    account_id = _extract_account_id_from_path(path)
     while next_url:
         data: Optional[dict] = None
         last_exc: Optional[HTTPException] = None
@@ -1702,7 +1971,11 @@ async def _fb_get_paginated_fetch(
         # (80000-80014) must NOT be retried — continuing calls
         # extends the lockout. Flag is set inline when we see one.
         no_retry = False
+        retried_this_page = False
         for attempt in range(_FB_MAX_RETRIES + 1):
+            started = time.monotonic()
+            page_status = 200
+            page_err_code: Optional[int] = None
             try:
                 async with _fb_semaphore:
                     r = await _http_client.get(
@@ -1710,11 +1983,13 @@ async def _fb_get_paginated_fetch(
                     )
             except httpx.TimeoutException as e:
                 last_exc = HTTPException(status_code=504, detail=f"Facebook API timeout: {e}")
+                page_status = 504
             except httpx.RequestError as e:
                 last_exc = HTTPException(
                     status_code=502,
                     detail=f"Cannot reach Facebook API: {type(e).__name__}: {e}",
                 )
+                page_status = 502
             else:
                 _parse_bucu_header(r.headers.get("x-business-use-case-usage"))
                 try:
@@ -1726,6 +2001,7 @@ async def _fb_get_paginated_fetch(
                         detail=f"Facebook API returned non-JSON (HTTP {r.status_code}): {snippet}",
                     )
                     data = None
+                    page_status = 502
                 if data is not None and isinstance(data, dict) and "error" in data:
                     err = data["error"] if isinstance(data["error"], dict) else {}
                     # Prefer the actionable error_user_title /
@@ -1738,6 +2014,7 @@ async def _fb_get_paginated_fetch(
                     else:
                         msg = err.get("message", "Facebook API error")
                     code = err.get("code")
+                    page_err_code = code if isinstance(code, int) else None
                     # Code 4 / 17 / 32 / 613 are app/user/page-level
                     # rate-limit codes — treat as transient so we
                     # retry once. Code 80000-80014 are ads-specific
@@ -1756,13 +2033,23 @@ async def _fb_get_paginated_fetch(
                     detail = f"{msg} [code={code}]" if code else msg
                     if is_ads_throttle:
                         no_retry = True
-                        global _last_ads_throttle_at
-                        _last_ads_throttle_at = time.monotonic()
+                        _record_account_throttle(account_id, path, code)
                         wait_min = _peak_regain_minutes()
                         if wait_min:
                             detail = f"{detail} [retry_after_minutes={wait_min}]"
                     last_exc = HTTPException(status_code=http_status, detail=detail)
                     data = None
+                    page_status = http_status
+            _log_fb_call(
+                path=path,
+                account_id=account_id,
+                method="GET",
+                ms=(time.monotonic() - started) * 1000,
+                status=page_status,
+                cache_hit=False,
+                error_code=page_err_code,
+                retried=retried_this_page,
+            )
             if data is not None:
                 last_exc = None
                 break  # success, stop retrying
@@ -1776,7 +2063,10 @@ async def _fb_get_paginated_fetch(
                 f"(attempt {attempt + 1}/{_FB_MAX_RETRIES + 1}): {last_exc.detail}",
                 flush=True,
             )
-            await asyncio.sleep(_FB_RETRY_DELAY_S)
+            # Same exponential backoff with jitter as `_fb_fetch_with_retry`
+            delay = _FB_RETRY_DELAY_S * (2**attempt) + random.uniform(0, 0.25)
+            await asyncio.sleep(delay)
+            retried_this_page = True
         if last_exc is not None:
             raise last_exc
         assert data is not None
@@ -3720,6 +4010,92 @@ async def get_fb_usage():
     value" is what the UI wants anyway.
     """
     return {"data": _fb_usage, "peak_regain_minutes": _peak_regain_minutes()}
+
+
+@app.get("/api/engineering/fb-calls")
+async def get_engineering_fb_calls():
+    """Recent FB Graph API call activity for the 工程模式 panel.
+
+    Returns:
+      - `recent`: last 200 call log entries (newest last)
+      - `top_paths_5m`: paths sorted by call count in last 5 min
+      - `top_accounts_5m`: account ids sorted by call count in last 5 min
+      - `throttle_events`: recent 80000-80014 events per account
+      - `cache_hit_rate_5m`: fraction of calls served from cache (0-1)
+      - `account_throttle_until`: per-account cooldown deadlines (epoch seconds)
+      - `error_count_5m`: count of non-200 responses in last 5 min
+      - `total_5m`: total calls (cache + live) in last 5 min
+
+    All read-only; doesn't itself hit FB."""
+    now_wall = time.time()
+    now_mono = time.monotonic()
+    window = 300.0  # 5 min
+    cutoff_ts = now_wall - window
+
+    # Snapshot the deque before iterating — append-only / fixed maxlen,
+    # but reading + iterating in parallel could still race in Python's
+    # threaded event loop (we're single-threaded async but still).
+    snapshot = list(_fb_call_log)
+
+    recent_window = [e for e in snapshot if e["ts"] >= cutoff_ts]
+    path_counts: "Counter[str]" = Counter()
+    account_counts: "Counter[str]" = Counter()
+    cache_hits = 0
+    error_count = 0
+    for e in recent_window:
+        path_counts[e["path"]] += 1
+        if e["account_id"]:
+            account_counts[e["account_id"]] += 1
+        if e["cache_hit"]:
+            cache_hits += 1
+        if e["status"] >= 400:
+            error_count += 1
+    total = len(recent_window)
+    cache_hit_rate = (cache_hits / total) if total else 0.0
+
+    throttle_events: list[dict] = []
+    for aid, events in _account_throttle_events.items():
+        for ev in events:
+            throttle_events.append(
+                {
+                    "ts": ev["ts"],
+                    "account_id": aid,
+                    "path": ev["path"],
+                    "code": ev["code"],
+                }
+            )
+    throttle_events.sort(key=lambda x: x["ts"], reverse=True)
+    throttle_events = throttle_events[:50]
+
+    # Snapshot per-account cooldowns + convert monotonic → wall clock
+    # so the frontend can render a real countdown. Drop expired entries
+    # while we're at it.
+    cooldowns: dict[str, float] = {}
+    for aid, deadline_mono in list(_account_throttle_until.items()):
+        remaining = deadline_mono - now_mono
+        if remaining <= 0:
+            _account_throttle_until.pop(aid, None)
+            continue
+        cooldowns[aid] = now_wall + remaining
+
+    # Recent slice trimmed to last 200 (the full deque is 500; we send
+    # less to keep the panel payload small).
+    recent_slice = snapshot[-200:]
+
+    return {
+        "recent": recent_slice,
+        "top_paths_5m": [
+            {"path": p, "count": c} for p, c in path_counts.most_common(15)
+        ],
+        "top_accounts_5m": [
+            {"account_id": a, "count": c} for a, c in account_counts.most_common(15)
+        ],
+        "throttle_events": throttle_events,
+        "cache_hit_rate_5m": round(cache_hit_rate, 3),
+        "account_throttle_until": cooldowns,
+        "error_count_5m": error_count,
+        "total_5m": total,
+    }
 
 
 # ── 行銷活動 ─────────────────────────────────────────────────────────
@@ -7573,6 +7949,11 @@ async def _scheduler_loop() -> None:
 
     Any exception inside the tick is caught and logged so the loop
     itself never dies. CancelledError from shutdown propagates out.
+
+    Layout: line push runs at the top of the tick. Security push is
+    offset 30s into the tick so the two big background fan-outs don't
+    land in the same second (they used to stack and double the
+    background burst on FB right when user traffic was also at peak).
     """
     # Security push: default ENABLED. The UI checkbox in the push-
     # settings modal writes `security_push_master_enabled` to
@@ -7594,19 +7975,37 @@ async def _scheduler_loop() -> None:
     try:
         while True:
             try:
-                await _scheduler_tick()
+                if _peak_regain_minutes() > 0:
+                    print(
+                        f"[scheduler] skipping tick — FB BUCU regain={_peak_regain_minutes()}min",
+                        flush=True,
+                    )
+                else:
+                    await _scheduler_tick()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 print(f"[scheduler] tick error: {e}", flush=True)
+            # 30s gap before the security push tick — staggers the two
+            # background fan-outs so they don't both hammer FB in the
+            # same second.
+            await asyncio.sleep(SCHEDULER_TICK_SECONDS // 2)
             if not env_off and await _security_push_enabled():
                 try:
-                    await _security_push_tick()
+                    if _peak_regain_minutes() > 0:
+                        print(
+                            f"[security-push] skipping tick — FB BUCU regain={_peak_regain_minutes()}min",
+                            flush=True,
+                        )
+                    else:
+                        await _security_push_tick()
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
                     print(f"[security-push] tick error: {e}", flush=True)
-            await asyncio.sleep(SCHEDULER_TICK_SECONDS)
+            # Sleep the remaining half-tick so the overall cadence
+            # stays at SCHEDULER_TICK_SECONDS.
+            await asyncio.sleep(SCHEDULER_TICK_SECONDS - (SCHEDULER_TICK_SECONDS // 2))
     except asyncio.CancelledError:
         print("[scheduler] stopped", flush=True)
         raise
@@ -7812,7 +8211,17 @@ async def _collect_security_matches(
     filters = set(cfg.get("anomaly_filters") or [])
     safe_ids = await _load_safe_campaign_ids() if exclude_safe else set()
 
+    # Cap parallel fan-out so a 30-account config doesn't burst 30
+    # simultaneous campaign fetches against FB. 5 in-flight per
+    # config keeps us well clear of the 80004 per-account ceiling
+    # AND of the global 40-cap when multiple configs tick at once.
+    scan_sem = asyncio.Semaphore(5)
+
     async def _scan_one(aid: str) -> list:
+        async with scan_sem:
+            return await _scan_one_inner(aid)
+
+    async def _scan_one_inner(aid: str) -> list:
         out: list = []
         try:
             camps = await _fetch_campaigns_for_account(
@@ -7894,19 +8303,25 @@ async def _collect_security_matches(
     until_epoch = int(datetime.now(timezone.utc).timestamp())
     affected_aids = list({m["account_id"] for m in matches})
 
+    # Reuse the same 5-wide gate for activities fan-out so we don't
+    # burst 30 concurrent /activities calls right after the campaigns
+    # fan-out settled.
+    act_sem = asyncio.Semaphore(5)
+
     async def _fetch_activities(aid: str) -> list:
-        try:
-            return await fb_get_paginated(
-                f"{aid}/activities",
-                {
-                    "since": str(since_epoch),
-                    "until": str(until_epoch),
-                    "fields": "actor_name,event_type,object_id,translated_event_type",
-                    "limit": "500",
-                },
-            )
-        except HTTPException:
-            return []
+        async with act_sem:
+            try:
+                return await fb_get_paginated(
+                    f"{aid}/activities",
+                    {
+                        "since": str(since_epoch),
+                        "until": str(until_epoch),
+                        "fields": "actor_name,event_type,object_id,translated_event_type",
+                        "limit": "500",
+                    },
+                )
+            except HTTPException:
+                return []
 
     activities_per_aid = await asyncio.gather(
         *(_fetch_activities(aid) for aid in affected_aids),
@@ -8062,6 +8477,11 @@ _WARM_THROTTLE_BACKOFF_S = 600
 async def _cache_warm_tick() -> None:
     now = time.monotonic()
     if _last_ads_throttle_at and (now - _last_ads_throttle_at) < _WARM_THROTTLE_BACKOFF_S:
+        return
+    # Proactive BUCU gate — when Facebook itself says "wait N minutes",
+    # the warm loop has no business issuing more calls. The next tick
+    # in 60s will re-check.
+    if _peak_regain_minutes() > 0:
         return
 
     # Pick up to _WARM_MAX_PER_TICK candidates: most-recently-accessed
