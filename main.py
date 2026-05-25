@@ -7537,20 +7537,21 @@ async def _scheduler_loop() -> None:
     Any exception inside the tick is caught and logged so the loop
     itself never dies. CancelledError from shutdown propagates out.
     """
-    # Gate the security-push tick on an env flag so it can be
-    # disabled without a redeploy when FB rate-limits the account
-    # (one mis-tuned config used to fire 960 calls/hr per workspace,
-    # which locked /me and blocked login until the limit cleared).
-    # Set SECURITY_PUSH_ENABLED=1 / true / yes to re-enable.
-    sec_push_on = (os.getenv("SECURITY_PUSH_ENABLED") or "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    # Security push: default ENABLED. The UI checkbox in the push-
+    # settings modal writes `security_push_master_enabled` to
+    # shared_settings; the loop reads it each tick so operators can
+    # pause/resume without a redeploy. The env `SECURITY_PUSH_ENABLED`
+    # remains as an emergency kill switch — set it to "0" / "false"
+    # to force-disable regardless of UI state (used during the FB
+    # rate-limit incident where we needed an instant hard stop).
+    env_off = (os.getenv("SECURITY_PUSH_ENABLED") or "").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
     print(
-        f"[startup] security-push tick: {'ENABLED' if sec_push_on else 'DISABLED'}"
-        " (set SECURITY_PUSH_ENABLED=1 to enable)",
+        f"[startup] security-push tick: env_kill_switch={'ON (force-off)' if env_off else 'OFF (UI controls)'}",
         flush=True,
     )
     try:
@@ -7561,7 +7562,7 @@ async def _scheduler_loop() -> None:
                 raise
             except Exception as e:
                 print(f"[scheduler] tick error: {e}", flush=True)
-            if sec_push_on:
+            if not env_off and await _security_push_enabled():
                 try:
                     await _security_push_tick()
                 except asyncio.CancelledError:
@@ -7572,6 +7573,26 @@ async def _scheduler_loop() -> None:
     except asyncio.CancelledError:
         print("[scheduler] stopped", flush=True)
         raise
+
+
+async def _security_push_enabled() -> bool:
+    """Runtime gate for the security-push tick. Reads
+    `shared_settings.security_push_master_enabled` — defaults to True
+    when the row is missing so the feature is opt-out rather than
+    opt-in. Any non-False value enables.
+    """
+    if _db_pool is None:
+        return True
+    try:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value FROM shared_settings WHERE key = 'security_push_master_enabled'"
+            )
+    except Exception:
+        return True  # fail-open: don't silently disable on DB hiccups
+    if row is None or row["value"] is None:
+        return True
+    return row["value"] is not False
 
 
 # ── 安全監控推播 (event-driven push on new-campaign anomalies) ───
