@@ -1,3 +1,4 @@
+import { friendlyApiError } from "@/api/client";
 import { useCreatives } from "@/api/hooks/useCreatives";
 import { mutationErrorMessage, useEntityStatusMutation } from "@/api/hooks/useEntityMutations";
 import { Badge } from "@/components/Badge";
@@ -199,8 +200,18 @@ function AdsetCreatives({
     return (
       <tr className="creative-row">
         <td colSpan={colCount} className="bg-orange-bg">
-          <div className="pl-[72px] pr-6 py-3 text-[13px] font-semibold text-red">
-            無法載入廣告：{query.error instanceof Error ? query.error.message : "未知錯誤"}
+          <div className="flex flex-wrap items-center gap-3 pl-[72px] pr-6 py-3 text-[13px]">
+            <span className="font-semibold text-red">
+              無法載入廣告:{friendlyApiError(query.error)}
+            </span>
+            <button
+              type="button"
+              onClick={() => void query.refetch()}
+              disabled={query.isFetching}
+              className="rounded-md border border-red/40 bg-white px-2.5 py-1 text-[12px] font-semibold text-red hover:bg-red/5 disabled:opacity-50"
+            >
+              {query.isFetching ? "重試中…" : "重試"}
+            </button>
           </div>
         </td>
       </tr>

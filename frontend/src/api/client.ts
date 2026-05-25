@@ -169,6 +169,29 @@ export class ApiError extends Error {
   }
 }
 
+/** Map an arbitrary error from the request helper into a short,
+ * Chinese-language message suitable for showing to end users in a
+ * data row / panel. The default ``ApiError.message`` is
+ * ``API ${status}: ${detail}`` which is fine for debug surfaces but
+ * leaks "API 0: Failed to fetch" to the UI when the connection was
+ * just blipping (mobile network, worker restart, etc.). */
+export function friendlyApiError(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 0) {
+      if (err.detail === "請求逾時") return "請求逾時,請稍後重試";
+      if (err.detail === "請求已取消") return "請求已取消";
+      // "Failed to fetch" / TypeError-ish network errors land here.
+      return "網路連線異常,請點重試";
+    }
+    if (err.status === 401) return err.detail || "請重新登入";
+    if (err.status === 429) return err.detail || "Facebook 暫時節流,請稍後重試";
+    if (err.status >= 500) return "伺服器暫時無法回應,請重試";
+    return err.detail || `請求失敗 (${err.status})`;
+  }
+  if (err instanceof Error) return err.message;
+  return "未知錯誤";
+}
+
 // ── 401 auto-refresh ──────────────────────────────────────────
 //
 // When the backend process restarts (e.g. Zeabur redeploy) its
