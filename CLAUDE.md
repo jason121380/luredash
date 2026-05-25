@@ -118,7 +118,7 @@ uvicorn main:app --port 8001 --reload
                        [Per-day groups]
                          [Campaign card: status / 新建立 + anomaly badges
                           編號 / 帳戶 / 目標 / 時間 / 建立者 / 日預算 / 已花費
-                          右側: 標記為沒問題 / 編輯紀錄 (預設展開於 待查看 tab)]
+                          右側: 標記為沒問題 / 編輯紀錄 (兩個 tab 都預設收合,點才 lazy 拉 activities)]
 ```
 - 每張卡片預設顯示「新建立」灰 badge,有異常時加 deep_night / weekend / burst / high_budget badge
 - 「編輯紀錄」展開時拉 `/api/accounts/{id}/activities` 並用 `summariseExtraData()` 把 FB extra_data 翻成「狀態:進行中 → 暫停」「日預算:$X → $Y」「Meta 政策審查 (代碼 4134001)」等人話

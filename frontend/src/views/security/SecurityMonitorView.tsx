@@ -277,7 +277,15 @@ export function SecurityMonitorView() {
                   creatorByCampaignId={creatorByCampaignId}
                   spendByCampaignId={spendByCampaignId}
                   insightsPending={spendOverview.insightsPending}
-                  defaultExpanded={tab === "pending"}
+                  // Default collapsed for BOTH tabs — old default
+                  // (待查看 auto-expanded) fired an /activities call
+                  // for every visible account on view mount, which was
+                  // the second biggest contributor to BUCU 處理時間
+                  // climb after the eager prefetch we just removed.
+                  // User clicks「編輯紀錄」on a row when they actually
+                  // want the history; lazy fetch only that row's
+                  // account at that point.
+                  defaultExpanded={false}
                   activitiesSince={activitiesBounds.since}
                   activitiesUntil={activitiesBounds.until}
                 />
