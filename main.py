@@ -4182,39 +4182,54 @@ async def _fetch_campaigns_metadata(
       3. Heavy accounts (e.g. 吸引力 LURE — 100+ campaigns) drop from
          ~5-15 BUCU per /campaigns to ~1-2 BUCU
     """
-    fields_parts = [
-        "id",
-        "name",
-        "status",
-        "objective",
-        "daily_budget",
-        "lifetime_budget",
-        "created_time",
-        "updated_time",
-    ]
-    if include_adsets:
-        # Only 安全監控 reads campaign.adsets (effectiveDailyBudget for
-        # ABO campaigns). Dashboard / Alerts / Finance / Analytics
-        # never touch the nested field, so skipping it here is the
-        # single biggest cheap BUCU win.
-        fields_parts.append("adsets.limit(50){daily_budget,lifetime_budget,status}")
-    fields = ",".join(fields_parts)
+    # Two orthogonal toggles: adsets nesting (expensive payload) and
+    # the `effective_status` archived filter. Either one is enough for
+    # FB to reject the whole call with fb=100 on certain accounts /
+    # burst scenarios. We start with the caller's full request and
+    # progressively drop pieces until something succeeds — same
+    # philosophy as the old 5-tier insights chain, just for the
+    # metadata layer now.
+    base_no_adsets = (
+        "id,name,status,objective,daily_budget,lifetime_budget,"
+        "created_time,updated_time"
+    )
+    adset_nest = "adsets.limit(50){daily_budget,lifetime_budget,status}"
+    full_fields = base_no_adsets + (f",{adset_nest}" if include_adsets else "")
     archived_filter = {"effective_status": '["ACTIVE","PAUSED","ARCHIVED","DELETED"]'}
 
-    # 2-tier fallback: with-archived filter → without. Drops the old
-    # 5-tier matrix because insights expansion is no longer in the
-    # critical path; FB rarely rejects a plain metadata fetch.
     attempts: list[tuple[str, dict]] = []
+    if include_archived and include_adsets:
+        attempts.append(
+            ("full+archived", {"fields": full_fields, "limit": "500", **archived_filter})
+        )
     if include_archived:
-        attempts.append(("meta+archived", {"fields": fields, "limit": "500", **archived_filter}))
-    attempts.append(("meta", {"fields": fields, "limit": "500"}))
+        attempts.append(
+            (
+                "no-adsets+archived",
+                {"fields": base_no_adsets, "limit": "500", **archived_filter},
+            )
+        )
+    if include_adsets:
+        attempts.append(("full", {"fields": full_fields, "limit": "500"}))
+    attempts.append(("no-adsets", {"fields": base_no_adsets, "limit": "500"}))
+    # Last-ditch: just id/name/status. Sufficient for the dashboard
+    # tree to render (zero budget / metric data) and for security view
+    # to at least show the campaign existed, instead of nothing.
+    attempts.append(("minimal", {"fields": "id,name,status", "limit": "500"}))
 
     last_error: Optional[HTTPException] = None
     for tier, params in attempts:
         try:
-            return await fb_get_paginated(
+            camps = await fb_get_paginated(
                 f"{account_id}/campaigns", params, ttl=_CAMPAIGNS_META_TTL_SECONDS
             )
+            if last_error is not None:
+                print(
+                    f"[campaigns meta] {account_id} recovered at tier={tier} "
+                    f"after earlier failure: {last_error.detail}",
+                    flush=True,
+                )
+            return camps
         except HTTPException as e:
             print(
                 f"[campaigns meta] {account_id} tier={tier} failed: "
@@ -4250,25 +4265,54 @@ async def _fetch_campaign_insights_bulk(
     map. The caller will still surface campaigns, just without metric
     numbers — better than failing the whole overview.
     """
-    fields = (
+    # Field sets ordered from richest to leanest. Certain accounts /
+    # objectives reject specific fields (purchase_roas on lead-gen
+    # accounts, action-cost on accounts with no conversion events
+    # defined). We progressively drop optional fields until something
+    # succeeds — matches the metadata fallback's "try less, ship
+    # something" philosophy.
+    full_fields = (
         "campaign_id,spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
         "inline_link_clicks,cost_per_inline_link_click,"
         "cost_per_action_type,purchase_roas,website_purchase_roas"
     )
-    params: dict = {"fields": fields, "level": "campaign", "limit": "500"}
-    if time_range:
-        params["time_range"] = time_range
-    else:
-        params["date_preset"] = date_preset
+    mid_fields = (
+        "campaign_id,spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
+        "inline_link_clicks"
+    )
+    min_fields = "campaign_id,spend,impressions,clicks,ctr,cpc,cpm,actions"
 
-    try:
-        rows = await fb_get_paginated(f"{account_id}/insights", params)
-    except HTTPException as e:
-        print(
-            f"[campaigns insights] {account_id} bulk fetch failed: "
-            f"{e.status_code} {e.detail}",
-            flush=True,
-        )
+    base_params: dict = {"level": "campaign", "limit": "500"}
+    if time_range:
+        base_params["time_range"] = time_range
+    else:
+        base_params["date_preset"] = date_preset
+
+    rows: list = []
+    last_err: Optional[HTTPException] = None
+    for tier, fields in (("full", full_fields), ("mid", mid_fields), ("min", min_fields)):
+        try:
+            rows = await fb_get_paginated(
+                f"{account_id}/insights", {**base_params, "fields": fields}
+            )
+            if last_err is not None:
+                print(
+                    f"[campaigns insights] {account_id} recovered at tier={tier} "
+                    f"after earlier failure: {last_err.detail}",
+                    flush=True,
+                )
+            break
+        except HTTPException as e:
+            print(
+                f"[campaigns insights] {account_id} tier={tier} failed: "
+                f"{e.status_code} {e.detail}",
+                flush=True,
+            )
+            last_err = e
+            continue
+    else:
+        # All tiers failed — non-fatal, return empty so the caller
+        # still surfaces campaign metadata without metric numbers.
         return {}
 
     out: dict[str, dict] = {}
