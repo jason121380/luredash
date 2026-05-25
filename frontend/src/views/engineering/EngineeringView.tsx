@@ -409,6 +409,22 @@ function FbCallsPanel() {
     staleTime: 0,
   });
   const data = query.data;
+
+  // act_xxx → 中文帳戶名稱 lookup. useAccounts is already cached at
+  // app-level (5min staleTime) — pulling it here adds no FB calls.
+  const accountsQuery = useAccounts();
+  const nameByActId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const a of accountsQuery.data ?? []) {
+      if (a.id && a.name) m.set(a.id, a.name);
+    }
+    return m;
+  }, [accountsQuery.data]);
+  const nameFor = (aid: string | null | undefined): string | null => {
+    if (!aid) return null;
+    return nameByActId.get(aid) ?? null;
+  };
+
   const recent = useMemo(() => {
     const r = data?.recent ?? [];
     // Newest first for the table — backend returns oldest-first.
@@ -489,12 +505,19 @@ function FbCallsPanel() {
           {cooldowns.length > 0 && (
             <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12px]">
               <div className="mb-1 font-semibold text-red-700">節流冷卻中</div>
-              <ul className="flex flex-col gap-0.5 font-mono text-red-700">
-                {cooldowns.map((c) => (
-                  <li key={c.accountId}>
-                    {c.accountId} — 剩餘 {Math.floor(c.remainingSec / 60)}分{c.remainingSec % 60}秒
-                  </li>
-                ))}
+              <ul className="flex flex-col gap-0.5 text-red-700">
+                {cooldowns.map((c) => {
+                  const nm = nameFor(c.accountId);
+                  return (
+                    <li key={c.accountId} className="flex flex-wrap items-baseline gap-1.5">
+                      {nm ? <span className="font-semibold">{nm}</span> : null}
+                      <span className="font-mono text-[10px] opacity-60">{c.accountId}</span>
+                      <span>
+                        — 剩餘 {Math.floor(c.remainingSec / 60)}分{c.remainingSec % 60}秒
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
@@ -531,15 +554,29 @@ function FbCallsPanel() {
                 <div className="text-[12px] text-gray-400">尚無資料</div>
               ) : (
                 <ul className="flex flex-col gap-0.5 text-[12px]">
-                  {data.top_accounts_5m.slice(0, 10).map((a) => (
-                    <li
-                      key={a.account_id}
-                      className="flex items-center justify-between gap-2 rounded border border-border bg-bg px-2 py-1"
-                    >
-                      <span className="truncate font-mono text-ink">{a.account_id}</span>
-                      <span className="shrink-0 font-mono text-gray-500">{a.count}</span>
-                    </li>
-                  ))}
+                  {data.top_accounts_5m.slice(0, 10).map((a) => {
+                    const nm = nameFor(a.account_id);
+                    return (
+                      <li
+                        key={a.account_id}
+                        className="flex items-center justify-between gap-2 rounded border border-border bg-bg px-2 py-1"
+                      >
+                        <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                          {nm ? (
+                            <span className="truncate text-ink">{nm}</span>
+                          ) : (
+                            <span className="truncate font-mono text-ink">{a.account_id}</span>
+                          )}
+                          {nm ? (
+                            <span className="shrink-0 font-mono text-[10px] text-gray-400">
+                              {a.account_id}
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="shrink-0 font-mono text-gray-500">{a.count}</span>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
@@ -552,18 +589,29 @@ function FbCallsPanel() {
                 最近節流事件
               </h3>
               <ul className="flex flex-col gap-0.5 text-[12px]">
-                {data.throttle_events.slice(0, 8).map((ev, idx) => (
-                  <li
-                    key={`${ev.ts}-${ev.account_id}-${idx}`}
-                    className="flex items-center gap-2 rounded border border-red-200 bg-red-50 px-2 py-1 font-mono text-red-700"
-                  >
-                    <span>{formatTs(ev.ts)}</span>
-                    <span className="rounded bg-red-100 px-1 text-[10px]">code={ev.code}</span>
-                    <span className="truncate" title={ev.path}>
-                      {ev.account_id || "?"} · {ev.path}
-                    </span>
-                  </li>
-                ))}
+                {data.throttle_events.slice(0, 8).map((ev, idx) => {
+                  const nm = nameFor(ev.account_id);
+                  return (
+                    <li
+                      key={`${ev.ts}-${ev.account_id}-${idx}`}
+                      className="flex items-center gap-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-red-700"
+                    >
+                      <span className="font-mono">{formatTs(ev.ts)}</span>
+                      <span className="rounded bg-red-100 px-1 font-mono text-[10px]">
+                        code={ev.code}
+                      </span>
+                      <span className="truncate font-mono" title={ev.path}>
+                        {nm ? <span className="not-italic">{nm} · </span> : null}
+                        {nm ? (
+                          <span className="text-[10px] opacity-60">{ev.account_id}</span>
+                        ) : (
+                          ev.account_id || "?"
+                        )}{" "}
+                        · {ev.path}
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
@@ -588,35 +636,43 @@ function FbCallsPanel() {
                     </tr>
                   </thead>
                   <tbody className="font-mono">
-                    {recent.map((e, idx) => (
-                      <tr key={`${e.ts}-${idx}`} className="border-t border-border">
-                        <td className="px-2 py-1 text-gray-500">{formatTs(e.ts)}</td>
-                        <td className="px-2 py-1">{formatStatusBadge(e)}</td>
-                        <td className="px-2 py-1 text-right text-gray-600">{e.ms}</td>
-                        <td className="px-2 py-1 text-right text-gray-600">{e.bucu_peak_pct}</td>
-                        <td className="truncate px-2 py-1 text-ink" title={e.path}>
-                          {e.method !== "GET" && (
-                            <span className="mr-1 rounded bg-orange-bg px-1 text-[9px] text-orange">
-                              {e.method}
+                    {recent.map((e, idx) => {
+                      const nm = nameFor(e.account_id);
+                      return (
+                        <tr key={`${e.ts}-${idx}`} className="border-t border-border">
+                          <td className="px-2 py-1 text-gray-500">{formatTs(e.ts)}</td>
+                          <td className="px-2 py-1">{formatStatusBadge(e)}</td>
+                          <td className="px-2 py-1 text-right text-gray-600">{e.ms}</td>
+                          <td className="px-2 py-1 text-right text-gray-600">{e.bucu_peak_pct}</td>
+                          <td className="truncate px-2 py-1 text-ink" title={e.path}>
+                            {e.method !== "GET" && (
+                              <span className="mr-1 rounded bg-orange-bg px-1 text-[9px] text-orange">
+                                {e.method}
+                              </span>
+                            )}
+                            {nm ? (
+                              <span className="mr-1 font-sans text-ink">{nm}</span>
+                            ) : null}
+                            <span className={nm ? "text-[10px] text-gray-400" : ""}>
+                              {e.path}
                             </span>
-                          )}
-                          {e.path}
-                          {e.error_code !== null && !e.cache_hit && (
-                            <span
-                              className="ml-1 rounded bg-amber-100 px-1 font-mono text-[9px] text-amber-700"
-                              title={`FB error code ${e.error_code}`}
-                            >
-                              fb={e.error_code}
-                            </span>
-                          )}
-                          {e.retried && (
-                            <span className="ml-1 rounded bg-amber-100 px-1 text-[9px] text-amber-700">
-                              retry
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                            {e.error_code !== null && !e.cache_hit && (
+                              <span
+                                className="ml-1 rounded bg-amber-100 px-1 font-mono text-[9px] text-amber-700"
+                                title={`FB error code ${e.error_code}`}
+                              >
+                                fb={e.error_code}
+                              </span>
+                            )}
+                            {e.retried && (
+                              <span className="ml-1 rounded bg-amber-100 px-1 text-[9px] text-amber-700">
+                                retry
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
