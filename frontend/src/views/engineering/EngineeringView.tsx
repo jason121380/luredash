@@ -208,9 +208,19 @@ function FbUsagePanel() {
     staleTime: 0,
   });
   const accountsQuery = useAccounts();
-  const data = usageQuery.data?.data ?? {};
   const peak = usageQuery.data?.peak_regain_minutes ?? 0;
-  const entries = Object.entries(data);
+  // Sort by total_time desc so the busiest rate-limit pool floats to
+  // the top. Falls back to call_count then cputime when total_time
+  // ties (typically 0/0/0 at startup).
+  const entries = useMemo(() => {
+    const e = Object.entries(usageQuery.data?.data ?? {});
+    e.sort(([, a], [, b]) => {
+      if (b.total_time !== a.total_time) return b.total_time - a.total_time;
+      if (b.call_count !== a.call_count) return b.call_count - a.call_count;
+      return b.total_cputime - a.total_cputime;
+    });
+    return e;
+  }, [usageQuery.data]);
 
   // Build a map<bare numeric id, account/business name>. FB's
   // X-Business-Use-Case-Usage header keys entries by the bare numeric
@@ -545,17 +555,24 @@ function FbCallsPanel() {
                 <div className="text-[12px] text-gray-400">尚無資料</div>
               ) : (
                 <ul className="flex flex-col gap-0.5 text-[12px]">
-                  {data.top_paths_5m.slice(0, 10).map((p) => (
-                    <li
-                      key={p.path}
-                      className="flex items-center justify-between gap-2 rounded border border-border bg-bg px-2 py-1"
-                    >
-                      <span className="truncate font-mono text-ink" title={p.path}>
-                        {p.path}
-                      </span>
-                      <span className="shrink-0 font-mono text-gray-500">{p.count}</span>
-                    </li>
-                  ))}
+                  {data.top_paths_5m.slice(0, 10).map((p) => {
+                    const m = p.path.match(/^(act_\d+)/);
+                    const nm = m ? nameFor(m[1]) : null;
+                    return (
+                      <li
+                        key={p.path}
+                        className="flex items-center justify-between gap-2 rounded border border-border bg-bg px-2 py-1"
+                      >
+                        <span className="min-w-0 flex-1 truncate" title={p.path}>
+                          {nm ? <span className="mr-1 text-ink">{nm}</span> : null}
+                          <span className={cn("font-mono", nm ? "text-[10px] text-gray-400" : "text-ink")}>
+                            {p.path}
+                          </span>
+                        </span>
+                        <span className="shrink-0 font-mono text-gray-500">{p.count}</span>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
