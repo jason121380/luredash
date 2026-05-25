@@ -58,11 +58,12 @@ export function SecurityPushSettingsModal({
 
   // Master switch — flipped via the「每小時檢查並推播」checkbox,
   // stored team-wide in shared_settings.security_push_master_enabled.
-  // Defaults to true (enabled) so the feature is opt-out.
+  // Defaults to **false** (off) when missing — feature is opt-in so
+  // a fresh deploy doesn't quietly start hitting FB rate-limit.
   const sharedQuery = useSharedSettings();
   const setShared = useSetSharedSetting();
   const masterEnabledRaw = sharedQuery.data?.security_push_master_enabled;
-  const masterEnabled = masterEnabledRaw === undefined ? true : masterEnabledRaw !== false;
+  const masterEnabled = masterEnabledRaw === true;
 
   return (
     <Modal
