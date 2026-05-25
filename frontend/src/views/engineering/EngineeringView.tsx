@@ -212,43 +212,50 @@ function FbUsagePanel() {
   const peak = usageQuery.data?.peak_regain_minutes ?? 0;
   const entries = Object.entries(data);
 
-  // Build a map<business_id, business_name> from the user's accounts.
-  // FB's X-Business-Use-Case-Usage header keys entries by BM id, so
-  // matching the numeric id back to the BM display name makes the
-  // panel readable instead of just digits.
+  // Build a map<bare numeric id, account/business name>. FB's
+  // X-Business-Use-Case-Usage header keys entries by the bare numeric
+  // id of either a Business Manager OR (for accounts not under a BM)
+  // the ad account itself — we used to assume always-BM and labeled
+  // every row "BM <id>", which was wrong for the majority of cases
+  // where the id is actually an ad account.
   //
-  // Caveat — IDs may not always align. A BUC entry can come from
-  // calling a *shared* ad account whose owner BM isn't yours, and
-  // `me/adaccounts` may not surface that owner BM. We still show
-  // the mismatch row so the operator knows usage exists for that
-  // BM even without a name.
-  const bizNameById = useMemo(() => {
+  // Lookup strategy: prefer the ad account name (most BUC entries are
+  // ad account ids), fall back to the BM name. The same map handles
+  // both since FB ids are globally unique across the two namespaces.
+  const nameByBareId = useMemo(() => {
     const m = new Map<string, string>();
     for (const a of accountsQuery.data ?? []) {
+      // Account id is "act_<digits>" — strip the prefix to match the
+      // bare numeric key FB uses in the BUC header.
+      if (a.id && a.name) {
+        const bare = a.id.startsWith("act_") ? a.id.slice(4) : a.id;
+        if (!m.has(bare)) m.set(bare, a.name);
+      }
       const b = a.business;
       if (b?.id && b.name && !m.has(b.id)) m.set(b.id, b.name);
     }
     return m;
   }, [accountsQuery.data]);
 
-  // Dev hint: when nothing matches, the IDs are coming from BMs
+  // Dev hint: when nothing matches, the IDs are coming from accounts
   // outside the user's `me/adaccounts` view (typically shared
   // accounts). Log once so the operator can confirm.
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     if (!usageQuery.data || !accountsQuery.data) return;
     const bucIds = Object.keys(usageQuery.data.data ?? {});
-    const myBmIds = new Set<string>();
+    const knownIds = new Set<string>();
     for (const a of accountsQuery.data) {
-      if (a.business?.id) myBmIds.add(a.business.id);
+      if (a.id) {
+        knownIds.add(a.id.startsWith("act_") ? a.id.slice(4) : a.id);
+      }
+      if (a.business?.id) knownIds.add(a.business.id);
     }
-    const unmatched = bucIds.filter((id) => !myBmIds.has(id));
+    const unmatched = bucIds.filter((id) => !knownIds.has(id));
     if (unmatched.length > 0) {
       console.log(
-        "[fb-usage] BUC BM ids without matching me/adaccounts business.id:",
+        "[fb-usage] BUC ids without matching account/BM:",
         unmatched,
-        "your BM ids:",
-        [...myBmIds],
       );
     }
   }, [usageQuery.data, accountsQuery.data]);
@@ -256,7 +263,7 @@ function FbUsagePanel() {
   return (
     <Card
       title="FB API 節流狀態"
-      subtitle="X-Business-Use-Case-Usage 即時快照,每 10 秒更新。FB 是按 Business Manager(BM)計算 rate limit,不是按廣告帳戶;一個 BM 底下的所有廣告帳戶共用同一個額度。冷卻時間由 Facebook 估算,僅供參考。"
+      subtitle="X-Business-Use-Case-Usage 即時快照,每 10 秒更新。每一列是 FB 個別追蹤 rate limit 的對象(通常是廣告帳戶,少數情況是 Business Manager)。冷卻時間由 Facebook 估算,僅供參考。"
       action={
         <Button
           size="sm"
@@ -282,7 +289,7 @@ function FbUsagePanel() {
           <table className="w-full text-[12px]">
             <thead className="bg-bg text-left text-gray-500">
               <tr>
-                <th className="px-3 py-2 font-semibold">BM</th>
+                <th className="px-3 py-2 font-semibold">帳戶</th>
                 <th className="px-3 py-2 font-semibold">呼叫次數</th>
                 <th className="px-3 py-2 font-semibold">CPU 用量</th>
                 <th className="px-3 py-2 font-semibold">處理時間</th>
@@ -290,11 +297,11 @@ function FbUsagePanel() {
               </tr>
             </thead>
             <tbody>
-              {entries.map(([bizId, u]) => (
+              {entries.map(([bareId, u]) => (
                 <UsageRow
-                  key={bizId}
-                  bizId={bizId}
-                  bizName={bizNameById.get(bizId) ?? ""}
+                  key={bareId}
+                  bareId={bareId}
+                  name={nameByBareId.get(bareId) ?? ""}
                   usage={u}
                 />
               ))}
@@ -307,12 +314,12 @@ function FbUsagePanel() {
 }
 
 function UsageRow({
-  bizId,
-  bizName,
+  bareId,
+  name,
   usage,
 }: {
-  bizId: string;
-  bizName: string;
+  bareId: string;
+  name: string;
   usage: {
     call_count: number;
     total_cputime: number;
@@ -327,13 +334,19 @@ function UsageRow({
     <tr className="border-t border-border">
       <td className="px-3 py-2 align-middle">
         <div className="flex flex-col gap-0.5">
-          {bizName ? <span className="font-semibold text-ink">{bizName}</span> : null}
-          <span
-            className="font-mono text-[11px] text-gray-500"
-            title="Business Manager ID(非廣告帳戶 ID)。FB rate limit 按 BM 計算。"
-          >
-            BM {bizId}
-          </span>
+          {name ? (
+            <span className="font-semibold text-ink">{name}</span>
+          ) : (
+            <span className="font-mono text-[12px] text-ink">{bareId}</span>
+          )}
+          {name ? (
+            <span
+              className="font-mono text-[10px] text-gray-400"
+              title="Facebook 在 X-Business-Use-Case-Usage header 用的 ID"
+            >
+              {bareId}
+            </span>
+          ) : null}
           <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
             {usage.type ? (
               <span className="rounded-full bg-orange-bg px-1.5 py-0.5 font-semibold text-orange">
@@ -409,6 +422,22 @@ function FbCallsPanel() {
     staleTime: 0,
   });
   const data = query.data;
+
+  // act_xxx → 中文帳戶名稱 lookup. useAccounts is already cached at
+  // app-level (5min staleTime) — pulling it here adds no FB calls.
+  const accountsQuery = useAccounts();
+  const nameByActId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const a of accountsQuery.data ?? []) {
+      if (a.id && a.name) m.set(a.id, a.name);
+    }
+    return m;
+  }, [accountsQuery.data]);
+  const nameFor = (aid: string | null | undefined): string | null => {
+    if (!aid) return null;
+    return nameByActId.get(aid) ?? null;
+  };
+
   const recent = useMemo(() => {
     const r = data?.recent ?? [];
     // Newest first for the table — backend returns oldest-first.
@@ -489,12 +518,19 @@ function FbCallsPanel() {
           {cooldowns.length > 0 && (
             <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12px]">
               <div className="mb-1 font-semibold text-red-700">節流冷卻中</div>
-              <ul className="flex flex-col gap-0.5 font-mono text-red-700">
-                {cooldowns.map((c) => (
-                  <li key={c.accountId}>
-                    {c.accountId} — 剩餘 {Math.floor(c.remainingSec / 60)}分{c.remainingSec % 60}秒
-                  </li>
-                ))}
+              <ul className="flex flex-col gap-0.5 text-red-700">
+                {cooldowns.map((c) => {
+                  const nm = nameFor(c.accountId);
+                  return (
+                    <li key={c.accountId} className="flex flex-wrap items-baseline gap-1.5">
+                      {nm ? <span className="font-semibold">{nm}</span> : null}
+                      <span className="font-mono text-[10px] opacity-60">{c.accountId}</span>
+                      <span>
+                        — 剩餘 {Math.floor(c.remainingSec / 60)}分{c.remainingSec % 60}秒
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
@@ -531,15 +567,29 @@ function FbCallsPanel() {
                 <div className="text-[12px] text-gray-400">尚無資料</div>
               ) : (
                 <ul className="flex flex-col gap-0.5 text-[12px]">
-                  {data.top_accounts_5m.slice(0, 10).map((a) => (
-                    <li
-                      key={a.account_id}
-                      className="flex items-center justify-between gap-2 rounded border border-border bg-bg px-2 py-1"
-                    >
-                      <span className="truncate font-mono text-ink">{a.account_id}</span>
-                      <span className="shrink-0 font-mono text-gray-500">{a.count}</span>
-                    </li>
-                  ))}
+                  {data.top_accounts_5m.slice(0, 10).map((a) => {
+                    const nm = nameFor(a.account_id);
+                    return (
+                      <li
+                        key={a.account_id}
+                        className="flex items-center justify-between gap-2 rounded border border-border bg-bg px-2 py-1"
+                      >
+                        <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                          {nm ? (
+                            <span className="truncate text-ink">{nm}</span>
+                          ) : (
+                            <span className="truncate font-mono text-ink">{a.account_id}</span>
+                          )}
+                          {nm ? (
+                            <span className="shrink-0 font-mono text-[10px] text-gray-400">
+                              {a.account_id}
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="shrink-0 font-mono text-gray-500">{a.count}</span>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
@@ -552,18 +602,29 @@ function FbCallsPanel() {
                 最近節流事件
               </h3>
               <ul className="flex flex-col gap-0.5 text-[12px]">
-                {data.throttle_events.slice(0, 8).map((ev, idx) => (
-                  <li
-                    key={`${ev.ts}-${ev.account_id}-${idx}`}
-                    className="flex items-center gap-2 rounded border border-red-200 bg-red-50 px-2 py-1 font-mono text-red-700"
-                  >
-                    <span>{formatTs(ev.ts)}</span>
-                    <span className="rounded bg-red-100 px-1 text-[10px]">code={ev.code}</span>
-                    <span className="truncate" title={ev.path}>
-                      {ev.account_id || "?"} · {ev.path}
-                    </span>
-                  </li>
-                ))}
+                {data.throttle_events.slice(0, 8).map((ev, idx) => {
+                  const nm = nameFor(ev.account_id);
+                  return (
+                    <li
+                      key={`${ev.ts}-${ev.account_id}-${idx}`}
+                      className="flex items-center gap-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-red-700"
+                    >
+                      <span className="font-mono">{formatTs(ev.ts)}</span>
+                      <span className="rounded bg-red-100 px-1 font-mono text-[10px]">
+                        code={ev.code}
+                      </span>
+                      <span className="truncate font-mono" title={ev.path}>
+                        {nm ? <span className="not-italic">{nm} · </span> : null}
+                        {nm ? (
+                          <span className="text-[10px] opacity-60">{ev.account_id}</span>
+                        ) : (
+                          ev.account_id || "?"
+                        )}{" "}
+                        · {ev.path}
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
@@ -588,35 +649,43 @@ function FbCallsPanel() {
                     </tr>
                   </thead>
                   <tbody className="font-mono">
-                    {recent.map((e, idx) => (
-                      <tr key={`${e.ts}-${idx}`} className="border-t border-border">
-                        <td className="px-2 py-1 text-gray-500">{formatTs(e.ts)}</td>
-                        <td className="px-2 py-1">{formatStatusBadge(e)}</td>
-                        <td className="px-2 py-1 text-right text-gray-600">{e.ms}</td>
-                        <td className="px-2 py-1 text-right text-gray-600">{e.bucu_peak_pct}</td>
-                        <td className="truncate px-2 py-1 text-ink" title={e.path}>
-                          {e.method !== "GET" && (
-                            <span className="mr-1 rounded bg-orange-bg px-1 text-[9px] text-orange">
-                              {e.method}
+                    {recent.map((e, idx) => {
+                      const nm = nameFor(e.account_id);
+                      return (
+                        <tr key={`${e.ts}-${idx}`} className="border-t border-border">
+                          <td className="px-2 py-1 text-gray-500">{formatTs(e.ts)}</td>
+                          <td className="px-2 py-1">{formatStatusBadge(e)}</td>
+                          <td className="px-2 py-1 text-right text-gray-600">{e.ms}</td>
+                          <td className="px-2 py-1 text-right text-gray-600">{e.bucu_peak_pct}</td>
+                          <td className="truncate px-2 py-1 text-ink" title={e.path}>
+                            {e.method !== "GET" && (
+                              <span className="mr-1 rounded bg-orange-bg px-1 text-[9px] text-orange">
+                                {e.method}
+                              </span>
+                            )}
+                            {nm ? (
+                              <span className="mr-1 font-sans text-ink">{nm}</span>
+                            ) : null}
+                            <span className={nm ? "text-[10px] text-gray-400" : ""}>
+                              {e.path}
                             </span>
-                          )}
-                          {e.path}
-                          {e.error_code !== null && !e.cache_hit && (
-                            <span
-                              className="ml-1 rounded bg-amber-100 px-1 font-mono text-[9px] text-amber-700"
-                              title={`FB error code ${e.error_code}`}
-                            >
-                              fb={e.error_code}
-                            </span>
-                          )}
-                          {e.retried && (
-                            <span className="ml-1 rounded bg-amber-100 px-1 text-[9px] text-amber-700">
-                              retry
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                            {e.error_code !== null && !e.cache_hit && (
+                              <span
+                                className="ml-1 rounded bg-amber-100 px-1 font-mono text-[9px] text-amber-700"
+                                title={`FB error code ${e.error_code}`}
+                              >
+                                fb={e.error_code}
+                              </span>
+                            )}
+                            {e.retried && (
+                              <span className="ml-1 rounded bg-amber-100 px-1 text-[9px] text-amber-700">
+                                retry
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
