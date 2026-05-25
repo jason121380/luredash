@@ -497,6 +497,13 @@ export const api = {
   },
 
   campaigns: {
+    /** Single campaign + insights — used by the report / share page so
+     * we don't have to pull the whole account just to find one row.
+     * Backend: GET /api/campaigns/{id}?date_preset=X → 1 cheap FB call. */
+    get: (campaignId: string, date: DateConfig) =>
+      request<{ data: FbCampaign }>("GET", `/api/campaigns/${campaignId}`, {
+        query: dateParams(date),
+      }),
     adsets: (campaignId: string, date: DateConfig) =>
       request<{ data: FbAdset[] }>("GET", `/api/campaigns/${campaignId}/adsets`, {
         query: dateParams(date),

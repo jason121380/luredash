@@ -4403,6 +4403,48 @@ async def get_account_activities(
     return {"data": data}
 
 
+@app.get("/api/campaigns/{campaign_id}")
+async def get_campaign(
+    campaign_id: str,
+    date_preset: str = "last_30d",
+    time_range: Optional[str] = None,
+):
+    """Fetch a single campaign + insights — for the report / share page.
+
+    Avoids ``/api/accounts/{id}/campaigns`` (the full account list)
+    when the caller only needs ONE campaign. Heavy accounts (e.g. 吸引力
+    LURE with 100+ campaigns) previously paid the full account scan
+    just to surface one row. This endpoint hits FB's per-campaign edge
+    directly: ``GET fb://{campaign_id}?fields=...,insights{...}`` →
+    one cheap call that FB only aggregates over a single campaign.
+
+    Falls back to no-insights fetch if the date-ranged insights nest
+    fails (e.g. campaign archived in a way that breaks the aggregation
+    on this account).
+    """
+    ins = _insights_clause(
+        "spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
+        "inline_link_clicks,cost_per_inline_link_click,"
+        "cost_per_action_type,purchase_roas,website_purchase_roas",
+        date_preset,
+        time_range,
+    )
+    base_fields = (
+        "id,name,status,objective,daily_budget,lifetime_budget,"
+        "created_time,updated_time,account_id"
+    )
+    try:
+        data = await fb_get(campaign_id, {"fields": f"{base_fields},{ins}"})
+    except HTTPException as e:
+        print(
+            f"[campaign] {campaign_id} insights fetch failed: "
+            f"{e.status_code} {e.detail} — retrying without insights",
+            flush=True,
+        )
+        data = await fb_get(campaign_id, {"fields": base_fields})
+    return {"data": data}
+
+
 @app.post("/api/campaigns/{campaign_id}/status")
 async def update_campaign_status(campaign_id: str, status: str = Query(...)):
     return await fb_post(campaign_id, {"status": status}, invalidate_entity=campaign_id)
