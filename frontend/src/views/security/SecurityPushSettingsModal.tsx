@@ -113,12 +113,24 @@ export function SecurityPushSettingsModal({
               type="checkbox"
               className="custom-cb mt-0.5"
               checked={masterEnabled}
-              onChange={(e) =>
-                setShared.mutate({
-                  key: "security_push_master_enabled",
-                  value: e.target.checked,
-                })
-              }
+              onChange={(e) => {
+                const next = e.target.checked;
+                setShared.mutate(
+                  { key: "security_push_master_enabled", value: next },
+                  {
+                    onSuccess: () =>
+                      toast(
+                        next ? "已啟用每小時自動檢查" : "已停用自動檢查",
+                        "success",
+                      ),
+                    onError: (err) =>
+                      toast(
+                        `儲存失敗:${err instanceof Error ? err.message : "未知錯誤"}`,
+                        "error",
+                      ),
+                  },
+                );
+              }}
             />
             <div className="flex-1">
               <div className="font-semibold text-ink">每小時檢查並推播</div>
