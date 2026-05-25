@@ -686,6 +686,27 @@ async def lifespan(app: FastAPI):
                     ON security_push_configs (owner_fb_user_id)
                     """
                 )
+                # Backfill: old INSERT bug let the frontend send any
+                # poll_interval_minutes value into DB (the hardcoded
+                # 60-min override only applied on UPDATE, not INSERT).
+                # Force every existing row back to 60 so a residual
+                # 5 or 10 doesn't keep scanning FB at 12× the intended
+                # rate after the bug fix lands.
+                backfilled = await conn.execute(
+                    """
+                    UPDATE security_push_configs
+                    SET poll_interval_minutes = 60,
+                        updated_at = NOW()
+                    WHERE poll_interval_minutes <> 60
+                    """
+                )
+                # asyncpg returns "UPDATE N" — emit only if N > 0 so
+                # subsequent restarts don't spam an info line.
+                if backfilled and not backfilled.endswith(" 0"):
+                    print(
+                        f"[startup] security_push_configs poll_interval backfill: {backfilled}",
+                        flush=True,
+                    )
                 # `security_push_logs`: one row per scheduler-tick attempt
                 # against a security_push_configs row. Lets the UI surface
                 # a per-config history (「過去 24 hrs 跑了幾次、各偵測到幾
@@ -7840,7 +7861,13 @@ async def upsert_security_push_config(
             payload.group_ids,
             payload.account_ids,
             filters,
-            payload.poll_interval_minutes,
+            # Use the hardcoded 60min — NOT payload.poll_interval_minutes.
+            # The whole point of the local override above is to ignore
+            # whatever the frontend / a tampered client sends. The
+            # earlier INSERT bug (used payload directly) let a 5-minute
+            # interval slip into the DB, scanning FB 12× more often
+            # than intended.
+            poll_minutes,
             payload.enabled,
         )
         return {"ok": True, "data": _sec_push_row_to_dict(created)}

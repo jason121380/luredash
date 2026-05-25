@@ -1,4 +1,5 @@
 import type { SecurityPushTestCard } from "@/api/client";
+import { queryClient } from "@/lib/queryClient";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
 import { AcctSidebarToggle } from "@/components/AcctSidebarToggle";
@@ -12,7 +13,7 @@ import { type DateConfig, toShortLabel } from "@/lib/datePicker";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertAccountPanel } from "../alerts/AlertAccountPanel";
 import { SecurityCampaignRow } from "./SecurityCampaignRow";
 import { SecurityPushSettingsModal } from "./SecurityPushSettingsModal";
@@ -24,6 +25,14 @@ import {
 } from "./securityData";
 
 type SecurityTab = "pending" | "safe";
+
+function formatRelativeScanTime(d: Date): string {
+  const sec = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (sec < 60) return "剛剛";
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分鐘前`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} 小時前`;
+  return d.toLocaleDateString("zh-TW");
+}
 
 /**
  * 安全監控 — surfaces newly-created campaigns grouped by day so the
@@ -55,6 +64,14 @@ export function SecurityMonitorView() {
   const [tab, setTab] = useState<SecurityTab>("pending");
   const [pushModalOpen, setPushModalOpen] = useState(false);
 
+  // 「立即掃描」 gate — flipping this to true triggers the two
+  // useMultiAccountOverview queries below. Default false so just
+  // navigating into the view costs ZERO FB calls (the auto-fetch
+  // on mount was burning BUCU even when the user didn't actually
+  // want to look at anything). User clicks 立即掃描 → scan fires.
+  const [scanRequested, setScanRequested] = useState(false);
+  const [lastScanAt, setLastScanAt] = useState<Date | null>(null);
+
   const [date, setDate] = useState<DateConfig>({
     preset: "this_month",
     from: null,
@@ -72,11 +89,17 @@ export function SecurityMonitorView() {
   //      client-side filter on `created_time`, which matches the
   //      view's actual semantics ("campaigns CREATED in this window").
   const fetchDate = useMemo<DateConfig>(() => ({ preset: "last_90d", from: null, to: null }), []);
+  // Pass `[]` when scan hasn't been requested → useMultiAccountOverview
+  // sees accounts.length === 0 → query.enabled = false → no fetch.
+  // The moment user clicks 立即掃描, `scanRequested` flips and the
+  // queries fire against the full visible account set.
+  const scanAccounts = scanRequested ? visibleAll : [];
+
   // includeAdsets:true here only — `effectiveDailyBudget` reads
   // `campaign.adsets.data` to aggregate ABO budgets. Dashboard / Alerts /
   // Finance never read that nested field so they opt out (default false,
   // ~20-30% lighter FB BUCU per call).
-  const overview = useMultiAccountOverview(visibleAll, fetchDate, {
+  const overview = useMultiAccountOverview(scanAccounts, fetchDate, {
     includeArchived: true,
     includeAdsets: true,
   });
@@ -86,7 +109,19 @@ export function SecurityMonitorView() {
   // 也是這樣)。campaigns from this query may be a subset (FB throttle
   // / fallback); we look up insights by id and fall back to "$0" /
   // "—" when missing.
-  const spendOverview = useMultiAccountOverview(visibleAll, date, { includeArchived: true });
+  const spendOverview = useMultiAccountOverview(scanAccounts, date, {
+    includeArchived: true,
+  });
+
+  // Track when the most-recent scan finishes so we can show
+  // 「上次掃描:N 分鐘前」 next to the rescan button.
+  const isScanning =
+    scanRequested && (overview.isFetching || spendOverview.isFetching);
+  useEffect(() => {
+    if (scanRequested && !isScanning) {
+      setLastScanAt(new Date());
+    }
+  }, [scanRequested, isScanning]);
   const spendByCampaignId = useMemo(() => {
     const map = new Map<string, string>();
     for (const c of spendOverview.campaigns) {
@@ -200,6 +235,55 @@ export function SecurityMonitorView() {
           <TopbarSeparator />
           <DatePicker value={date} onChange={setDate} />
           <TopbarSeparator />
+          {lastScanAt && (
+            <span className="hidden whitespace-nowrap text-[11px] text-gray-400 md:inline">
+              上次掃描:{formatRelativeScanTime(lastScanAt)}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              if (lastScanAt) {
+                // Subsequent click — invalidate the overview queries
+                // so React Query refetches even within the 5min stale
+                // window. First click just flips scanRequested and
+                // the queries fire on their own.
+                void queryClient.invalidateQueries({ queryKey: ["overview"] });
+                void queryClient.invalidateQueries({ queryKey: ["overview-lite"] });
+              }
+              setScanRequested(true);
+            }}
+            disabled={isScanning}
+            className={cn(
+              "flex h-10 select-none items-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 md:h-9",
+              "text-[13px] font-medium font-sans",
+              "transition-all duration-150 cursor-pointer active:scale-95",
+              isScanning
+                ? "border-border bg-bg text-gray-400 cursor-wait"
+                : "border-orange bg-orange text-white hover:bg-orange-600 hover:border-orange-600",
+            )}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="shrink-0"
+              aria-hidden="true"
+            >
+              <title>scan</title>
+              <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+              <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+              <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+              <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+              <path d="M7 12h10" />
+            </svg>
+            <span>{isScanning ? "掃描中…" : lastScanAt ? "重新掃描" : "立即掃描"}</span>
+          </button>
           <button
             type="button"
             onClick={() => setPushModalOpen(true)}
@@ -247,14 +331,24 @@ export function SecurityMonitorView() {
         </div>
 
         <div className="min-w-0 flex-1 p-3 md:p-5">
-          {showLoading ? (
+          {!scanRequested ? (
+            <EmptyState>
+              <div className="flex flex-col items-center gap-2">
+                <div className="text-[15px] font-semibold text-ink">尚未掃描</div>
+                <div className="max-w-[420px] text-[13px] text-gray-500">
+                  進入此頁面不會自動拉取資料(避免無謂消耗 FB API 額度)。
+                  點右上「立即掃描」開始檢查新建立的廣告活動。
+                </div>
+              </div>
+            </EmptyState>
+          ) : showLoading || isScanning ? (
             // Don't pass loaded/total — once `isLoading` flips false
             // (lite returned with empty data) the hook reports
             // loadedCount=accounts.length, which the LoadingState
             // treats as "honest mode 100%". The fake time-based
             // curve is more honest here since we don't have real
             // per-account progress to surface.
-            <LoadingState title="載入廣告資料中..." subtitle="正在從 Facebook 拉取活動清單" />
+            <LoadingState title="掃描中..." subtitle="正在從 Facebook 拉取活動清單" />
           ) : visibleAll.length === 0 ? (
             <EmptyState>請先在設定中啟用廣告帳戶</EmptyState>
           ) : (
