@@ -442,11 +442,29 @@ export const api = {
       }),
     /** FB Activity Log proxy — used by 安全監控 to display per-campaign
      * edit history (status / budget / name / pacing changes). `since`
-     * and `until` are unix seconds. */
-    activities: (accountId: string, since: number, until: number) =>
-      request<{ data: FbActivity[] }>("GET", `/api/accounts/${accountId}/activities`, {
-        query: { since: String(since), until: String(until) },
-      }),
+     * and `until` are unix seconds. ``eventTypes`` (comma-separated) is
+     * forwarded as the FB-side ``filtering`` param: pass
+     * "create_campaign_group" for the creator-name prefetch so the
+     * backend stops walking pages full of create_ad / update_budget
+     * events. Omit for the full activity log used by the per-row
+     * expand. */
+    activities: (
+      accountId: string,
+      since: number,
+      until: number,
+      eventTypes?: string,
+    ) => {
+      const query: Record<string, string> = {
+        since: String(since),
+        until: String(until),
+      };
+      if (eventTypes) query.event_types = eventTypes;
+      return request<{ data: FbActivity[] }>(
+        "GET",
+        `/api/accounts/${accountId}/activities`,
+        { query },
+      );
+    },
   },
 
   securityPush: {

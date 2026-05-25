@@ -1876,6 +1876,7 @@ async def fb_get_paginated(
     params: Optional[dict] = None,
     *,
     ttl: float = _CACHE_TTL_SECONDS,
+    max_pages: Optional[int] = None,
 ) -> List[dict]:
     """Paginate through a FB Graph API endpoint that returns {data:[], paging:{next}}.
     Always raises HTTPException on failure (never lets httpx errors bubble up as 500).
@@ -1889,7 +1890,15 @@ async def fb_get_paginated(
 
     Uses the same per-key stampede lock as :func:`_fb_request` so a
     burst of concurrent cache misses only pays for one FB call.
-    """
+
+    ``max_pages`` caps how many pages we'll walk through ``paging.next``
+    before returning whatever we have. Used by very-high-volume edges
+    like ``ad_account/activities`` where a single logical request can
+    otherwise fan out to 10+ FB calls (one per page), each burning BUCU.
+    None = unbounded (legacy behavior). The cache key intentionally does
+    NOT include max_pages, so a capped fetch and an unbounded fetch
+    share storage if they otherwise match — the second one fills in
+    additional pages on demand."""
     if params is None:
         params = {}
     token = get_token()
@@ -1947,11 +1956,18 @@ async def fb_get_paginated(
                 cache_hit=True,
             )
             return cached
-        return await _fb_get_paginated_fetch(path, params, token, cache_key, ttl)
+        return await _fb_get_paginated_fetch(
+            path, params, token, cache_key, ttl, max_pages=max_pages
+        )
 
 
 async def _fb_get_paginated_fetch(
-    path: str, params: dict, token: str, cache_key: str, ttl: float = _CACHE_TTL_SECONDS
+    path: str,
+    params: dict,
+    token: str,
+    cache_key: str,
+    ttl: float = _CACHE_TTL_SECONDS,
+    max_pages: Optional[int] = None,
 ) -> List[dict]:
     """Walk FB paging.next until exhausted. Per-page GETs use the
     **bulk** timeout (20s) because this function backs the heavy
@@ -1964,7 +1980,16 @@ async def _fb_get_paginated_fetch(
     next_url: Optional[str] = f"{BASE_URL}/{path}"
     page_params = {"access_token": token, **params}
     account_id = _extract_account_id_from_path(path)
+    pages_fetched = 0
     while next_url:
+        if max_pages is not None and pages_fetched >= max_pages:
+            print(
+                f"[fb paged] {path} hit max_pages={max_pages} cap, "
+                f"stopping with {len(items)} items (more pages available)",
+                flush=True,
+            )
+            break
+        pages_fetched += 1
         data: Optional[dict] = None
         last_exc: Optional[HTTPException] = None
         # Per FB best practices, ads-specific account throttles
@@ -4221,6 +4246,14 @@ async def get_account_activities(
     account_id: str,
     since: int = Query(..., description="Unix timestamp (inclusive) lower bound"),
     until: int = Query(..., description="Unix timestamp (exclusive) upper bound"),
+    event_types: Optional[str] = Query(
+        None,
+        description=(
+            "Comma-separated FB event_type filter (e.g. 'create_campaign_group'). "
+            "When set, FB returns only matching rows AND we cap pages to 2 "
+            "since filtered hits are rare. Omit for full activity log."
+        ),
+    ),
 ):
     """Proxy the FB Activity Log for an ad account.
 
@@ -4232,18 +4265,39 @@ async def get_account_activities(
     (object_id, object_name, object_type), and a JSON-string
     ``extra_data`` blob with before/after for status / budget / name
     changes (FB's shape is unstable so we surface it verbatim).
+
+    Two modes:
+      - ``event_types`` set (e.g. creator-name prefetch): apply FB-side
+        ``filtering`` so we only walk through hits, plus max_pages=2.
+        High-activity accounts that previously fanned out to 10+ pages
+        (one per ~500 events, BUCU climbing each page) now stop at
+        the first 1000 matching rows.
+      - ``event_types`` omitted (full edit-history expand): max_pages=3
+        as a safety cap. 1500 newest events covers ~30 days for very
+        active accounts and is plenty for the per-campaign timeline.
     """
+    params: dict = {
+        "since": str(since),
+        "until": str(until),
+        "fields": (
+            "actor_id,actor_name,event_time,event_type,extra_data,"
+            "object_id,object_name,object_type,translated_event_type"
+        ),
+        "limit": "500",
+    }
+    if event_types:
+        types_list = [t.strip() for t in event_types.split(",") if t.strip()]
+        if types_list:
+            params["filtering"] = _json.dumps(
+                [{"field": "event_type", "operator": "IN", "value": types_list}]
+            )
+            max_pages = 2
+        else:
+            max_pages = 3
+    else:
+        max_pages = 3
     data = await fb_get_paginated(
-        f"{account_id}/activities",
-        {
-            "since": str(since),
-            "until": str(until),
-            "fields": (
-                "actor_id,actor_name,event_time,event_type,extra_data,"
-                "object_id,object_name,object_type,translated_event_type"
-            ),
-            "limit": "500",
-        },
+        f"{account_id}/activities", params, max_pages=max_pages
     )
     return {"data": data}
 
@@ -8309,6 +8363,11 @@ async def _collect_security_matches(
     act_sem = asyncio.Semaphore(5)
 
     async def _fetch_activities(aid: str) -> list:
+        # We ONLY need create-campaign events to attach a creator name
+        # to each card — FB-side `filtering` strips the (often 10x larger)
+        # mass of create_ad / update_budget / pause_adset entries before
+        # paging. Combined with max_pages=2 this keeps even very active
+        # accounts under ~2 page fetches instead of 10+.
         async with act_sem:
             try:
                 return await fb_get_paginated(
@@ -8318,7 +8377,17 @@ async def _collect_security_matches(
                         "until": str(until_epoch),
                         "fields": "actor_name,event_type,object_id,translated_event_type",
                         "limit": "500",
+                        "filtering": _json.dumps(
+                            [
+                                {
+                                    "field": "event_type",
+                                    "operator": "IN",
+                                    "value": ["create_campaign_group"],
+                                }
+                            ]
+                        ),
                     },
+                    max_pages=2,
                 )
             except HTTPException:
                 return []

@@ -144,26 +144,35 @@ export function SecurityMonitorView() {
 
   // Eager activity-log prefetch per visible account so we can show the
   // creator name on every card without waiting for the user to expand.
-  // Uses the SAME queryKey as `useAccountActivities` in the row so the
-  // expand path hits the warmed cache (no double fetch).
+  //
+  // Two-tier strategy to keep BUCU bounded:
+  //   1. Prefetch uses `event_types=create_campaign_group` so FB only
+  //      returns campaign-create events (rare — usually <50/account/90d
+  //      even for very active accounts). Backend caps to 2 pages.
+  //   2. Per-row expand keeps using the unfiltered endpoint via
+  //      `useAccountActivities` — different cache key — and gets the
+  //      full edit history with the backend's 3-page safety cap.
   //
   // Throttled via a module-level Semaphore(5) so a 30-account view
   // doesn't open 30 concurrent /activities sockets the moment the
-  // page mounts — that pattern burns the backend's per-account FB
-  // pool and starves the dashboard tab for the same window. 5 in
-  // flight matches the backend's own scan_sem(5) in
-  // `_collect_security_matches`. staleTime aligned to 5min so the
-  // cache key matches `useAccountActivities` exactly.
+  // page mounts.
   const { status: authStatus } = useFbAuth();
   const activityQueries = useQueries({
     queries: visibleAll.map((acc) => ({
-      queryKey: ["activities", acc.id, activitiesBounds.since, activitiesBounds.until],
+      queryKey: [
+        "activities",
+        acc.id,
+        activitiesBounds.since,
+        activitiesBounds.until,
+        "creators",
+      ],
       queryFn: (): Promise<FbActivity[]> =>
         activityPrefetchSem.run(async () => {
           const resp = await api.accounts.activities(
             acc.id,
             activitiesBounds.since,
             activitiesBounds.until,
+            "create_campaign_group",
           );
           return resp.data ?? [];
         }),
