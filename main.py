@@ -2130,6 +2130,19 @@ def _check_agent_rate_limit(uid: str) -> None:
     _AGENT_RATE_LIMIT[uid] = now
 
 
+# Cache for /me verification results keyed by token hash. Lets repeat
+# `POST /api/auth/token` (page reloads, PWA cold-starts, FB SDK auto
+# re-exchange) skip the FB round-trip for 5 minutes — main culprit for
+# rate-limit incidents on the auth endpoint. Token itself is NEVER
+# cached as plaintext: we key by SHA-256 prefix.
+_AUTH_VERIFY_CACHE: dict[str, tuple[float, dict]] = {}
+_AUTH_VERIFY_TTL_SECONDS = 5 * 60
+
+
+def _auth_cache_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
 @app.post("/api/auth/token")
 async def set_token(payload: TokenPayload):
     global _runtime_token
@@ -2141,6 +2154,27 @@ async def set_token(payload: TokenPayload):
     # then hit FB with the expired token and 190 out, even though the
     # client just minted a brand-new token via FB.login. Direct httpx
     # call with payload.token sidesteps the cache entirely.
+
+    # First check the 5-min /me cache so a flood of page reloads with
+    # the same token doesn't burn FB rate-limit budget.
+    cache_key = _auth_cache_key(payload.token)
+    cached = _AUTH_VERIFY_CACHE.get(cache_key)
+    if cached:
+        ts, me_cached = cached
+        if time.time() - ts < _AUTH_VERIFY_TTL_SECONDS:
+            uid = str(me_cached.get("id") or "")
+            _runtime_token = payload.token
+            if uid:
+                _user_token_cache[uid] = payload.token
+                _KNOWN_FB_USERS.add(uid)
+            return {
+                "ok": True,
+                "name": me_cached.get("name"),
+                "id": me_cached.get("id"),
+                "pictureUrl": me_cached.get("picture", {}).get("data", {}).get("url"),
+                "cached": True,
+            }
+
     if _http_client is None:
         raise HTTPException(status_code=503, detail="伺服器尚未初始化,請稍後再試")
     try:
@@ -2200,6 +2234,9 @@ async def set_token(payload: TokenPayload):
             await _persist_user_token(uid, payload.token)
             _KNOWN_FB_USERS.add(uid)
             await _persist_known_user(uid)
+        # Cache the verified /me response so subsequent re-exchanges
+        # with the same token skip FB entirely.
+        _AUTH_VERIFY_CACHE[cache_key] = (time.time(), me)
         return {"ok": True, "name": me.get("name"), "id": me.get("id"), "pictureUrl": pic}
     except HTTPException:
         raise
