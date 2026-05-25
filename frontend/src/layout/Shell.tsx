@@ -1,5 +1,6 @@
 import { DataPreloader, didPreload } from "@/components/DataPreloader";
 import { EmptyAccountsPrompt } from "@/components/EmptyAccountsPrompt";
+import { FbUsageBanner } from "@/components/FbUsageBanner";
 import { useCallback, useEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
@@ -58,7 +59,16 @@ export function Shell() {
         style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       >
         <MobileToggleContext.Provider value={() => setMobileOpen((v) => !v)}>
-          {preloadDone && <Outlet />}
+          {preloadDone && (
+            <>
+              {/* Sticky-top BUCU warning — surfaces when any account
+                  crosses 70% so the operator notices before throttle
+                  hits. Always rendered (component returns null when
+                  below threshold), no per-view wiring. */}
+              <FbUsageBanner />
+              <Outlet />
+            </>
+          )}
         </MobileToggleContext.Provider>
       </main>
       {preloadDone && <EmptyAccountsPrompt />}
