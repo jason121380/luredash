@@ -8243,7 +8243,18 @@ async def _security_push_enabled() -> bool:
         return False  # fail-closed: any DB issue → don't push
     if row is None or row["value"] is None:
         return False
-    return row["value"] is True
+    # asyncpg returns JSONB as a JSON-encoded string, not a parsed
+    # Python value. The frontend writes `value: true` (bool) which
+    # serializes to the JSON literal `true` — so we get back the
+    # string "true" here, not Python True. Decode if it's a string;
+    # otherwise trust whatever truthy/falsy value the column holds.
+    raw = row["value"]
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return False
+    return raw is True
 
 
 # ── 安全監控推播 (event-driven push on new-campaign anomalies) ───
@@ -8369,8 +8380,16 @@ async def _load_safe_campaign_ids() -> set:
         )
     if not row or not row["value"]:
         return set()
+    # asyncpg returns JSONB as a JSON-encoded string. Decode first so
+    # iterating yields list elements, not characters of the JSON text.
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return set()
     try:
-        return {str(x) for x in row["value"] if x}
+        return {str(x) for x in value if x}
     except (TypeError, ValueError):
         return set()
 
