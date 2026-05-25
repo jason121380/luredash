@@ -686,6 +686,36 @@ async def lifespan(app: FastAPI):
                     ON security_push_configs (owner_fb_user_id)
                     """
                 )
+                # `security_push_logs`: one row per scheduler-tick attempt
+                # against a security_push_configs row. Lets the UI surface
+                # a per-config history (「過去 24 hrs 跑了幾次、各偵測到幾
+                # 個異常」). The config-level last_run_at / fail_count
+                # only tells you the LATEST state — this table is for
+                # debugging trends (e.g. "is this config silently failing
+                # half the time?").
+                #
+                # Volume: ~24 rows/config/day at default poll=60min. Cheap
+                # to keep for months; if it ever grows, prune on
+                # created_at < NOW() - INTERVAL '90 days'.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS security_push_logs (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        config_id UUID NOT NULL REFERENCES security_push_configs(id) ON DELETE CASCADE,
+                        run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        matches_count INT NOT NULL DEFAULT 0,
+                        pushed_groups INT NOT NULL DEFAULT 0,
+                        duration_ms INT NOT NULL DEFAULT 0,
+                        error TEXT
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_sec_push_logs_config_run
+                    ON security_push_logs (config_id, run_at DESC)
+                    """
+                )
                 # ── Per-user FB tokens (Phase A — multi-tenant) ───
                 # Each FB user's long-lived token is persisted here so a
                 # server restart doesn't blow away every user's session.
@@ -7764,6 +7794,51 @@ async def delete_security_push_config(config_id: str, fb_user_id: str = Query(..
     return {"ok": True}
 
 
+@app.get("/api/security-push/configs/{config_id}/logs")
+async def list_security_push_logs(
+    config_id: str,
+    fb_user_id: str = Query(...),
+    limit: int = Query(20, ge=1, le=200),
+):
+    """Recent scheduler-tick audit log for a single config — surfaces
+    「過去 N 次跑了幾次,每次偵測到幾個異常,推到幾個群組」 to the
+    settings modal. Ordered newest-first."""
+    _assert_known_user(fb_user_id)
+    pool = _require_db()
+    async with pool.acquire() as conn:
+        owner = await conn.fetchrow(
+            "SELECT owner_fb_user_id FROM security_push_configs WHERE id = $1::uuid",
+            config_id,
+        )
+        if owner is None:
+            raise HTTPException(status_code=404, detail="config 不存在")
+        if owner["owner_fb_user_id"] != fb_user_id:
+            raise HTTPException(status_code=403, detail="無權查看此 config")
+        rows = await conn.fetch(
+            """
+            SELECT run_at, matches_count, pushed_groups, duration_ms, error
+            FROM security_push_logs
+            WHERE config_id = $1::uuid
+            ORDER BY run_at DESC
+            LIMIT $2
+            """,
+            config_id,
+            limit,
+        )
+    return {
+        "data": [
+            {
+                "run_at": r["run_at"].isoformat() if r["run_at"] else None,
+                "matches_count": r["matches_count"],
+                "pushed_groups": r["pushed_groups"],
+                "duration_ms": r["duration_ms"],
+                "error": r["error"],
+            }
+            for r in rows
+        ]
+    }
+
+
 class _TestCardPayload(BaseModel):
     id: str
     name: str
@@ -8603,16 +8678,23 @@ async def _collect_security_matches(
     return matches
 
 
-async def _security_push_run_one(cfg: dict) -> None:
+async def _security_push_run_one(cfg: dict) -> dict:
     """Process a single security_push_configs row: fetch campaigns
-    created since last_run_at, flag matches, push LINE message."""
+    created since last_run_at, flag matches, push LINE message.
+
+    Returns a dict ``{matches_count, pushed_groups}`` so the caller
+    can persist a row into ``security_push_logs`` for audit / debug
+    of「過去 24 hours 跑了幾次,各偵測到幾個異常」. Pure no-op runs
+    (no matches → no push) still return matches_count=0 so the log
+    shows the tick actually executed.
+    """
     owner_uid = cfg["owner_fb_user_id"]
     if not owner_uid:
         raise RuntimeError("config has no owner_fb_user_id")
 
     # Resolve channel access_token
     if _db_pool is None:
-        return
+        return {"matches_count": 0, "pushed_groups": 0}
     async with _db_pool.acquire() as conn:
         ch_row = await conn.fetchrow(
             "SELECT access_token FROM line_channels WHERE id = $1 AND enabled",
@@ -8626,6 +8708,8 @@ async def _security_push_run_one(cfg: dict) -> None:
     if since_dt.tzinfo is None:
         since_dt = since_dt.replace(tzinfo=timezone.utc)
 
+    pushed_groups = 0
+
     # Pull campaigns under the owner's FB token context.
     ctx_token = _current_fb_user_id.set(owner_uid)
     try:
@@ -8633,7 +8717,7 @@ async def _security_push_run_one(cfg: dict) -> None:
             cfg, since_dt, require_anomaly=True, limit=None
         )
         if not matches:
-            return
+            return {"matches_count": 0, "pushed_groups": 0}
 
         # Flex card carousel — one bubble per campaign. Matches the
         # shape the test endpoint sends so the production push looks
@@ -8647,8 +8731,10 @@ async def _security_push_run_one(cfg: dict) -> None:
                     [flex],
                     access_token=access_token,
                 )
+                pushed_groups += 1
             except line_client.LinePushError as e:
                 print(f"[security-push] push group={gid} failed: {e}", flush=True)
+        return {"matches_count": len(matches), "pushed_groups": pushed_groups}
     finally:
         _current_fb_user_id.reset(ctx_token)
 
@@ -8674,8 +8760,11 @@ async def _security_push_tick() -> None:
     for row in due:
         cfg = dict(row)
         cid = cfg["id"]
+        start_mono = time.monotonic()
+        run_result: dict = {"matches_count": 0, "pushed_groups": 0}
+        run_error: Optional[str] = None
         try:
-            await _security_push_run_one(cfg)
+            run_result = await _security_push_run_one(cfg) or run_result
             async with _db_pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -8691,6 +8780,7 @@ async def _security_push_tick() -> None:
                     now,
                 )
         except Exception as e:
+            run_error = str(e)[:500]
             print(f"[security-push] config={cid} run failed: {e}", flush=True)
             async with _db_pool.acquire() as conn:
                 await conn.execute(
@@ -8704,9 +8794,31 @@ async def _security_push_tick() -> None:
                     WHERE id = $1
                     """,
                     cid,
-                    str(e)[:500],
+                    run_error,
                     now,
                 )
+        # Audit row — written for BOTH success and failure paths so the
+        # UI timeline shows ticks that fired but found nothing,
+        # ticks that pushed, and ticks that errored. Best-effort insert
+        # so a logging hiccup never escalates to disabling the config.
+        try:
+            duration_ms = int((time.monotonic() - start_mono) * 1000)
+            async with _db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO security_push_logs
+                        (config_id, run_at, matches_count, pushed_groups, duration_ms, error)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    cid,
+                    now,
+                    int(run_result.get("matches_count", 0)),
+                    int(run_result.get("pushed_groups", 0)),
+                    duration_ms,
+                    run_error,
+                )
+        except Exception as e:
+            print(f"[security-push] config={cid} log insert failed: {e}", flush=True)
 
 
 # ── Cache warm-refresh loop ───────────────────────────────────
