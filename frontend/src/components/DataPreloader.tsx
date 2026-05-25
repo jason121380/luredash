@@ -34,6 +34,34 @@ import { useEffect, useRef, useState } from "react";
 const BATCH_SIZE = 1;
 const MAX_CONCURRENT_REQUESTS = 20;
 
+// Keep in sync with useMultiAccountOverview's snapshot constants. The
+// preloader treats a recent snapshot as "good enough" to skip the
+// blocking modal entirely — views use the same snapshot as
+// placeholderData so the user sees stale-but-good data instantly while
+// the live query refetches in the background.
+const SNAPSHOT_KEY = "fb-overview-snapshot";
+const SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60_000;
+
+/** Return true when there's a recent localStorage snapshot whose
+ * account set matches the current visible accounts. Date /
+ * includeArchived in the snapshot don't need to match — views render
+ * the snapshot via placeholderData and refetch fresh data in the
+ * background, so an exact-date hit isn't required to avoid blocking. */
+function hasRecentSnapshot(idsKey: string): boolean {
+  try {
+    const raw = localStorage.getItem(SNAPSHOT_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as { hash?: unknown; savedAt?: unknown };
+    if (typeof parsed.hash !== "string" || typeof parsed.savedAt !== "number") return false;
+    if (Date.now() - parsed.savedAt > SNAPSHOT_MAX_AGE_MS) return false;
+    // Snapshot hash format: `${idsKey}|${preset}|${from}|${to}|${archivedFlag}`.
+    // Prefix match on the ids portion = same account set.
+    return parsed.hash.startsWith(`${idsKey}|`);
+  } catch {
+    return false;
+  }
+}
+
 /** Module-level flag so the preloader only runs once per page load.
  * React Strict Mode double-mount won't retrigger it.
  * Exported so Shell can read the initial value for its state. */
@@ -69,6 +97,20 @@ export function DataPreloader({ onComplete }: { onComplete: () => void }) {
       setDone(true);
       return;
     }
+
+    // Skip the blocking preload when we already have a recent
+    // localStorage snapshot for the same account set. The views' own
+    // `useMultiAccountOverview` reads the snapshot via placeholderData
+    // and refetches fresh data in the background, so blocking here is
+    // pure latency tax for repeat users. First-load (no snapshot) and
+    // account-set changes still fall through to the full preload.
+    const sortedIdsKey = [...visibleAccounts.map((a) => a.id)].sort().join(",");
+    if (hasRecentSnapshot(sortedIdsKey)) {
+      didPreload = true;
+      setDone(true);
+      return;
+    }
+
     if (runningRef.current) return;
     runningRef.current = true;
 
