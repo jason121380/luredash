@@ -246,7 +246,14 @@ export function SecurityMonitorView() {
     <>
       <Topbar title="安全監控">
         <div className="flex items-center gap-2 md:gap-3">
-          <DatePicker value={date} onChange={setDate} />
+          {/* 安全監控限定到「上個月」為止 — 立即掃描 fetch 固定
+              last_90d,選 last_90d 或更久的自訂區間會看不到資料。
+              拿掉 custom 日曆,只留 6 個 preset。 */}
+          <DatePicker
+            value={date}
+            onChange={setDate}
+            allowedPresets={["today", "yesterday", "last_7d", "last_30d", "this_month", "last_month"]}
+          />
           <TopbarSeparator />
           {lastScanAt && (
             <span className="hidden whitespace-nowrap text-[11px] text-gray-400 md:inline">
