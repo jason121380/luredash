@@ -278,15 +278,28 @@ function FbUsagePanel() {
       ) : entries.length === 0 ? (
         <div className="text-sm text-gray-400">尚無資料——任何 FB API 呼叫之後會更新</div>
       ) : (
-        <div className="flex flex-col gap-3">
-          {entries.map(([bizId, u]) => (
-            <UsageRow
-              key={bizId}
-              bizId={bizId}
-              bizName={bizNameById.get(bizId) ?? ""}
-              usage={u}
-            />
-          ))}
+        <div className="overflow-x-auto rounded-lg border border-border">
+          <table className="w-full text-[12px]">
+            <thead className="bg-bg text-left text-gray-500">
+              <tr>
+                <th className="px-3 py-2 font-semibold">BM</th>
+                <th className="px-3 py-2 font-semibold">呼叫次數</th>
+                <th className="px-3 py-2 font-semibold">CPU 用量</th>
+                <th className="px-3 py-2 font-semibold">處理時間</th>
+                <th className="px-3 py-2 font-semibold whitespace-nowrap">更新</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map(([bizId, u]) => (
+                <UsageRow
+                  key={bizId}
+                  bizId={bizId}
+                  bizName={bizNameById.get(bizId) ?? ""}
+                  usage={u}
+                />
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </Card>
@@ -311,52 +324,61 @@ function UsageRow({
 }) {
   const observedAgoSec = Math.max(0, Math.floor(Date.now() / 1000 - usage.observed_at));
   return (
-    <div className="rounded-lg border border-border bg-bg p-3">
-      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-        {bizName ? <span className="font-semibold text-ink">{bizName}</span> : null}
-        <span
-          className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-500"
-          title="Business Manager ID(非廣告帳戶 ID)。FB rate limit 按 BM 計算。"
-        >
-          BM {bizId}
-        </span>
-        {usage.type ? (
-          <span className="rounded-full bg-orange-bg px-2 py-0.5 font-semibold text-orange">
-            {usage.type}
-          </span>
-        ) : null}
-        <span className="text-gray-400">{observedAgoSec}s 前更新</span>
-        {usage.estimated_time_to_regain_access > 0 ? (
+    <tr className="border-t border-border">
+      <td className="px-3 py-2 align-middle">
+        <div className="flex flex-col gap-0.5">
+          {bizName ? <span className="font-semibold text-ink">{bizName}</span> : null}
           <span
-            className="ml-auto rounded-full bg-red-100 px-2 py-0.5 font-semibold text-red-700"
-            title="Facebook 估算約多久後可恢復呼叫,非精確倒數"
+            className="font-mono text-[11px] text-gray-500"
+            title="Business Manager ID(非廣告帳戶 ID)。FB rate limit 按 BM 計算。"
           >
-            冷卻 約 {usage.estimated_time_to_regain_access} 分鐘
+            BM {bizId}
           </span>
-        ) : null}
-      </div>
-      <div className="grid gap-1.5 text-[12px]">
-        <UsageBar label="呼叫次數" value={usage.call_count} />
-        <UsageBar label="CPU 用量" value={usage.total_cputime} />
-        <UsageBar label="處理時間" value={usage.total_time} />
-      </div>
-    </div>
+          <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+            {usage.type ? (
+              <span className="rounded-full bg-orange-bg px-1.5 py-0.5 font-semibold text-orange">
+                {usage.type}
+              </span>
+            ) : null}
+            {usage.estimated_time_to_regain_access > 0 ? (
+              <span
+                className="rounded-full bg-red-100 px-1.5 py-0.5 font-semibold text-red-700"
+                title="Facebook 估算約多久後可恢復呼叫,非精確倒數"
+              >
+                冷卻 約 {usage.estimated_time_to_regain_access} 分鐘
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </td>
+      <td className="px-3 py-2 align-middle">
+        <UsageCell value={usage.call_count} />
+      </td>
+      <td className="px-3 py-2 align-middle">
+        <UsageCell value={usage.total_cputime} />
+      </td>
+      <td className="px-3 py-2 align-middle">
+        <UsageCell value={usage.total_time} />
+      </td>
+      <td className="px-3 py-2 align-middle whitespace-nowrap text-[11px] text-gray-400">
+        {observedAgoSec}s 前
+      </td>
+    </tr>
   );
 }
 
-function UsageBar({ label, value }: { label: string; value: number }) {
+function UsageCell({ value }: { value: number }) {
   const pct = Math.max(0, Math.min(100, value));
   const color = pct >= 80 ? "bg-red-500" : pct >= 50 ? "bg-amber-400" : "bg-emerald-500";
   return (
     <div className="flex items-center gap-2">
-      <span className="w-[72px] shrink-0 text-gray-500">{label}</span>
-      <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-gray-200">
+      <div className="relative h-1.5 min-w-[80px] flex-1 overflow-hidden rounded-full bg-gray-200">
         <div
           className={cn("absolute inset-y-0 left-0 rounded-full", color)}
           style={{ width: `${pct}%` }}
         />
       </div>
-      <span className="w-[42px] shrink-0 text-right font-mono text-gray-600">{value}%</span>
+      <span className="w-[36px] shrink-0 text-right font-mono text-gray-600">{value}%</span>
     </div>
   );
 }
