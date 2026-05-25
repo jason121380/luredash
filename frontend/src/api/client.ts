@@ -619,7 +619,7 @@ export const api = {
     batch: (
       accountIds: string[],
       date: DateConfig,
-      opts?: { includeArchived?: boolean; lite?: boolean },
+      opts?: { includeArchived?: boolean; lite?: boolean; includeAdsets?: boolean },
     ) =>
       request<{
         data: Record<
@@ -636,6 +636,11 @@ export const api = {
           ...dateParams(date),
           include_archived: opts?.includeArchived ? "true" : undefined,
           lite: opts?.lite ? "true" : undefined,
+          // Adset nesting is only needed by 安全監控's effectiveDailyBudget.
+          // Backend defaults to false (saves ~20-30% FB BUCU on dashboard
+          // / alerts / finance); pass true only from views that read
+          // `campaign.adsets.data`.
+          include_adsets: opts?.includeAdsets ? "true" : undefined,
         },
       }),
   },

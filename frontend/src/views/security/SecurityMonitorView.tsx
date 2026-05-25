@@ -81,7 +81,14 @@ export function SecurityMonitorView() {
   //      client-side filter on `created_time`, which matches the
   //      view's actual semantics ("campaigns CREATED in this window").
   const fetchDate = useMemo<DateConfig>(() => ({ preset: "last_90d", from: null, to: null }), []);
-  const overview = useMultiAccountOverview(visibleAll, fetchDate, { includeArchived: true });
+  // includeAdsets:true here only — `effectiveDailyBudget` reads
+  // `campaign.adsets.data` to aggregate ABO budgets. Dashboard / Alerts /
+  // Finance never read that nested field so they opt out (default false,
+  // ~20-30% lighter FB BUCU per call).
+  const overview = useMultiAccountOverview(visibleAll, fetchDate, {
+    includeArchived: true,
+    includeAdsets: true,
+  });
 
   // SECOND overview query at the user's chosen date — only used to
   // surface spend numbers that match the date-picker label (儀表板

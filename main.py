@@ -4125,118 +4125,219 @@ async def get_engineering_fb_calls():
 
 # ── 行銷活動 ─────────────────────────────────────────────────────────
 
+# Metadata cache TTL — campaign list / names / budgets don't change as
+# fast as insights numbers, so we cache the metadata layer 15 min while
+# the insights layer stays at the default 5 min. This means switching
+# date pickers shares the metadata across cache entries instead of
+# re-fetching the (expensive, adset-nested) /campaigns response.
+_CAMPAIGNS_META_TTL_SECONDS = 15 * 60
+
+
+async def _fetch_campaigns_metadata(
+    account_id: str,
+    include_archived: bool,
+    include_adsets: bool,
+) -> List[dict]:
+    """Fetch campaign metadata (no insights).
+
+    Long-TTL cached layer of the campaigns fetch. Returns campaign list
+    with stable fields (id/name/status/objective/budgets/created_time/
+    updated_time) and optionally the `adsets.limit(50){...}` nesting
+    needed by 安全監控's effectiveDailyBudget.
+
+    Splitting metadata from insights:
+      1. Cache hit rate goes up (date changes don't invalidate metadata)
+      2. FB-side cost per call goes way down (no per-campaign insights
+         aggregation, no n×insight-field compute)
+      3. Heavy accounts (e.g. 吸引力 LURE — 100+ campaigns) drop from
+         ~5-15 BUCU per /campaigns to ~1-2 BUCU
+    """
+    fields_parts = [
+        "id",
+        "name",
+        "status",
+        "objective",
+        "daily_budget",
+        "lifetime_budget",
+        "created_time",
+        "updated_time",
+    ]
+    if include_adsets:
+        # Only 安全監控 reads campaign.adsets (effectiveDailyBudget for
+        # ABO campaigns). Dashboard / Alerts / Finance / Analytics
+        # never touch the nested field, so skipping it here is the
+        # single biggest cheap BUCU win.
+        fields_parts.append("adsets.limit(50){daily_budget,lifetime_budget,status}")
+    fields = ",".join(fields_parts)
+    archived_filter = {"effective_status": '["ACTIVE","PAUSED","ARCHIVED","DELETED"]'}
+
+    # 2-tier fallback: with-archived filter → without. Drops the old
+    # 5-tier matrix because insights expansion is no longer in the
+    # critical path; FB rarely rejects a plain metadata fetch.
+    attempts: list[tuple[str, dict]] = []
+    if include_archived:
+        attempts.append(("meta+archived", {"fields": fields, "limit": "500", **archived_filter}))
+    attempts.append(("meta", {"fields": fields, "limit": "500"}))
+
+    last_error: Optional[HTTPException] = None
+    for tier, params in attempts:
+        try:
+            return await fb_get_paginated(
+                f"{account_id}/campaigns", params, ttl=_CAMPAIGNS_META_TTL_SECONDS
+            )
+        except HTTPException as e:
+            print(
+                f"[campaigns meta] {account_id} tier={tier} failed: "
+                f"{e.status_code} {e.detail}",
+                flush=True,
+            )
+            last_error = e
+            continue
+    if last_error is not None:
+        raise last_error
+    raise HTTPException(status_code=502, detail="Failed to load campaign metadata")
+
+
+async def _fetch_campaign_insights_bulk(
+    account_id: str,
+    date_preset: str,
+    time_range: Optional[str],
+) -> dict[str, dict]:
+    """Fetch per-campaign aggregated insights for one account in ONE FB
+    call via `act_xxx/insights?level=campaign`.
+
+    Returns `{campaign_id: insights_row}`. Caller stitches the rows
+    onto the metadata response under `c["insights"]["data"][0]` to
+    preserve the shape the frontend expects (`getIns(c)`).
+
+    The account-level insights endpoint with `level=campaign` is FB's
+    own optimized path for this aggregation pattern — much cheaper
+    than the nested expansion inside the `/campaigns` edge, which
+    forces FB to iterate each campaign separately.
+
+    Errors are NON-fatal: if FB rejects the bulk call (e.g. specific
+    field unsupported on this account), we log and return an empty
+    map. The caller will still surface campaigns, just without metric
+    numbers — better than failing the whole overview.
+    """
+    fields = (
+        "campaign_id,spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
+        "inline_link_clicks,cost_per_inline_link_click,"
+        "cost_per_action_type,purchase_roas,website_purchase_roas"
+    )
+    params: dict = {"fields": fields, "level": "campaign", "limit": "500"}
+    if time_range:
+        params["time_range"] = time_range
+    else:
+        params["date_preset"] = date_preset
+
+    try:
+        rows = await fb_get_paginated(f"{account_id}/insights", params)
+    except HTTPException as e:
+        print(
+            f"[campaigns insights] {account_id} bulk fetch failed: "
+            f"{e.status_code} {e.detail}",
+            flush=True,
+        )
+        return {}
+
+    out: dict[str, dict] = {}
+    for r in rows:
+        cid = r.get("campaign_id")
+        if cid:
+            # Drop campaign_id from the row before nesting — frontend
+            # already keys by the parent campaign.id.
+            row_copy = {k: v for k, v in r.items() if k != "campaign_id"}
+            out[cid] = row_copy
+    return out
+
+
 async def _fetch_campaigns_for_account(
     account_id: str,
     date_preset: str,
     time_range: Optional[str],
     include_archived: bool,
     lite: bool = False,
+    include_adsets: bool = True,
 ) -> List[dict]:
-    """Core campaign-fetch logic with FB-side progressive fallback.
+    """Fetch campaigns with insights for one account.
 
-    Extracted from the ``get_campaigns`` route so the same behavior
-    (including the 4-tier retry chain) can be shared by the batch
-    ``/api/overview`` endpoint without duplication. Returns the raw
-    campaign list; the caller wraps it into whatever envelope shape
-    it needs.
+    Internally splits into two cheaper FB calls:
+      1. Metadata (long TTL, no date dependency)
+      2. Bulk insights via `/insights?level=campaign` (date-keyed, but
+         a single FB call per account instead of per-campaign
+         expansion)
 
-    When ``lite=True``, skips the insights field expansion entirely
-    and only fetches campaign metadata (name, status, budget). This
-    is much faster (~1-2s vs ~5-15s) and is used for the two-phase
-    loading pattern: show campaign rows immediately, then backfill
-    insights from the full request.
+    Then stitches the insights rows into each metadata campaign under
+    `c["insights"]["data"][0]` — the shape the frontend's `getIns(c)`
+    expects, so callers don't need to change.
 
-    Raises ``HTTPException`` if every tier fails so callers can
-    decide whether to surface the error or swallow it for a
-    partial-success response.
+    Parameters:
+      ``lite``: skip the insights stitch entirely (metadata only).
+        Used by the two-phase loading pattern to paint the table
+        immediately. Same call sequence as before.
+      ``include_adsets``: keep the heavy `adsets.limit(50){...}`
+        nesting that 安全監控 needs for `effectiveDailyBudget`. Default
+        ``True`` for back-compat; set ``False`` from views that only
+        need campaign-level fields (~20-30% smaller FB payload).
+
+    Raises ``HTTPException`` if the metadata call fails entirely so
+    callers can surface or swallow per their semantics. A failed
+    insights call is non-fatal (campaigns still returned, just
+    without numbers).
     """
-    # Register as a warm target so the cache-warm loop refreshes this
-    # entry just before TTL expires. Lite-mode reads (skeleton) are
-    # NOT registered — they're cheap and already happen pre-paint, no
-    # need to keep them warm in the background. Includes fb_user_id
-    # from contextvar so the warm loop can re-fire under the same
-    # per-user FB token.
+    # Register the (metadata + insights) combo as a warm target so the
+    # cache-warm loop refreshes it before TTL. Lite reads (skeleton)
+    # aren't registered.
     if not lite:
         warm_uid = _current_fb_user_id.get() or ""
         if warm_uid:
             _warm_targets[(account_id, "campaigns", date_preset, time_range, warm_uid)] = (
                 time.monotonic()
             )
-    ins = _insights_clause(
-        "spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
-        "inline_link_clicks,cost_per_inline_link_click,"
-        "cost_per_action_type,purchase_roas,website_purchase_roas",
-        date_preset,
-        time_range,
-    )
-    # `adsets{daily_budget,lifetime_budget,status}` nests the per-adset
-    # budgets so the security view can compute an "effective" daily
-    # budget when the campaign itself uses ABO (budget set on adsets
-    # instead of the campaign). limit(50) caps payload — campaigns
-    # with more adsets than that are rare and will just under-report.
-    adset_nest = "adsets.limit(50){daily_budget,lifetime_budget,status}"
-    full_fields = (
-        f"id,name,status,objective,daily_budget,lifetime_budget,"
-        f"created_time,updated_time,{adset_nest},{ins}"
-    )
-    no_ins_fields = (
-        f"id,name,status,objective,daily_budget,lifetime_budget,"
-        f"created_time,updated_time,{adset_nest}"
-    )
-    archived_filter = {"effective_status": '["ACTIVE","PAUSED","ARCHIVED","DELETED"]'}
 
-    # Lite mode: skip insights entirely for fast first-paint.
     if lite:
-        params: dict = {"fields": no_ins_fields, "limit": "500"}
-        if include_archived:
-            params.update(archived_filter)
-        return await fb_get_paginated(f"{account_id}/campaigns", params)
+        # Lite path is just metadata — return without stitching.
+        return await _fetch_campaigns_metadata(
+            account_id, include_archived, include_adsets
+        )
 
-    attempts: list[tuple[str, dict]] = []
-    if include_archived:
-        attempts.append(("insights+archived", {"fields": full_fields, "limit": "500", **archived_filter}))
-    attempts.append(("insights", {"fields": full_fields, "limit": "500"}))
-    if include_archived:
-        attempts.append(("no-insights+archived", {"fields": no_ins_fields, "limit": "500", **archived_filter}))
-    attempts.append(("no-insights", {"fields": no_ins_fields, "limit": "500"}))
-    attempts.append(("minimal", {"fields": "id,name,status", "limit": "500"}))
+    # Parallel fetch of metadata + bulk insights. Both have their own
+    # cache layers (metadata 15min, insights 5min), so this is cheap
+    # on warm cache hits. asyncio.gather lets us overlap the two FB
+    # calls on cold start instead of paying their latency serially.
+    metadata_task = _fetch_campaigns_metadata(
+        account_id, include_archived, include_adsets
+    )
+    insights_task = _fetch_campaign_insights_bulk(account_id, date_preset, time_range)
+    try:
+        metadata, insights_by_id = await asyncio.gather(metadata_task, insights_task)
+    except HTTPException:
+        # Re-raise the metadata error; insights errors are already
+        # swallowed inside _fetch_campaign_insights_bulk.
+        raise
 
-    last_error: Optional[HTTPException] = None
-    for tier, params in attempts:
-        try:
-            camps = await fb_get_paginated(f"{account_id}/campaigns", params)
-            if last_error is not None:
-                print(
-                    f"[campaigns] {account_id} recovered at tier={tier} "
-                    f"after earlier failure: {last_error.detail}",
-                    flush=True,
-                )
-            return camps
-        except HTTPException as e:
-            print(
-                f"[campaigns] {account_id} tier={tier} failed: "
-                f"{e.status_code} {e.detail}",
-                flush=True,
-            )
-            last_error = e
-            continue
-
-    if last_error is not None:
-        raise last_error
-    raise HTTPException(status_code=502, detail="Failed to load campaigns from Facebook API")
+    # Stitch insights into metadata to match the shape the frontend's
+    # `getIns(c)` reads (`c.insights.data[0]`).
+    for c in metadata:
+        cid = c.get("id")
+        if cid and cid in insights_by_id:
+            c["insights"] = {"data": [insights_by_id[cid]]}
+    return metadata
 
 
 @app.get("/api/accounts/{account_id}/campaigns")
-async def get_campaigns(account_id: str, date_preset: str = "last_30d", time_range: Optional[str] = None, include_archived: bool = False):
-    """List campaigns for an account, with progressive fallback so a
-    single FB-side restriction (e.g. effective_status not allowed on
-    a particular ad account) doesn't make the whole call return 400.
+async def get_campaigns(account_id: str, date_preset: str = "last_30d", time_range: Optional[str] = None, include_archived: bool = False, include_adsets: bool = True):
+    """List campaigns for an account.
 
     Delegates to :func:`_fetch_campaigns_for_account` so the batch
-    ``/api/overview`` endpoint can share the same retry logic.
+    ``/api/overview`` endpoint shares the same metadata + insights
+    split. ``include_adsets`` defaults to True for backward compat;
+    set to false from views that only need campaign-level fields to
+    save ~20-30% of the FB payload.
     """
     camps = await _fetch_campaigns_for_account(
-        account_id, date_preset, time_range, include_archived
+        account_id, date_preset, time_range, include_archived, include_adsets=include_adsets
     )
     return {"data": camps}
 
@@ -4728,6 +4829,7 @@ async def get_overview(
     time_range: Optional[str] = None,
     include_archived: bool = False,
     lite: bool = False,
+    include_adsets: bool = False,
 ):
     """Batch multi-account overview endpoint.
 
@@ -4773,7 +4875,10 @@ async def get_overview(
         data follows from a parallel non-lite request.
         """
         camps_task = asyncio.create_task(
-            _fetch_campaigns_for_account(aid, date_preset, time_range, include_archived, lite=lite)
+            _fetch_campaigns_for_account(
+                aid, date_preset, time_range, include_archived,
+                lite=lite, include_adsets=include_adsets,
+            )
         )
         if lite:
             # Lite mode: skip the insights call entirely for speed.
@@ -5787,8 +5892,11 @@ async def _build_flex_for_config(cfg: dict) -> dict:
         # Fall back to the account-wide path if FB rejects the
         # single-campaign request (e.g. campaign was archived in a
         # way that needs the account-level filter to surface).
+        # LINE flex push only reads campaign-level fields (spend / msgs
+        # / CPC) — no adset nesting needed, so opt out to save BUCU.
         campaigns = await _fetch_campaigns_for_account(
-            account_id, date_preset, time_range, include_archived=True, lite=False
+            account_id, date_preset, time_range,
+            include_archived=True, lite=False, include_adsets=False,
         )
         camp = next((c for c in campaigns if c.get("id") == campaign_id), None)
         if camp is None:
@@ -8278,12 +8386,17 @@ async def _collect_security_matches(
     async def _scan_one_inner(aid: str) -> list:
         out: list = []
         try:
+            # include_adsets=True because _effective_daily_budget below
+            # reads `c["adsets"]["data"]` to aggregate ABO campaign
+            # budgets. Without the nested fetch we'd report None for
+            # every ABO campaign in the LINE security alert.
             camps = await _fetch_campaigns_for_account(
                 aid,
                 date_preset="last_7d",
                 time_range=None,
                 include_archived=True,
                 lite=True,
+                include_adsets=True,
             )
         except HTTPException as e:
             print(f"[security-push] fetch {aid} failed: {e.detail}", flush=True)
@@ -8584,8 +8697,14 @@ async def _cache_warm_tick() -> None:
             if kind == "insights":
                 await _fetch_account_insights(account_id, date_preset, time_range)
             elif kind == "campaigns":
+                # Warm refresh matches the dashboard's primary use
+                # (include_adsets=False). Security view's cache entry
+                # (include_adsets=True) is a different key and doesn't
+                # warm — that's intentional, security push uses
+                # lite=True which doesn't register warm targets anyway.
                 await _fetch_campaigns_for_account(
-                    account_id, date_preset, time_range, include_archived=False, lite=False
+                    account_id, date_preset, time_range,
+                    include_archived=False, lite=False, include_adsets=False,
                 )
             refreshed += 1
         except Exception:
