@@ -1,5 +1,6 @@
 import type { SecurityPushTestCard } from "@/api/client";
 import { queryClient } from "@/lib/queryClient";
+import { ScanHistoryModal, appendScanHistory } from "./ScanHistoryModal";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
 import { AcctSidebarToggle } from "@/components/AcctSidebarToggle";
@@ -13,7 +14,7 @@ import { type DateConfig, toShortLabel } from "@/lib/datePicker";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertAccountPanel } from "../alerts/AlertAccountPanel";
 import { SecurityCampaignRow } from "./SecurityCampaignRow";
 import { SecurityPushSettingsModal } from "./SecurityPushSettingsModal";
@@ -71,6 +72,8 @@ export function SecurityMonitorView() {
   // want to look at anything). User clicks 立即掃描 → scan fires.
   const [scanRequested, setScanRequested] = useState(false);
   const [lastScanAt, setLastScanAt] = useState<Date | null>(null);
+  const [scanStartAt, setScanStartAt] = useState<number | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const [date, setDate] = useState<DateConfig>({
     preset: "this_month",
@@ -122,6 +125,13 @@ export function SecurityMonitorView() {
       setLastScanAt(new Date());
     }
   }, [scanRequested, isScanning]);
+
+  // Edge-detect the "scanning → done" transition. Without the ref,
+  // the history append runs on every render where !isScanning (even
+  // before scanRequested is set), which would log a phantom entry on
+  // first mount. Ref guarantees we only fire ONCE per scan when the
+  // boolean actually flips.
+  const wasScanning = useRef(false);
   const spendByCampaignId = useMemo(() => {
     const map = new Map<string, string>();
     for (const c of spendOverview.campaigns) {
@@ -148,6 +158,23 @@ export function SecurityMonitorView() {
     () => allDays.reduce((n, d) => n + d.rows.filter((r) => safeIds.has(r.campaign.id)).length, 0),
     [allDays, safeIds],
   );
+
+  // 「立即掃描」完成時把這筆掃描 append 進本地歷史(localStorage).
+  // 一個 scan 一筆紀錄,包含耗時 + 掃到 / 待查看 / 是否錯誤. 用 ref
+  // 偵測「scanning → done」transition 確保每個 scan 只記一次.
+  useEffect(() => {
+    if (wasScanning.current && !isScanning && scanStartAt !== null) {
+      appendScanHistory({
+        ts: Date.now(),
+        durationMs: Date.now() - scanStartAt,
+        totalCampaigns: overview.campaigns.length,
+        pendingCount,
+        hasError: Object.keys(overview.errors).length > 0,
+      });
+      setScanStartAt(null);
+    }
+    wasScanning.current = isScanning;
+  }, [isScanning, scanStartAt, overview.campaigns.length, overview.errors, pendingCount]);
 
   // Filter days by tab. We drop a day group entirely when none of its
   // rows match — avoids showing empty headers.
@@ -251,6 +278,7 @@ export function SecurityMonitorView() {
                 void queryClient.invalidateQueries({ queryKey: ["overview"] });
                 void queryClient.invalidateQueries({ queryKey: ["overview-lite"] });
               }
+              setScanStartAt(Date.now());
               setScanRequested(true);
             }}
             disabled={isScanning}
@@ -283,6 +311,35 @@ export function SecurityMonitorView() {
               <path d="M7 12h10" />
             </svg>
             <span>{isScanning ? "掃描中…" : lastScanAt ? "重新掃描" : "立即掃描"}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setHistoryOpen(true)}
+            className={cn(
+              "flex h-10 select-none items-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 md:h-9",
+              "text-[13px] font-medium text-ink font-sans",
+              "transition-all duration-150 cursor-pointer active:scale-95",
+              "border-border bg-white hover:border-orange-border hover:bg-orange-bg",
+            )}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="shrink-0 text-orange"
+              aria-hidden="true"
+            >
+              <title>history</title>
+              <path d="M3 3v5h5" />
+              <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
+              <path d="M12 7v5l4 2" />
+            </svg>
+            <span>掃描紀錄</span>
           </button>
           <button
             type="button"
@@ -319,6 +376,7 @@ export function SecurityMonitorView() {
         onOpenChange={setPushModalOpen}
         pendingCards={pendingCardsSnapshot}
       />
+      <ScanHistoryModal open={historyOpen} onOpenChange={setHistoryOpen} />
 
       <div className="flex min-w-0 items-start md:flex-row">
         {/* Desktop sidebar (≥768px) */}
