@@ -128,11 +128,11 @@ function Card({
   return (
     <section className="rounded-2xl border border-border bg-white p-4 md:p-5">
       <header className="mb-3 flex items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0 flex-1">
           <h2 className="text-[15px] font-bold text-ink">{title}</h2>
           {subtitle ? <p className="mt-0.5 text-xs text-gray-400">{subtitle}</p> : null}
         </div>
-        {action}
+        {action ? <div className="shrink-0">{action}</div> : null}
       </header>
       {children}
     </section>
@@ -295,7 +295,21 @@ function FbUsagePanel() {
       ) : entries.length === 0 ? (
         <div className="text-sm text-gray-400">尚無資料——任何 FB API 呼叫之後會更新</div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <>
+          {/* Mobile (<md): one card per row — table columns squeeze
+              into characters-stacked-vertically at 390px wide. */}
+          <div className="flex flex-col gap-2 md:hidden">
+            {entries.map(([bareId, u]) => (
+              <UsageMobileCard
+                key={bareId}
+                bareId={bareId}
+                name={nameByBareId.get(bareId) ?? ""}
+                usage={u}
+              />
+            ))}
+          </div>
+          {/* Desktop: full comparison table */}
+          <div className="hidden overflow-x-auto rounded-lg border border-border md:block">
           <table className="w-full text-[12px]">
             <thead className="bg-bg text-left text-gray-500">
               <tr>
@@ -317,9 +331,79 @@ function FbUsagePanel() {
               ))}
             </tbody>
           </table>
-        </div>
+          </div>
+        </>
       )}
     </Card>
+  );
+}
+
+function UsageMobileCard({
+  bareId,
+  name,
+  usage,
+}: {
+  bareId: string;
+  name: string;
+  usage: {
+    call_count: number;
+    total_cputime: number;
+    total_time: number;
+    estimated_time_to_regain_access: number;
+    type: string;
+    observed_at: number;
+  };
+}) {
+  const observedAgoSec = Math.max(0, Math.floor(Date.now() / 1000 - usage.observed_at));
+  return (
+    <div className="rounded-lg border border-border bg-bg p-3">
+      <div className="mb-2 flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+        {name ? (
+          <span className="font-semibold text-ink">{name}</span>
+        ) : (
+          <span className="font-mono text-[12px] text-ink">{bareId}</span>
+        )}
+        {name ? (
+          <span className="font-mono text-[10px] text-gray-400">{bareId}</span>
+        ) : null}
+        {usage.type ? (
+          <span className="rounded-full bg-orange-bg px-1.5 py-0.5 text-[10px] font-semibold text-orange">
+            {usage.type}
+          </span>
+        ) : null}
+        {usage.estimated_time_to_regain_access > 0 ? (
+          <span
+            className="rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700"
+            title="Facebook 估算約多久後可恢復呼叫,非精確倒數"
+          >
+            冷卻 {usage.estimated_time_to_regain_access}分
+          </span>
+        ) : null}
+        <span className="ml-auto text-[10px] text-gray-400">{observedAgoSec}s 前</span>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <MobileMetricRow label="呼叫次數" value={usage.call_count} />
+        <MobileMetricRow label="CPU 用量" value={usage.total_cputime} />
+        <MobileMetricRow label="處理時間" value={usage.total_time} />
+      </div>
+    </div>
+  );
+}
+
+function MobileMetricRow({ label, value }: { label: string; value: number }) {
+  const pct = Math.max(0, Math.min(100, value));
+  const color = pct >= 80 ? "bg-red-500" : pct >= 50 ? "bg-amber-400" : "bg-emerald-500";
+  return (
+    <div className="flex items-center gap-2 text-[11px]">
+      <span className="w-[52px] shrink-0 text-gray-500">{label}</span>
+      <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-gray-200">
+        <div
+          className={cn("absolute inset-y-0 left-0 rounded-full", color)}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="w-[34px] shrink-0 text-right font-mono text-gray-600">{value}%</span>
+    </div>
   );
 }
 
