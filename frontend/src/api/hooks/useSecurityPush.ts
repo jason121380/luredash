@@ -19,7 +19,11 @@ export function useSecurityPushConfigs() {
     queryKey: [...CONFIGS_KEY, uid] as const,
     queryFn: async () => (await api.securityPush.list(uid)).data,
     enabled: !!uid,
-    staleTime: 60 * 1000,
+    // Refetch every 30s while mounted so the "上次檢查" / "下次檢查"
+    // timestamps in the settings modal stay live as the scheduler
+    // tick updates them in the background.
+    refetchInterval: 30_000,
+    staleTime: 25_000,
   });
 }
 
