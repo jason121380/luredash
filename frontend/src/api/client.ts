@@ -741,6 +741,7 @@ export const api = {
           cache_hit: boolean;
           error_code: number | null;
           retried: boolean;
+          source: string;
         }>;
         top_paths_5m: Array<{ path: string; count: number }>;
         top_accounts_5m: Array<{ account_id: string; count: number }>;
