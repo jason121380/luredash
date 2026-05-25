@@ -212,43 +212,50 @@ function FbUsagePanel() {
   const peak = usageQuery.data?.peak_regain_minutes ?? 0;
   const entries = Object.entries(data);
 
-  // Build a map<business_id, business_name> from the user's accounts.
-  // FB's X-Business-Use-Case-Usage header keys entries by BM id, so
-  // matching the numeric id back to the BM display name makes the
-  // panel readable instead of just digits.
+  // Build a map<bare numeric id, account/business name>. FB's
+  // X-Business-Use-Case-Usage header keys entries by the bare numeric
+  // id of either a Business Manager OR (for accounts not under a BM)
+  // the ad account itself — we used to assume always-BM and labeled
+  // every row "BM <id>", which was wrong for the majority of cases
+  // where the id is actually an ad account.
   //
-  // Caveat — IDs may not always align. A BUC entry can come from
-  // calling a *shared* ad account whose owner BM isn't yours, and
-  // `me/adaccounts` may not surface that owner BM. We still show
-  // the mismatch row so the operator knows usage exists for that
-  // BM even without a name.
-  const bizNameById = useMemo(() => {
+  // Lookup strategy: prefer the ad account name (most BUC entries are
+  // ad account ids), fall back to the BM name. The same map handles
+  // both since FB ids are globally unique across the two namespaces.
+  const nameByBareId = useMemo(() => {
     const m = new Map<string, string>();
     for (const a of accountsQuery.data ?? []) {
+      // Account id is "act_<digits>" — strip the prefix to match the
+      // bare numeric key FB uses in the BUC header.
+      if (a.id && a.name) {
+        const bare = a.id.startsWith("act_") ? a.id.slice(4) : a.id;
+        if (!m.has(bare)) m.set(bare, a.name);
+      }
       const b = a.business;
       if (b?.id && b.name && !m.has(b.id)) m.set(b.id, b.name);
     }
     return m;
   }, [accountsQuery.data]);
 
-  // Dev hint: when nothing matches, the IDs are coming from BMs
+  // Dev hint: when nothing matches, the IDs are coming from accounts
   // outside the user's `me/adaccounts` view (typically shared
   // accounts). Log once so the operator can confirm.
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     if (!usageQuery.data || !accountsQuery.data) return;
     const bucIds = Object.keys(usageQuery.data.data ?? {});
-    const myBmIds = new Set<string>();
+    const knownIds = new Set<string>();
     for (const a of accountsQuery.data) {
-      if (a.business?.id) myBmIds.add(a.business.id);
+      if (a.id) {
+        knownIds.add(a.id.startsWith("act_") ? a.id.slice(4) : a.id);
+      }
+      if (a.business?.id) knownIds.add(a.business.id);
     }
-    const unmatched = bucIds.filter((id) => !myBmIds.has(id));
+    const unmatched = bucIds.filter((id) => !knownIds.has(id));
     if (unmatched.length > 0) {
       console.log(
-        "[fb-usage] BUC BM ids without matching me/adaccounts business.id:",
+        "[fb-usage] BUC ids without matching account/BM:",
         unmatched,
-        "your BM ids:",
-        [...myBmIds],
       );
     }
   }, [usageQuery.data, accountsQuery.data]);
@@ -256,7 +263,7 @@ function FbUsagePanel() {
   return (
     <Card
       title="FB API 節流狀態"
-      subtitle="X-Business-Use-Case-Usage 即時快照,每 10 秒更新。FB 是按 Business Manager(BM)計算 rate limit,不是按廣告帳戶;一個 BM 底下的所有廣告帳戶共用同一個額度。冷卻時間由 Facebook 估算,僅供參考。"
+      subtitle="X-Business-Use-Case-Usage 即時快照,每 10 秒更新。每一列是 FB 個別追蹤 rate limit 的對象(通常是廣告帳戶,少數情況是 Business Manager)。冷卻時間由 Facebook 估算,僅供參考。"
       action={
         <Button
           size="sm"
@@ -282,7 +289,7 @@ function FbUsagePanel() {
           <table className="w-full text-[12px]">
             <thead className="bg-bg text-left text-gray-500">
               <tr>
-                <th className="px-3 py-2 font-semibold">BM</th>
+                <th className="px-3 py-2 font-semibold">帳戶</th>
                 <th className="px-3 py-2 font-semibold">呼叫次數</th>
                 <th className="px-3 py-2 font-semibold">CPU 用量</th>
                 <th className="px-3 py-2 font-semibold">處理時間</th>
@@ -290,11 +297,11 @@ function FbUsagePanel() {
               </tr>
             </thead>
             <tbody>
-              {entries.map(([bizId, u]) => (
+              {entries.map(([bareId, u]) => (
                 <UsageRow
-                  key={bizId}
-                  bizId={bizId}
-                  bizName={bizNameById.get(bizId) ?? ""}
+                  key={bareId}
+                  bareId={bareId}
+                  name={nameByBareId.get(bareId) ?? ""}
                   usage={u}
                 />
               ))}
@@ -307,12 +314,12 @@ function FbUsagePanel() {
 }
 
 function UsageRow({
-  bizId,
-  bizName,
+  bareId,
+  name,
   usage,
 }: {
-  bizId: string;
-  bizName: string;
+  bareId: string;
+  name: string;
   usage: {
     call_count: number;
     total_cputime: number;
@@ -327,13 +334,19 @@ function UsageRow({
     <tr className="border-t border-border">
       <td className="px-3 py-2 align-middle">
         <div className="flex flex-col gap-0.5">
-          {bizName ? <span className="font-semibold text-ink">{bizName}</span> : null}
-          <span
-            className="font-mono text-[11px] text-gray-500"
-            title="Business Manager ID(非廣告帳戶 ID)。FB rate limit 按 BM 計算。"
-          >
-            BM {bizId}
-          </span>
+          {name ? (
+            <span className="font-semibold text-ink">{name}</span>
+          ) : (
+            <span className="font-mono text-[12px] text-ink">{bareId}</span>
+          )}
+          {name ? (
+            <span
+              className="font-mono text-[10px] text-gray-400"
+              title="Facebook 在 X-Business-Use-Case-Usage header 用的 ID"
+            >
+              {bareId}
+            </span>
+          ) : null}
           <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
             {usage.type ? (
               <span className="rounded-full bg-orange-bg px-1.5 py-0.5 font-semibold text-orange">
