@@ -669,6 +669,39 @@ export const api = {
         percent: number | null;
         source: "proc" | "unavailable";
       }>("GET", "/api/engineering/memory"),
+    /** Recent FB Graph API call activity — ring buffer of the last
+     *  ~500 calls plus 5-minute aggregates. Used by the
+     *  「最近 FB 呼叫 / 節流事件」panel to diagnose rate-limit spikes
+     *  by showing WHICH paths and accounts were in flight when FB
+     *  threw 80004. The endpoint is read-only and doesn't itself
+     *  hit FB. */
+    fbCalls: () =>
+      request<{
+        recent: Array<{
+          ts: number;
+          path: string;
+          account_id: string;
+          method: string;
+          ms: number;
+          status: number;
+          bucu_peak_pct: number;
+          cache_hit: boolean;
+          error_code: number | null;
+          retried: boolean;
+        }>;
+        top_paths_5m: Array<{ path: string; count: number }>;
+        top_accounts_5m: Array<{ account_id: string; count: number }>;
+        throttle_events: Array<{
+          ts: number;
+          account_id: string;
+          path: string;
+          code: number;
+        }>;
+        cache_hit_rate_5m: number;
+        account_throttle_until: Record<string, number>;
+        error_count_5m: number;
+        total_5m: number;
+      }>("GET", "/api/engineering/fb-calls"),
   },
 
   nicknames: {
