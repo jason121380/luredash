@@ -686,6 +686,36 @@ async def lifespan(app: FastAPI):
                     ON security_push_configs (owner_fb_user_id)
                     """
                 )
+                # `security_push_logs`: one row per scheduler-tick attempt
+                # against a security_push_configs row. Lets the UI surface
+                # a per-config history (「過去 24 hrs 跑了幾次、各偵測到幾
+                # 個異常」). The config-level last_run_at / fail_count
+                # only tells you the LATEST state — this table is for
+                # debugging trends (e.g. "is this config silently failing
+                # half the time?").
+                #
+                # Volume: ~24 rows/config/day at default poll=60min. Cheap
+                # to keep for months; if it ever grows, prune on
+                # created_at < NOW() - INTERVAL '90 days'.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS security_push_logs (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        config_id UUID NOT NULL REFERENCES security_push_configs(id) ON DELETE CASCADE,
+                        run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        matches_count INT NOT NULL DEFAULT 0,
+                        pushed_groups INT NOT NULL DEFAULT 0,
+                        duration_ms INT NOT NULL DEFAULT 0,
+                        error TEXT
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_sec_push_logs_config_run
+                    ON security_push_logs (config_id, run_at DESC)
+                    """
+                )
                 # ── Per-user FB tokens (Phase A — multi-tenant) ───
                 # Each FB user's long-lived token is persisted here so a
                 # server restart doesn't blow away every user's session.
@@ -4152,39 +4182,54 @@ async def _fetch_campaigns_metadata(
       3. Heavy accounts (e.g. 吸引力 LURE — 100+ campaigns) drop from
          ~5-15 BUCU per /campaigns to ~1-2 BUCU
     """
-    fields_parts = [
-        "id",
-        "name",
-        "status",
-        "objective",
-        "daily_budget",
-        "lifetime_budget",
-        "created_time",
-        "updated_time",
-    ]
-    if include_adsets:
-        # Only 安全監控 reads campaign.adsets (effectiveDailyBudget for
-        # ABO campaigns). Dashboard / Alerts / Finance / Analytics
-        # never touch the nested field, so skipping it here is the
-        # single biggest cheap BUCU win.
-        fields_parts.append("adsets.limit(50){daily_budget,lifetime_budget,status}")
-    fields = ",".join(fields_parts)
+    # Two orthogonal toggles: adsets nesting (expensive payload) and
+    # the `effective_status` archived filter. Either one is enough for
+    # FB to reject the whole call with fb=100 on certain accounts /
+    # burst scenarios. We start with the caller's full request and
+    # progressively drop pieces until something succeeds — same
+    # philosophy as the old 5-tier insights chain, just for the
+    # metadata layer now.
+    base_no_adsets = (
+        "id,name,status,objective,daily_budget,lifetime_budget,"
+        "created_time,updated_time"
+    )
+    adset_nest = "adsets.limit(50){daily_budget,lifetime_budget,status}"
+    full_fields = base_no_adsets + (f",{adset_nest}" if include_adsets else "")
     archived_filter = {"effective_status": '["ACTIVE","PAUSED","ARCHIVED","DELETED"]'}
 
-    # 2-tier fallback: with-archived filter → without. Drops the old
-    # 5-tier matrix because insights expansion is no longer in the
-    # critical path; FB rarely rejects a plain metadata fetch.
     attempts: list[tuple[str, dict]] = []
+    if include_archived and include_adsets:
+        attempts.append(
+            ("full+archived", {"fields": full_fields, "limit": "500", **archived_filter})
+        )
     if include_archived:
-        attempts.append(("meta+archived", {"fields": fields, "limit": "500", **archived_filter}))
-    attempts.append(("meta", {"fields": fields, "limit": "500"}))
+        attempts.append(
+            (
+                "no-adsets+archived",
+                {"fields": base_no_adsets, "limit": "500", **archived_filter},
+            )
+        )
+    if include_adsets:
+        attempts.append(("full", {"fields": full_fields, "limit": "500"}))
+    attempts.append(("no-adsets", {"fields": base_no_adsets, "limit": "500"}))
+    # Last-ditch: just id/name/status. Sufficient for the dashboard
+    # tree to render (zero budget / metric data) and for security view
+    # to at least show the campaign existed, instead of nothing.
+    attempts.append(("minimal", {"fields": "id,name,status", "limit": "500"}))
 
     last_error: Optional[HTTPException] = None
     for tier, params in attempts:
         try:
-            return await fb_get_paginated(
+            camps = await fb_get_paginated(
                 f"{account_id}/campaigns", params, ttl=_CAMPAIGNS_META_TTL_SECONDS
             )
+            if last_error is not None:
+                print(
+                    f"[campaigns meta] {account_id} recovered at tier={tier} "
+                    f"after earlier failure: {last_error.detail}",
+                    flush=True,
+                )
+            return camps
         except HTTPException as e:
             print(
                 f"[campaigns meta] {account_id} tier={tier} failed: "
@@ -4220,25 +4265,54 @@ async def _fetch_campaign_insights_bulk(
     map. The caller will still surface campaigns, just without metric
     numbers — better than failing the whole overview.
     """
-    fields = (
+    # Field sets ordered from richest to leanest. Certain accounts /
+    # objectives reject specific fields (purchase_roas on lead-gen
+    # accounts, action-cost on accounts with no conversion events
+    # defined). We progressively drop optional fields until something
+    # succeeds — matches the metadata fallback's "try less, ship
+    # something" philosophy.
+    full_fields = (
         "campaign_id,spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
         "inline_link_clicks,cost_per_inline_link_click,"
         "cost_per_action_type,purchase_roas,website_purchase_roas"
     )
-    params: dict = {"fields": fields, "level": "campaign", "limit": "500"}
-    if time_range:
-        params["time_range"] = time_range
-    else:
-        params["date_preset"] = date_preset
+    mid_fields = (
+        "campaign_id,spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
+        "inline_link_clicks"
+    )
+    min_fields = "campaign_id,spend,impressions,clicks,ctr,cpc,cpm,actions"
 
-    try:
-        rows = await fb_get_paginated(f"{account_id}/insights", params)
-    except HTTPException as e:
-        print(
-            f"[campaigns insights] {account_id} bulk fetch failed: "
-            f"{e.status_code} {e.detail}",
-            flush=True,
-        )
+    base_params: dict = {"level": "campaign", "limit": "500"}
+    if time_range:
+        base_params["time_range"] = time_range
+    else:
+        base_params["date_preset"] = date_preset
+
+    rows: list = []
+    last_err: Optional[HTTPException] = None
+    for tier, fields in (("full", full_fields), ("mid", mid_fields), ("min", min_fields)):
+        try:
+            rows = await fb_get_paginated(
+                f"{account_id}/insights", {**base_params, "fields": fields}
+            )
+            if last_err is not None:
+                print(
+                    f"[campaigns insights] {account_id} recovered at tier={tier} "
+                    f"after earlier failure: {last_err.detail}",
+                    flush=True,
+                )
+            break
+        except HTTPException as e:
+            print(
+                f"[campaigns insights] {account_id} tier={tier} failed: "
+                f"{e.status_code} {e.detail}",
+                flush=True,
+            )
+            last_err = e
+            continue
+    else:
+        # All tiers failed — non-fatal, return empty so the caller
+        # still surfaces campaign metadata without metric numbers.
         return {}
 
     out: dict[str, dict] = {}
@@ -7764,6 +7838,51 @@ async def delete_security_push_config(config_id: str, fb_user_id: str = Query(..
     return {"ok": True}
 
 
+@app.get("/api/security-push/configs/{config_id}/logs")
+async def list_security_push_logs(
+    config_id: str,
+    fb_user_id: str = Query(...),
+    limit: int = Query(20, ge=1, le=200),
+):
+    """Recent scheduler-tick audit log for a single config — surfaces
+    「過去 N 次跑了幾次,每次偵測到幾個異常,推到幾個群組」 to the
+    settings modal. Ordered newest-first."""
+    _assert_known_user(fb_user_id)
+    pool = _require_db()
+    async with pool.acquire() as conn:
+        owner = await conn.fetchrow(
+            "SELECT owner_fb_user_id FROM security_push_configs WHERE id = $1::uuid",
+            config_id,
+        )
+        if owner is None:
+            raise HTTPException(status_code=404, detail="config 不存在")
+        if owner["owner_fb_user_id"] != fb_user_id:
+            raise HTTPException(status_code=403, detail="無權查看此 config")
+        rows = await conn.fetch(
+            """
+            SELECT run_at, matches_count, pushed_groups, duration_ms, error
+            FROM security_push_logs
+            WHERE config_id = $1::uuid
+            ORDER BY run_at DESC
+            LIMIT $2
+            """,
+            config_id,
+            limit,
+        )
+    return {
+        "data": [
+            {
+                "run_at": r["run_at"].isoformat() if r["run_at"] else None,
+                "matches_count": r["matches_count"],
+                "pushed_groups": r["pushed_groups"],
+                "duration_ms": r["duration_ms"],
+                "error": r["error"],
+            }
+            for r in rows
+        ]
+    }
+
+
 class _TestCardPayload(BaseModel):
     id: str
     name: str
@@ -8603,16 +8722,23 @@ async def _collect_security_matches(
     return matches
 
 
-async def _security_push_run_one(cfg: dict) -> None:
+async def _security_push_run_one(cfg: dict) -> dict:
     """Process a single security_push_configs row: fetch campaigns
-    created since last_run_at, flag matches, push LINE message."""
+    created since last_run_at, flag matches, push LINE message.
+
+    Returns a dict ``{matches_count, pushed_groups}`` so the caller
+    can persist a row into ``security_push_logs`` for audit / debug
+    of「過去 24 hours 跑了幾次,各偵測到幾個異常」. Pure no-op runs
+    (no matches → no push) still return matches_count=0 so the log
+    shows the tick actually executed.
+    """
     owner_uid = cfg["owner_fb_user_id"]
     if not owner_uid:
         raise RuntimeError("config has no owner_fb_user_id")
 
     # Resolve channel access_token
     if _db_pool is None:
-        return
+        return {"matches_count": 0, "pushed_groups": 0}
     async with _db_pool.acquire() as conn:
         ch_row = await conn.fetchrow(
             "SELECT access_token FROM line_channels WHERE id = $1 AND enabled",
@@ -8626,6 +8752,8 @@ async def _security_push_run_one(cfg: dict) -> None:
     if since_dt.tzinfo is None:
         since_dt = since_dt.replace(tzinfo=timezone.utc)
 
+    pushed_groups = 0
+
     # Pull campaigns under the owner's FB token context.
     ctx_token = _current_fb_user_id.set(owner_uid)
     try:
@@ -8633,7 +8761,7 @@ async def _security_push_run_one(cfg: dict) -> None:
             cfg, since_dt, require_anomaly=True, limit=None
         )
         if not matches:
-            return
+            return {"matches_count": 0, "pushed_groups": 0}
 
         # Flex card carousel — one bubble per campaign. Matches the
         # shape the test endpoint sends so the production push looks
@@ -8647,8 +8775,10 @@ async def _security_push_run_one(cfg: dict) -> None:
                     [flex],
                     access_token=access_token,
                 )
+                pushed_groups += 1
             except line_client.LinePushError as e:
                 print(f"[security-push] push group={gid} failed: {e}", flush=True)
+        return {"matches_count": len(matches), "pushed_groups": pushed_groups}
     finally:
         _current_fb_user_id.reset(ctx_token)
 
@@ -8674,8 +8804,11 @@ async def _security_push_tick() -> None:
     for row in due:
         cfg = dict(row)
         cid = cfg["id"]
+        start_mono = time.monotonic()
+        run_result: dict = {"matches_count": 0, "pushed_groups": 0}
+        run_error: Optional[str] = None
         try:
-            await _security_push_run_one(cfg)
+            run_result = await _security_push_run_one(cfg) or run_result
             async with _db_pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -8691,6 +8824,7 @@ async def _security_push_tick() -> None:
                     now,
                 )
         except Exception as e:
+            run_error = str(e)[:500]
             print(f"[security-push] config={cid} run failed: {e}", flush=True)
             async with _db_pool.acquire() as conn:
                 await conn.execute(
@@ -8704,9 +8838,31 @@ async def _security_push_tick() -> None:
                     WHERE id = $1
                     """,
                     cid,
-                    str(e)[:500],
+                    run_error,
                     now,
                 )
+        # Audit row — written for BOTH success and failure paths so the
+        # UI timeline shows ticks that fired but found nothing,
+        # ticks that pushed, and ticks that errored. Best-effort insert
+        # so a logging hiccup never escalates to disabling the config.
+        try:
+            duration_ms = int((time.monotonic() - start_mono) * 1000)
+            async with _db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO security_push_logs
+                        (config_id, run_at, matches_count, pushed_groups, duration_ms, error)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    cid,
+                    now,
+                    int(run_result.get("matches_count", 0)),
+                    int(run_result.get("pushed_groups", 0)),
+                    duration_ms,
+                    run_error,
+                )
+        except Exception as e:
+            print(f"[security-push] config={cid} log insert failed: {e}", flush=True)
 
 
 # ── Cache warm-refresh loop ───────────────────────────────────
