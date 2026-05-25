@@ -8540,6 +8540,45 @@ async def _load_safe_campaign_ids() -> set:
         return set()
 
 
+async def _has_new_campaigns_since(account_id: str, since_dt: datetime) -> bool:
+    """Cheap probe — does this account have any campaign created since
+    ``since_dt``? Returns True/False without fetching the full
+    campaign list.
+
+    Cost: ~0.5 BUCU 處理時間 (single tiny FB call returning at most
+    1 row with just the `id` field), vs ~5-10 BUCU for the full
+    metadata fetch on heavy accounts like !B 新城區.
+
+    Strategy:
+      - Request only `fields=id`, `limit=1`
+      - Filter on `created_time > since_dt` via the `filtering` param
+      - If FB returns any row → True (new campaign exists → caller
+        should do the full fetch + anomaly evaluation)
+      - If empty → False (no new campaigns → skip the entire heavy
+        path)
+
+    Cached via the same per-key TTL as other reads, keyed on the
+    epoch second so consecutive calls within 1s share the result.
+    """
+    since_epoch = int(since_dt.timestamp())
+    params: dict = {
+        "fields": "id",
+        "limit": "1",
+        "filtering": _json.dumps(
+            [
+                {
+                    "field": "created_time",
+                    "operator": "GREATER_THAN",
+                    "value": since_epoch,
+                }
+            ]
+        ),
+    }
+    result = await fb_get(f"{account_id}/campaigns", params)
+    data = result.get("data") or []
+    return len(data) > 0
+
+
 async def _collect_security_matches(
     cfg: dict,
     since_dt: datetime,
@@ -8601,6 +8640,25 @@ async def _collect_security_matches(
 
     async def _scan_one_inner(aid: str) -> list:
         out: list = []
+        # Cheap "has anything new?" probe before the expensive
+        # metadata fetch. 90% of accounts haven't created a campaign
+        # in the last hour; for those, the probe (~0.5 BUCU on FB
+        # processing-time) is enough to skip the full fan-out
+        # (~5-10 BUCU on heavy accounts). This is what cut the
+        # 處理時間 climb on accounts like !B 新城區 — most ticks no
+        # longer touch them at all.
+        try:
+            if not await _has_new_campaigns_since(aid, since_dt):
+                return out
+        except HTTPException as e:
+            # Probe failed (e.g. account doesn't support created_time
+            # filtering). Fall through to the full fetch — better to
+            # spend BUCU than silently miss a real new-campaign alert.
+            print(
+                f"[security-probe] {aid} probe failed, falling through to full fetch: "
+                f"{e.detail}",
+                flush=True,
+            )
         try:
             # include_adsets=True because _effective_daily_budget below
             # reads `c["adsets"]["data"]` to aggregate ABO campaign
