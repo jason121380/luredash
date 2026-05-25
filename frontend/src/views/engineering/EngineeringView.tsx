@@ -313,16 +313,7 @@ function UsageRow({
   return (
     <div className="rounded-lg border border-border bg-bg p-3">
       <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-        {bizName ? (
-          <span className="font-semibold text-ink">{bizName}</span>
-        ) : (
-          <span
-            className="text-gray-400"
-            title="這個 BM 的 ID 沒對到你登入帳號的廣告帳戶 owner。常見原因:你的某個廣告帳戶是被『共用』過來、不屬於你的 BM 成員身分"
-          >
-            (BM 名稱未知 — 共用帳戶或非成員)
-          </span>
-        )}
+        {bizName ? <span className="font-semibold text-ink">{bizName}</span> : null}
         <span
           className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-500"
           title="Business Manager ID(非廣告帳戶 ID)。FB rate limit 按 BM 計算。"
