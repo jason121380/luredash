@@ -1,4 +1,5 @@
 import { api } from "@/api/client";
+import type { SecurityPushTestCard } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
 import { useFbAuth } from "@/auth/FbAuthProvider";
@@ -10,6 +11,7 @@ import { MobileAccountPicker } from "@/components/MobileAccountPicker";
 import { Topbar, TopbarSeparator } from "@/layout/Topbar";
 import { cn } from "@/lib/cn";
 import { type DateConfig, toShortLabel } from "@/lib/datePicker";
+import { Semaphore } from "@/lib/semaphore";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -25,9 +27,12 @@ import {
   formatDayLabel,
   resolveBounds,
 } from "./securityData";
-import type { SecurityPushTestCard } from "@/api/client";
 
 type SecurityTab = "pending" | "safe";
+
+// Module-level cap so the gate is shared across re-renders / re-mounts.
+// Sized to match the backend's `_collect_security_matches` scan_sem(5).
+const activityPrefetchSem = new Semaphore(5);
 
 /**
  * 安全監控 — surfaces newly-created campaigns grouped by day so the
@@ -75,10 +80,7 @@ export function SecurityMonitorView() {
   //   2. The user's date config feeds `buildSecurityDays` only as a
   //      client-side filter on `created_time`, which matches the
   //      view's actual semantics ("campaigns CREATED in this window").
-  const fetchDate = useMemo<DateConfig>(
-    () => ({ preset: "last_90d", from: null, to: null }),
-    [],
-  );
+  const fetchDate = useMemo<DateConfig>(() => ({ preset: "last_90d", from: null, to: null }), []);
   const overview = useMultiAccountOverview(visibleAll, fetchDate, { includeArchived: true });
 
   // SECOND overview query at the user's chosen date — only used to
@@ -144,20 +146,29 @@ export function SecurityMonitorView() {
   // creator name on every card without waiting for the user to expand.
   // Uses the SAME queryKey as `useAccountActivities` in the row so the
   // expand path hits the warmed cache (no double fetch).
+  //
+  // Throttled via a module-level Semaphore(5) so a 30-account view
+  // doesn't open 30 concurrent /activities sockets the moment the
+  // page mounts — that pattern burns the backend's per-account FB
+  // pool and starves the dashboard tab for the same window. 5 in
+  // flight matches the backend's own scan_sem(5) in
+  // `_collect_security_matches`. staleTime aligned to 5min so the
+  // cache key matches `useAccountActivities` exactly.
   const { status: authStatus } = useFbAuth();
   const activityQueries = useQueries({
     queries: visibleAll.map((acc) => ({
       queryKey: ["activities", acc.id, activitiesBounds.since, activitiesBounds.until],
-      queryFn: async (): Promise<FbActivity[]> => {
-        const resp = await api.accounts.activities(
-          acc.id,
-          activitiesBounds.since,
-          activitiesBounds.until,
-        );
-        return resp.data ?? [];
-      },
+      queryFn: (): Promise<FbActivity[]> =>
+        activityPrefetchSem.run(async () => {
+          const resp = await api.accounts.activities(
+            acc.id,
+            activitiesBounds.since,
+            activitiesBounds.until,
+          );
+          return resp.data ?? [];
+        }),
       enabled: authStatus === "auth" && !!acc.id,
-      staleTime: 2 * 60 * 1000,
+      staleTime: 5 * 60 * 1000,
     })),
   });
 
@@ -294,10 +305,7 @@ export function SecurityMonitorView() {
             // treats as "honest mode 100%". The fake time-based
             // curve is more honest here since we don't have real
             // per-account progress to surface.
-            <LoadingState
-              title="載入廣告資料中..."
-              subtitle="正在從 Facebook 拉取活動清單"
-            />
+            <LoadingState title="載入廣告資料中..." subtitle="正在從 Facebook 拉取活動清單" />
           ) : visibleAll.length === 0 ? (
             <EmptyState>請先在設定中啟用廣告帳戶</EmptyState>
           ) : (

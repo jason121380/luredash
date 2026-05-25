@@ -33,7 +33,6 @@ const importLaunch = () => import("@/views/launch/QuickLaunchView");
 const importSettings = () => import("@/views/settings/SettingsView");
 const importLinePush = () => import("@/views/settings/LinePushSettingsView");
 const importPaymentAccounts = () => import("@/views/settings/PaymentAccountsView");
-const importEngineering = () => import("@/views/engineering/EngineeringView");
 const importPricing = () => import("@/views/pricing/PricingView");
 const importBilling = () => import("@/views/billing/BillingView");
 
@@ -114,9 +113,6 @@ const PaymentAccountsView = lazy(() =>
     default: m.PaymentAccountsView,
   })),
 );
-const EngineeringView = lazy(() =>
-  withReloadOnChunkError(importEngineering)().then((m) => ({ default: m.EngineeringView })),
-);
 const PricingView = lazy(() =>
   withReloadOnChunkError(importPricing)().then((m) => ({ default: m.PricingView })),
 );
@@ -160,9 +156,6 @@ export const prefetchView = (path: string): void => {
     case "/payment-accounts":
       void importPaymentAccounts();
       return;
-    case "/engineering":
-      void importEngineering();
-      return;
     case "/pricing":
       void importPricing();
       return;
@@ -193,7 +186,6 @@ export const router = createBrowserRouter([
       { path: "settings", element: lazyView(<SettingsView />) },
       { path: "line-push", element: lazyView(<LinePushSettingsView />) },
       { path: "payment-accounts", element: lazyView(<PaymentAccountsView />) },
-      { path: "engineering", element: lazyView(<EngineeringView />) },
       { path: "pricing", element: lazyView(<PricingView />) },
       { path: "billing", element: lazyView(<BillingView />) },
       { path: "*", element: <Navigate to="/dashboard" replace /> },
