@@ -7614,22 +7614,24 @@ async def _scheduler_loop() -> None:
 
 async def _security_push_enabled() -> bool:
     """Runtime gate for the security-push tick. Reads
-    `shared_settings.security_push_master_enabled` — defaults to True
-    when the row is missing so the feature is opt-out rather than
-    opt-in. Any non-False value enables.
+    `shared_settings.security_push_master_enabled` — defaults to
+    **False** (disabled) when the row is missing. The feature is
+    opt-in via the UI checkbox; without an explicit True, the
+    scheduler stays quiet so it never silently burns FB rate-limit
+    budget on a fresh deploy.
     """
     if _db_pool is None:
-        return True
+        return False
     try:
         async with _db_pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT value FROM shared_settings WHERE key = 'security_push_master_enabled'"
             )
     except Exception:
-        return True  # fail-open: don't silently disable on DB hiccups
+        return False  # fail-closed: any DB issue → don't push
     if row is None or row["value"] is None:
-        return True
-    return row["value"] is not False
+        return False
+    return row["value"] is True
 
 
 # ── 安全監控推播 (event-driven push on new-campaign anomalies) ───
