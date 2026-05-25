@@ -532,11 +532,14 @@ function FbCallsPanel() {
     return nameByActId.get(aid) ?? null;
   };
 
+  const [hideCacheHits, setHideCacheHits] = useState(false);
   const recent = useMemo(() => {
     const r = data?.recent ?? [];
     // Newest first for the table — backend returns oldest-first.
-    return [...r].reverse().slice(0, 50);
-  }, [data?.recent]);
+    const reversed = [...r].reverse();
+    const filtered = hideCacheHits ? reversed.filter((e) => !e.cache_hit) : reversed;
+    return filtered.slice(0, 50);
+  }, [data?.recent, hideCacheHits]);
 
   const cooldowns = useMemo(() => {
     const ent = Object.entries(data?.account_throttle_until ?? {});
@@ -555,19 +558,99 @@ function FbCallsPanel() {
   };
   const formatStatusBadge = (e: NonNullable<typeof recent>[number]) => {
     if (e.cache_hit) {
-      return <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] text-emerald-700">cache</span>;
+      return (
+        <span
+          className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-700"
+          title="本機快取命中 — 沒打 FB,免費"
+        >
+          快取
+        </span>
+      );
     }
     if (e.error_code === 80004 && e.status === 429 && e.ms === 0) {
-      return <span className="rounded bg-red-100 px-1.5 py-0.5 font-mono text-[10px] text-red-700">gated</span>;
+      return (
+        <span
+          className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700"
+          title="該帳戶在 80004 冷卻中,被前端 gate 擋下沒打 FB"
+        >
+          已擋
+        </span>
+      );
     }
-    const tone =
-      e.status >= 500
-        ? "bg-red-100 text-red-700"
-        : e.status >= 400
-          ? "bg-amber-100 text-amber-700"
-          : "bg-gray-100 text-gray-700";
+    if (e.status === 200) {
+      return (
+        <span
+          className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-700"
+          title="HTTP 200:FB 回應成功"
+        >
+          成功
+        </span>
+      );
+    }
+    if (e.status === 429) {
+      return (
+        <span
+          className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700"
+          title="HTTP 429:FB 節流(被 rate limit)"
+        >
+          節流
+        </span>
+      );
+    }
+    if (e.status === 504) {
+      return (
+        <span
+          className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700"
+          title="HTTP 504:後端等 FB 等超過 20s 逾時"
+        >
+          逾時
+        </span>
+      );
+    }
+    if (e.status >= 500) {
+      return (
+        <span
+          className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700"
+          title={`HTTP ${e.status}:FB 或我們的伺服器出錯`}
+        >
+          伺服器錯
+        </span>
+      );
+    }
+    if (e.status >= 400) {
+      return (
+        <span
+          className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700"
+          title={`HTTP ${e.status}:請求參數被 FB 拒絕(看路徑欄的 fb=<code>)`}
+        >
+          參數錯
+        </span>
+      );
+    }
     return (
-      <span className={cn("rounded px-1.5 py-0.5 font-mono text-[10px]", tone)}>{e.status}</span>
+      <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-700">
+        {e.status}
+      </span>
+    );
+  };
+  // 觸發來源中文化 + 配色,讓 operator 一眼分辨「背景在跑什麼」
+  // vs「我自己剛點了什麼」。Source 由後端透過 contextvar 傳上來。
+  const formatSourceBadge = (source: string) => {
+    const meta: Record<string, { label: string; cls: string }> = {
+      warm: { label: "Cache 預熱", cls: "bg-blue-100 text-blue-700" },
+      "line-push": { label: "LINE 推播", cls: "bg-purple-100 text-purple-700" },
+      "security-push": { label: "安全自動掃", cls: "bg-orange-100 text-orange-700" },
+      "security-probe": { label: "安全 probe", cls: "bg-amber-50 text-amber-700" },
+      "security-test": { label: "安全測試", cls: "bg-amber-100 text-amber-700" },
+      view: { label: "瀏覽畫面", cls: "bg-gray-100 text-gray-700" },
+      report: { label: "報告頁", cls: "bg-gray-100 text-gray-700" },
+      unknown: { label: "其他", cls: "bg-gray-50 text-gray-500" },
+    };
+    const m = meta[source] ?? { label: source || "其他", cls: "bg-gray-50 text-gray-500" };
+    return (
+      <span className={cn("whitespace-nowrap rounded px-1.5 py-0.5 text-[10px]", m.cls)}>
+        {m.label}
+      </span>
     );
   };
 
@@ -732,9 +815,28 @@ function FbCallsPanel() {
 
           {/* Recent calls table */}
           <div className="mt-3">
-            <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
-              最近 50 筆呼叫(新到舊)
-            </h3>
+            <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
+                最近 50 筆呼叫(新到舊)
+              </h3>
+              <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-gray-500">
+                <input
+                  type="checkbox"
+                  className="custom-cb"
+                  checked={hideCacheHits}
+                  onChange={(e) => setHideCacheHits(e.currentTarget.checked)}
+                />
+                只看真實 FB 呼叫(隱藏 cache)
+              </label>
+            </div>
+            <p className="mb-2 text-[11px] leading-relaxed text-gray-500">
+              <b className="text-emerald-700">快取</b> = 從本機快取回答,沒打 FB,不算 BUCU。
+              <b className="ml-2 text-gray-700">成功</b> = 真的呼叫 FB 成功。
+              <b className="ml-2 text-amber-700">參數錯 / 節流 / 逾時</b> = 真的呼叫但 FB 拒絕或太慢。
+              <b className="ml-2 text-red-700">已擋</b> = 該帳戶在冷卻中,系統主動擋下。
+              「來源」欄分辨是背景任務還是你剛剛點了什麼。同一帳戶連續看到 3 筆「快取」
+              通常是 cache 預熱每 60s 刷一次熱門帳戶,免費的別緊張。
+            </p>
             {recent.length === 0 ? (
               <div className="text-[12px] text-gray-400">尚無呼叫紀錄</div>
             ) : (
@@ -742,11 +844,42 @@ function FbCallsPanel() {
                 <table className="w-full text-[11px]">
                   <thead className="bg-bg text-left text-gray-500">
                     <tr>
-                      <th className="px-2 py-1 font-semibold">時間</th>
-                      <th className="px-2 py-1 font-semibold">狀態</th>
-                      <th className="px-2 py-1 font-semibold">ms</th>
-                      <th className="px-2 py-1 font-semibold">BUCU%</th>
-                      <th className="px-2 py-1 font-semibold">路徑</th>
+                      <th
+                        className="px-2 py-1 font-semibold"
+                        title="FB 呼叫發生的本機時間"
+                      >
+                        時間
+                      </th>
+                      <th
+                        className="px-2 py-1 font-semibold"
+                        title="cache = 走快取沒打 FB · 200 = 成功 · 4xx/5xx = 出錯"
+                      >
+                        狀態
+                      </th>
+                      <th
+                        className="px-2 py-1 font-semibold"
+                        title="哪個程式碼路徑觸發了這次呼叫(背景任務 / user 動作 / 自動 cache 預熱 etc)"
+                      >
+                        來源
+                      </th>
+                      <th
+                        className="px-2 py-1 font-semibold"
+                        title="本次呼叫耗時(毫秒)。cache hit 為 0"
+                      >
+                        ms
+                      </th>
+                      <th
+                        className="px-2 py-1 font-semibold"
+                        title="打完當下,FB header 回報的所有業務 BUCU 最高值"
+                      >
+                        BUCU%
+                      </th>
+                      <th
+                        className="px-2 py-1 font-semibold"
+                        title="FB Graph API 端點。act_xxx 後面是廣告帳戶 ID"
+                      >
+                        路徑
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="font-mono">
@@ -756,6 +889,7 @@ function FbCallsPanel() {
                         <tr key={`${e.ts}-${idx}`} className="border-t border-border">
                           <td className="px-2 py-1 text-gray-500">{formatTs(e.ts)}</td>
                           <td className="px-2 py-1">{formatStatusBadge(e)}</td>
+                          <td className="px-2 py-1">{formatSourceBadge(e.source)}</td>
                           <td className="px-2 py-1 text-right text-gray-600">{e.ms}</td>
                           <td className="px-2 py-1 text-right text-gray-600">{e.bucu_peak_pct}</td>
                           <td className="truncate px-2 py-1 text-ink" title={e.path}>

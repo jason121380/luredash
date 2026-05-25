@@ -3,11 +3,9 @@ import { queryClient } from "@/lib/queryClient";
 import { ScanHistoryModal, appendScanHistory } from "./ScanHistoryModal";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
-import { AcctSidebarToggle } from "@/components/AcctSidebarToggle";
 import { DatePicker } from "@/components/DatePicker";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadingState } from "@/components/LoadingState";
-import { MobileAccountPicker } from "@/components/MobileAccountPicker";
 import { Topbar, TopbarSeparator } from "@/layout/Topbar";
 import { cn } from "@/lib/cn";
 import { type DateConfig, toShortLabel } from "@/lib/datePicker";
@@ -15,7 +13,6 @@ import { useAccountsStore } from "@/stores/accountsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertAccountPanel } from "../alerts/AlertAccountPanel";
 import { SecurityCampaignRow } from "./SecurityCampaignRow";
 import { SecurityPushSettingsModal } from "./SecurityPushSettingsModal";
 import {
@@ -57,8 +54,6 @@ export function SecurityMonitorView() {
   const allAccounts = accountsQuery.data ?? [];
   const visibleAll = useAccountsStore((s) => s.visibleAccounts)(allAccounts);
 
-  const selectedAcctId = useUiStore((s) => s.alertSelectedAcctId);
-  const setSelectedAcctId = useUiStore((s) => s.setAlertSelectedAcctId);
   const settingsReady = useUiStore((s) => s.settingsReady);
 
   const safeIds = useSecurityStore((s) => s.safeIds);
@@ -141,12 +136,10 @@ export function SecurityMonitorView() {
     return map;
   }, [spendOverview.campaigns]);
 
-  const scopedCampaigns = useMemo(() => {
-    if (selectedAcctId === null) return overview.campaigns;
-    return overview.campaigns.filter((c) => c._accountId === selectedAcctId);
-  }, [overview.campaigns, selectedAcctId]);
-
-  const allDays = useMemo(() => buildSecurityDays(scopedCampaigns, date), [scopedCampaigns, date]);
+  const allDays = useMemo(
+    () => buildSecurityDays(overview.campaigns, date),
+    [overview.campaigns, date],
+  );
 
   // Per-tab counts (drive the tab labels) — computed once from `allDays`
   // so both numbers always sum to the unfiltered total.
@@ -251,16 +244,16 @@ export function SecurityMonitorView() {
 
   return (
     <>
-      <Topbar title="安全監控" titleAction={<AcctSidebarToggle />}>
+      <Topbar title="安全監控">
         <div className="flex items-center gap-2 md:gap-3">
-          <MobileAccountPicker
-            accounts={visibleAll}
-            selectedId={selectedAcctId}
-            onSelect={setSelectedAcctId}
-            className="bg-transparent px-0 py-0"
+          {/* 安全監控限定到「上個月」為止 — 立即掃描 fetch 固定
+              last_90d,選 last_90d 或更久的自訂區間會看不到資料。
+              拿掉 custom 日曆,只留 6 個 preset。 */}
+          <DatePicker
+            value={date}
+            onChange={setDate}
+            allowedPresets={["today", "yesterday", "last_7d", "last_30d", "this_month", "last_month"]}
           />
-          <TopbarSeparator />
-          <DatePicker value={date} onChange={setDate} />
           <TopbarSeparator />
           {lastScanAt && (
             <span className="hidden whitespace-nowrap text-[11px] text-gray-400 md:inline">
@@ -379,14 +372,9 @@ export function SecurityMonitorView() {
       <ScanHistoryModal open={historyOpen} onOpenChange={setHistoryOpen} />
 
       <div className="flex min-w-0 items-start md:flex-row">
-        {/* Desktop sidebar (≥768px) */}
-        <div className="hidden md:flex">
-          <AlertAccountPanel
-            accounts={visibleAll}
-            selectedAccountId={selectedAcctId}
-            onSelect={setSelectedAcctId}
-          />
-        </div>
+        {/* 帳戶清單面板已移除 — 安全監控是 review 用,只關心
+            「跨帳戶有哪些新建立的可疑活動」。要看單一帳戶細節
+            (insights / 廣告組合 / 廣告) 請回儀表板。 */}
 
         <div className="min-w-0 flex-1 p-3 md:p-5">
           {!scanRequested ? (

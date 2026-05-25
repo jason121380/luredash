@@ -66,6 +66,22 @@ import contextvars
 _current_fb_user_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "current_fb_user_id", default=None
 )
+# 觸發來源 — propagates the "why are we making this FB call?" tag down
+# from the entry point (route handler / scheduler tick / warm loop)
+# so the ring buffer can surface it to the operator. Used purely for
+# diagnostics; no behavior changes based on the source.
+#
+# Known values (frontend formats these in plain Chinese):
+#   dashboard / report / breakdown / share-page / settings  — user views
+#   warm                                                     — cache warm loop
+#   line-push                                                — campaign LINE 推播 scheduler
+#   security-push                                            — 安全監控自動掃 scheduler
+#   security-probe                                           — 安全監控的「有沒有新東西?」cheap probe
+#   security-test                                            — 推播設定 modal 的「測試」按鈕
+#   unknown                                                  — fallback (some helper that didn't tag)
+_fb_call_source: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "fb_call_source", default="unknown"
+)
 # In-memory set of FB user ids that have successfully completed
 # `POST /api/auth/token`. Persisted to `shared_settings._fb_known_users`
 # so it survives restarts. Used by `_assert_known_user()` to reject
@@ -1404,6 +1420,7 @@ def _log_fb_call(
                 "cache_hit": cache_hit,
                 "error_code": error_code,
                 "retried": retried,
+                "source": _fb_call_source.get(),
             }
         )
     except Exception:
@@ -8099,6 +8116,7 @@ async def _scheduler_tick() -> None:
     overlapping ticks) never grab the same row — each row is owned
     by exactly one worker for the duration of the transaction.
     """
+    _fb_call_source.set("line-push")
     if _db_pool is None:
         return
     now = datetime.now(timezone.utc)
@@ -8674,6 +8692,7 @@ async def _collect_security_matches(
         # (~5-10 BUCU on heavy accounts). This is what cut the
         # 處理時間 climb on accounts like !B 新城區 — most ticks no
         # longer touch them at all.
+        probe_token = _fb_call_source.set("security-probe")
         try:
             if not await _has_new_campaigns_since(aid, since_dt):
                 return out
@@ -8686,6 +8705,8 @@ async def _collect_security_matches(
                 f"{e.detail}",
                 flush=True,
             )
+        finally:
+            _fb_call_source.reset(probe_token)
         try:
             # include_adsets=True because _effective_daily_budget below
             # reads `c["adsets"]["data"]` to aggregate ABO campaign
@@ -8898,6 +8919,7 @@ async def _security_push_run_one(cfg: dict) -> dict:
 async def _security_push_tick() -> None:
     """Find due security_push_configs and process each. Mirrors the
     LIMIT 50 + FOR UPDATE SKIP LOCKED pattern from _scheduler_tick."""
+    _fb_call_source.set("security-push")
     if _db_pool is None:
         return
     now = datetime.now(timezone.utc)
@@ -8995,6 +9017,7 @@ _WARM_THROTTLE_BACKOFF_S = 600
 
 
 async def _cache_warm_tick() -> None:
+    _fb_call_source.set("warm")
     now = time.monotonic()
     if _last_ads_throttle_at and (now - _last_ads_throttle_at) < _WARM_THROTTLE_BACKOFF_S:
         return

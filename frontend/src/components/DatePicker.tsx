@@ -27,9 +27,23 @@ export interface DatePickerProps {
   value: DateConfig;
   onChange: (config: DateConfig) => void;
   defaultPreset?: DatePreset;
+  /** Restrict the preset list (and hide the custom calendar pane).
+   * Used by 安全監控 to cap range at last_30d / 上個月 so the user
+   * can't pick dates older than what 立即掃描 actually fetches
+   * (last_90d). When set, the calendar / custom range UI is removed
+   * entirely — the picker becomes a flat preset chooser. */
+  allowedPresets?: ReadonlyArray<Exclude<DatePreset, "custom">>;
 }
 
-export function DatePicker({ value, onChange }: DatePickerProps) {
+export function DatePicker({ value, onChange, allowedPresets }: DatePickerProps) {
+  const presets = useMemo(
+    () =>
+      allowedPresets
+        ? DP_PRESETS.filter((p) => allowedPresets.includes(p.value))
+        : DP_PRESETS,
+    [allowedPresets],
+  );
+  const hideCalendar = !!allowedPresets;
   const [open, setOpen] = useState(false);
   const [picking, setPicking] = useState<"from" | "to">("from");
   const [customFrom, setCustomFrom] = useState<string | null>(
@@ -153,7 +167,7 @@ export function DatePicker({ value, onChange }: DatePickerProps) {
         >
           {/* Presets — horizontal scrolling pills on mobile, vertical column on desktop */}
           <div className="flex shrink-0 gap-1.5 overflow-x-auto border-b border-border p-2 md:w-[150px] md:flex-col md:gap-0 md:overflow-visible md:border-r md:border-b-0">
-            {DP_PRESETS.map((preset) => {
+            {presets.map((preset) => {
               const active = value.preset === preset.value;
               return (
                 <button
@@ -180,38 +194,40 @@ export function DatePicker({ value, onChange }: DatePickerProps) {
             })}
           </div>
 
-          <div className="relative flex flex-col">
-            {/* Calendar — always interactive, no "自訂" gate. First
-                click sets from, second click sets to and auto-applies. */}
-            <Calendar
-              viewDate={viewDate}
-              onPrev={() =>
-                setViewDate(new Date(viewDate.getFullYear(), viewDate.getMonth() - 1, 1))
-              }
-              onNext={() =>
-                setViewDate(new Date(viewDate.getFullYear(), viewDate.getMonth() + 1, 1))
-              }
-              onSelectDay={selectDay}
-              from={customFrom ?? range.start}
-              to={customTo ?? range.end}
-              picking={picking}
-            />
+          {!hideCalendar && (
+            <div className="relative flex flex-col">
+              {/* Calendar — always interactive, no "自訂" gate. First
+                  click sets from, second click sets to and auto-applies. */}
+              <Calendar
+                viewDate={viewDate}
+                onPrev={() =>
+                  setViewDate(new Date(viewDate.getFullYear(), viewDate.getMonth() - 1, 1))
+                }
+                onNext={() =>
+                  setViewDate(new Date(viewDate.getFullYear(), viewDate.getMonth() + 1, 1))
+                }
+                onSelectDay={selectDay}
+                from={customFrom ?? range.start}
+                to={customTo ?? range.end}
+                picking={picking}
+              />
 
-            {/* Footer — always shows the current range (or the draft
-                during a custom pick). No apply button: second calendar
-                click auto-applies. */}
-            <div className="px-4 pb-3">
-              <div className="flex flex-wrap items-center gap-2 border-t border-border pt-2.5 text-xs text-gray-500">
-                <span className="rounded-md bg-orange-bg px-2.5 py-1 font-medium text-orange">
-                  {customFrom ?? range.start ?? "開始日期"}
-                </span>
-                <span className="text-gray-300">→</span>
-                <span className="rounded-md bg-orange-bg px-2.5 py-1 font-medium text-orange">
-                  {customTo ?? range.end ?? "結束日期"}
-                </span>
+              {/* Footer — always shows the current range (or the draft
+                  during a custom pick). No apply button: second calendar
+                  click auto-applies. */}
+              <div className="px-4 pb-3">
+                <div className="flex flex-wrap items-center gap-2 border-t border-border pt-2.5 text-xs text-gray-500">
+                  <span className="rounded-md bg-orange-bg px-2.5 py-1 font-medium text-orange">
+                    {customFrom ?? range.start ?? "開始日期"}
+                  </span>
+                  <span className="text-gray-300">→</span>
+                  <span className="rounded-md bg-orange-bg px-2.5 py-1 font-medium text-orange">
+                    {customTo ?? range.end ?? "結束日期"}
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
