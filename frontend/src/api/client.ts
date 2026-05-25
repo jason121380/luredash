@@ -497,6 +497,13 @@ export const api = {
   },
 
   campaigns: {
+    /** Single campaign + insights — used by the report / share page so
+     * we don't have to pull the whole account just to find one row.
+     * Backend: GET /api/campaigns/{id}?date_preset=X → 1 cheap FB call. */
+    get: (campaignId: string, date: DateConfig) =>
+      request<{ data: FbCampaign }>("GET", `/api/campaigns/${campaignId}`, {
+        query: dateParams(date),
+      }),
     adsets: (campaignId: string, date: DateConfig) =>
       request<{ data: FbAdset[] }>("GET", `/api/campaigns/${campaignId}/adsets`, {
         query: dateParams(date),
@@ -619,7 +626,7 @@ export const api = {
     batch: (
       accountIds: string[],
       date: DateConfig,
-      opts?: { includeArchived?: boolean; lite?: boolean },
+      opts?: { includeArchived?: boolean; lite?: boolean; includeAdsets?: boolean },
     ) =>
       request<{
         data: Record<
@@ -636,6 +643,11 @@ export const api = {
           ...dateParams(date),
           include_archived: opts?.includeArchived ? "true" : undefined,
           lite: opts?.lite ? "true" : undefined,
+          // Adset nesting is only needed by 安全監控's effectiveDailyBudget.
+          // Backend defaults to false (saves ~20-30% FB BUCU on dashboard
+          // / alerts / finance); pass true only from views that read
+          // `campaign.adsets.data`.
+          include_adsets: opts?.includeAdsets ? "true" : undefined,
         },
       }),
   },

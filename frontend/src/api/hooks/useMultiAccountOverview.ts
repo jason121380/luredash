@@ -104,7 +104,7 @@ export interface MultiAccountOverviewResult {
 export function useMultiAccountOverview(
   accounts: FbAccount[],
   date: DateConfig,
-  opts: { includeArchived?: boolean } = {},
+  opts: { includeArchived?: boolean; includeAdsets?: boolean } = {},
 ): MultiAccountOverviewResult {
   const { status } = useFbAuth();
 
@@ -131,7 +131,7 @@ export function useMultiAccountOverview(
 
   // Phase 1: lite (no insights — fast)
   const liteQuery = useQuery({
-    queryKey: ["overview-lite", idsKey, date, !!opts.includeArchived],
+    queryKey: ["overview-lite", idsKey, date, !!opts.includeArchived, !!opts.includeAdsets],
     queryFn: async () => {
       if (sortedIds.length === 0) {
         return { data: {} } as Awaited<ReturnType<typeof api.overview.batch>>;
@@ -150,7 +150,7 @@ export function useMultiAccountOverview(
   // change so a stale snapshot for a different combo is correctly
   // ignored.
   const fullQuery = useQuery({
-    queryKey: ["overview", idsKey, date, !!opts.includeArchived],
+    queryKey: ["overview", idsKey, date, !!opts.includeArchived, !!opts.includeAdsets],
     queryFn: async () => {
       if (sortedIds.length === 0) {
         return { data: {} } as Awaited<ReturnType<typeof api.overview.batch>>;

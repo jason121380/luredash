@@ -24,20 +24,28 @@ export function useReportAds(adsetId: string | null, date: DateConfig, enabled: 
  * they work without the viewer being logged into Facebook. If the
  * team admin's token expires / server restarts with no re-login,
  * every request here returns 401 and the page shows an error state.
+ *
+ * Cold-load cost: previously this hit `/api/accounts/{id}/campaigns`
+ * (whole account) then filtered to one — wasteful for heavy accounts
+ * like 吸引力 LURE where FB had to compute insights for 100+ campaigns
+ * to surface one. Now uses the single-campaign endpoint:
+ * `/api/campaigns/{id}?date_preset=X` → 1 cheap FB call. `accountId`
+ * is still accepted in the signature for back-compat but no longer
+ * required (kept so callers don't break).
  */
 export function useReportCampaign(
   campaignId: string | null,
-  accountId: string | null,
+  _accountId: string | null,
   date: DateConfig,
 ) {
-  const enabled = !!campaignId && !!accountId;
+  const enabled = !!campaignId;
 
   const campaignQuery = useQuery({
-    queryKey: ["report-campaign", accountId, campaignId, date],
+    queryKey: ["report-campaign", campaignId, date],
     queryFn: async (): Promise<FbCampaign | null> => {
-      if (!accountId || !campaignId) return null;
-      const resp = await api.accounts.campaigns(accountId, date, true);
-      return resp.data?.find((c) => c.id === campaignId) ?? null;
+      if (!campaignId) return null;
+      const resp = await api.campaigns.get(campaignId, date);
+      return resp.data ?? null;
     },
     enabled,
     staleTime: 5 * 60_000,
