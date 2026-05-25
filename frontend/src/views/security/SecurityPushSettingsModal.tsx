@@ -11,6 +11,7 @@ import {
   useSecurityPushConfigs,
   useTestSecurityPushConfig,
 } from "@/api/hooks/useSecurityPush";
+import { useSetSharedSetting, useSharedSettings } from "@/api/hooks/useSettings";
 import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
 import { toast } from "@/components/Toast";
@@ -55,6 +56,14 @@ export function SecurityPushSettingsModal({
   const configsQuery = useSecurityPushConfigs();
   const configs = configsQuery.data ?? [];
 
+  // Master switch — flipped via the「每小時檢查並推播」checkbox,
+  // stored team-wide in shared_settings.security_push_master_enabled.
+  // Defaults to true (enabled) so the feature is opt-out.
+  const sharedQuery = useSharedSettings();
+  const setShared = useSetSharedSetting();
+  const masterEnabledRaw = sharedQuery.data?.security_push_master_enabled;
+  const masterEnabled = masterEnabledRaw === undefined ? true : masterEnabledRaw !== false;
+
   return (
     <Modal
       open={open}
@@ -73,13 +82,34 @@ export function SecurityPushSettingsModal({
       width={560}
     >
       {state.mode === "list" ? (
-        <ConfigList
-          configs={configs}
-          loading={configsQuery.isLoading}
-          pendingCards={pendingCards}
-          onAdd={() => setState({ mode: "new" })}
-          onEdit={(cfg) => setState({ mode: "edit", cfg })}
-        />
+        <div className="flex flex-col gap-3">
+          <label className="flex cursor-pointer items-start gap-2 rounded-md border border-border bg-bg/40 p-3 text-[13px]">
+            <input
+              type="checkbox"
+              className="custom-cb mt-0.5"
+              checked={masterEnabled}
+              onChange={(e) =>
+                setShared.mutate({
+                  key: "security_push_master_enabled",
+                  value: e.target.checked,
+                })
+              }
+            />
+            <div className="flex-1">
+              <div className="font-semibold text-ink">每小時檢查並推播</div>
+              <div className="mt-0.5 text-[11px] text-gray-500">
+                關掉後系統會暫停所有設定的自動掃描;手動點「測試」仍可運作。
+              </div>
+            </div>
+          </label>
+          <ConfigList
+            configs={configs}
+            loading={configsQuery.isLoading}
+            pendingCards={pendingCards}
+            onAdd={() => setState({ mode: "new" })}
+            onEdit={(cfg) => setState({ mode: "edit", cfg })}
+          />
+        </div>
       ) : (
         <ConfigForm
           initial={state.mode === "edit" ? state.cfg : null}
@@ -365,17 +395,14 @@ function ConfigForm({
         </div>
       </Field>
 
-      <div className="rounded-md border border-orange-border bg-orange-bg/30 px-3 py-2 text-[11px] leading-relaxed text-gray-500">
-        <div className="font-semibold text-orange">
-          ⚠️ 自動推播暫停中 — FB rate limit 恢復後再開啟
-        </div>
-        <div className="mt-1">
-          設定會儲存,但後端排程器不會自動 fire。可使用「測試」按鈕手動確認連線。
-        </div>
-        <div className="mt-1">
+      <div className="rounded-md border border-border bg-bg/40 px-3 py-2 text-[11px] leading-relaxed text-gray-500">
+        <div>
           掃描範圍:你在「廣告帳號設定」中啟用的{" "}
           <span className="font-semibold text-ink">{selectedAccountIds.length}</span> 個帳戶
           {selectedAccountIds.length === 0 && "(請先去啟用帳戶,否則無活動可掃)"}
+        </div>
+        <div className="mt-1">
+          自動掃描頻率每 60 分鐘一次(系統固定值)。上方「每小時檢查並推播」可暫停整個排程。
         </div>
       </div>
 
