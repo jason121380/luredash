@@ -83,9 +83,9 @@ const config: Config = {
       spacing: {
         // Single source of truth for the desktop left-sidebar width.
         // Sidebar + Shell both read it via `w-sidebar` / `ml-sidebar`.
-        // Mobile (<768px) uses a 280px drawer width declared in
+        // Mobile (<768px) uses a 300px drawer width declared in
         // globals.css and is unaffected by this token.
-        sidebar: "180px",
+        sidebar: "200px",
       },
       fontSize: {
         xxs: ["10px", { lineHeight: "1.3" }],

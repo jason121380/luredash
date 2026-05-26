@@ -279,15 +279,15 @@
  * Rather than re-declaring every Tailwind utility class, we target
  * the semantic anchors placed on key layout nodes:
  *   .shell-root    → outermost layout flex
- *   .shell-sidebar → 180px fixed sidebar (desktop; see tailwind
- *                    spacing.sidebar token), 280px drawer on mobile
+ *   .shell-sidebar → 200px fixed sidebar (desktop; see tailwind
+ *                    spacing.sidebar token), 300px drawer on mobile
  *   .shell-main    → right-side content pane
  *   .shell-hamburger → mobile-only toggle button in Topbar
  *
  * On mobile:
  *   - The sidebar slides off-screen and animates back in when
  *     `data-mobile-open="true"` (set by Shell state)
- *   - The main content loses its 180px left margin
+ *   - The main content loses its 200px left margin
  *   - The hamburger button appears in every Topbar
  *   - Flex layouts that use side-by-side panels (dashboard / alerts
  *     / finance / settings) aren't broken: they each use their own
@@ -299,7 +299,7 @@
   .shell-sidebar {
     transform: translateX(-100%);
     transition: transform 0.2s ease-out;
-    width: 280px;
+    width: 300px;
     box-shadow: var(--shadow-md);
     /* Respect the iOS home-indicator safe area so the user dropdown
        is never hidden under it. */
@@ -424,4 +424,3 @@
     grid-template-columns: 1fr !important;
   }
 }
-
