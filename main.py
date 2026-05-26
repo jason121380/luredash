@@ -802,6 +802,27 @@ async def lifespan(app: FastAPI):
                         f"[startup] security_push_configs poll_interval backfill: {backfilled}",
                         flush=True,
                     )
+                # Align existing future schedules to the next whole
+                # hour so deployed configs stop drifting immediately
+                # instead of waiting one more off-minute run.
+                aligned = await conn.execute(
+                    """
+                    UPDATE security_push_configs
+                    SET next_run_at = date_trunc('hour', NOW()) + INTERVAL '1 hour',
+                        updated_at = NOW()
+                    WHERE enabled
+                      AND next_run_at > NOW()
+                      AND (
+                        EXTRACT(MINUTE FROM next_run_at) <> 0
+                        OR EXTRACT(SECOND FROM next_run_at) <> 0
+                      )
+                    """
+                )
+                if aligned and not aligned.endswith(" 0"):
+                    print(
+                        f"[startup] security_push_configs hourly alignment: {aligned}",
+                        flush=True,
+                    )
                 # `security_push_logs`: one row per scheduler-tick attempt
                 # against a security_push_configs row. Lets the UI surface
                 # a per-config history (「過去 24 hrs 跑了幾次、各偵測到幾
@@ -3484,13 +3505,15 @@ async def upsert_shared_setting(key: str, payload: SettingsValuePayload):
                 json.dumps(payload.value),
             )
             if key == "security_push_master_enabled" and payload.value is True:
+                next_run_at = _next_security_push_run_at()
                 await conn.execute(
                     """
                     UPDATE security_push_configs
-                    SET next_run_at = LEAST(next_run_at, NOW()),
+                    SET next_run_at = $1,
                         updated_at = NOW()
                     WHERE enabled
-                    """
+                    """,
+                    next_run_at,
                 )
     print(f"[settings] shared POST key={key!r}", flush=True)
     return {"ok": True}
@@ -8558,6 +8581,21 @@ def _sec_push_row_to_dict(r) -> dict:
     }
 
 
+def _next_security_push_run_at(after: Optional[datetime] = None) -> datetime:
+    """Return the next hourly boundary in UTC for security auto-scan.
+
+    Security auto-scan is intentionally fixed to hourly, but the old
+    `last_run_at + 60 minutes` schedule drifted when a tick started late
+    or the scan took time. Aligning to the next hour keeps runs at
+    09:00, 10:00, 11:00... local time instead of 09:03, 10:04...
+    """
+    base = after or datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    base = base.astimezone(timezone.utc)
+    return base.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+
 def _validate_security_push_payload(p: SecurityPushConfigPayload) -> None:
     if not p.name or not p.name.strip():
         raise HTTPException(status_code=400, detail="name 不可為空")
@@ -8605,6 +8643,7 @@ async def upsert_security_push_config(
     # ~1 hr). 60 min keeps total FB calls per workspace well under
     # budget regardless of account count.
     poll_minutes = 60
+    next_run_at = _next_security_push_run_at()
     async with pool.acquire() as conn:
         if payload.id:
             row = await conn.fetchrow(
@@ -8621,6 +8660,7 @@ async def upsert_security_push_config(
                 SET name = $2, channel_id = $3::uuid, group_ids = $4,
                     account_ids = $5, anomaly_filters = $6,
                     poll_interval_minutes = $7, enabled = $8,
+                    next_run_at = CASE WHEN $8 THEN $9 ELSE next_run_at END,
                     updated_at = NOW()
                 WHERE id = $1::uuid
                 RETURNING *
@@ -8633,6 +8673,7 @@ async def upsert_security_push_config(
                 filters,
                 poll_minutes,
                 payload.enabled,
+                next_run_at,
             )
             return {"ok": True, "data": _sec_push_row_to_dict(updated)}
         created = await conn.fetchrow(
@@ -8642,7 +8683,7 @@ async def upsert_security_push_config(
                 account_ids, anomaly_filters, poll_interval_minutes,
                 enabled, next_run_at
             )
-            VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, $8, NOW())
+            VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9)
             RETURNING *
             """,
             payload.name.strip(),
@@ -8659,6 +8700,7 @@ async def upsert_security_push_config(
             # than intended.
             poll_minutes,
             payload.enabled,
+            next_run_at,
         )
         return {"ok": True, "data": _sec_push_row_to_dict(created)}
 
@@ -10204,6 +10246,7 @@ async def _security_push_tick() -> None:
     for row in due:
         cfg = dict(row)
         cid = cfg["id"]
+        next_run_at = _next_security_push_run_at(now)
         start_mono = time.monotonic()
         run_result: dict = {"matches_count": 0, "pushed_groups": 0}
         run_error: Optional[str] = None
@@ -10214,7 +10257,7 @@ async def _security_push_tick() -> None:
                     """
                     UPDATE security_push_configs
                     SET last_run_at = $2,
-                        next_run_at = $2 + (poll_interval_minutes || ' minutes')::INTERVAL,
+                        next_run_at = $3,
                         last_error = NULL,
                         fail_count = 0,
                         updated_at = $2
@@ -10222,6 +10265,7 @@ async def _security_push_tick() -> None:
                     """,
                     cid,
                     now,
+                    next_run_at,
                 )
         except Exception as e:
             run_error = str(e)[:500]
@@ -10239,7 +10283,7 @@ async def _security_push_tick() -> None:
                     SET last_run_at = $3,
                         last_error = $2,
                         fail_count = fail_count + 1,
-                        next_run_at = $3 + (poll_interval_minutes || ' minutes')::INTERVAL,
+                        next_run_at = $4,
                         updated_at = $3,
                         enabled = CASE WHEN fail_count + 1 >= 5 THEN FALSE ELSE enabled END
                     WHERE id = $1
@@ -10247,6 +10291,7 @@ async def _security_push_tick() -> None:
                     cid,
                     run_error,
                     now,
+                    next_run_at,
                 )
         # Audit row — written for BOTH success and failure paths so the
         # UI timeline shows ticks that fired but found nothing,

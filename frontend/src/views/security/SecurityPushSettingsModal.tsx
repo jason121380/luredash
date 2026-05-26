@@ -80,7 +80,7 @@ export function SecurityPushSettingsModal({
   const configsQuery = useSecurityPushConfigs();
   const configs = configsQuery.data ?? [];
 
-  // Master switch — flipped via the「每小時檢查並推播」checkbox,
+  // Master switch — flipped via the「每小時整點檢查並推播」checkbox,
   // stored team-wide in shared_settings.security_push_master_enabled.
   // Defaults to **false** (off) when missing — feature is opt-in so
   // a fresh deploy doesn't quietly start hitting FB rate-limit.
@@ -121,7 +121,7 @@ export function SecurityPushSettingsModal({
                   {
                     onSuccess: () =>
                       toast(
-                        next ? "已啟用每小時自動檢查" : "已停用自動檢查",
+                        next ? "已啟用每小時整點自動檢查" : "已停用自動檢查",
                         "success",
                       ),
                     onError: (err) =>
@@ -134,7 +134,7 @@ export function SecurityPushSettingsModal({
               }}
             />
             <div className="flex-1">
-              <div className="font-semibold text-ink">每小時檢查並推播</div>
+              <div className="font-semibold text-ink">每小時整點檢查並推播</div>
               <div className="mt-0.5 text-[11px] text-gray-500">
                 關掉後系統會暫停所有設定的自動掃描;手動點「測試」仍可運作。
               </div>
@@ -233,7 +233,7 @@ function ConfigList({
                     )}
                   </div>
                   <div className="mt-1 text-[11px] text-gray-500">
-                    {cfg.group_ids.length} 個 LINE 群組 · 每 {cfg.poll_interval_minutes} 分鐘檢查 ·
+                    {cfg.group_ids.length} 個 LINE 群組 · 每小時整點檢查 ·
                     異常:
                     {cfg.anomaly_filters
                       .map((t) => ANOMALY_OPTIONS.find((o) => o.value === t)?.label ?? t)
@@ -471,7 +471,7 @@ function ConfigForm({
           {selectedAccountIds.length === 0 && "(請先去啟用帳戶,否則無活動可掃)"}
         </div>
         <div className="mt-1">
-          自動掃描頻率每 60 分鐘一次(系統固定值)。上方「每小時檢查並推播」可暫停整個排程。
+          自動掃描固定在每小時整點執行(例如 9:00、10:00、11:00)。上方「每小時整點檢查並推播」可暫停整個排程。
         </div>
       </div>
 
