@@ -30,7 +30,7 @@ import { Markdown } from "./Markdown";
  *  Bumped to 2 → wipe on schema change so old corrupt entries
  *  don't show up as half-rendered cards. */
 const LAST_RUN_STORAGE_KEY = "ai-staff-last-run";
-const LAST_RUN_VERSION = 1;
+const LAST_RUN_VERSION = 2;
 interface StoredLastRun {
   version: number;
   generatedAt: string;
@@ -39,13 +39,12 @@ interface StoredLastRun {
 }
 
 /**
- * AI 幕僚 — multi-agent advisor board with NDJSON streaming.
+ * 優化中心 — action-first advisor board with NDJSON streaming.
  *
- * Each click of 「產生分析」 fires `runAgentsStream`, which posts
- * the campaign digest once and progressively fills each card as
- * its agent completes (instead of blocking on the slowest of N).
- * One click = one quota use, regardless of how many agents
- * succeed; if all fail the backend doesn't record the run.
+ * Each click of 「產生分析」 posts the campaign digest once and fills
+ * one synthesized action-plan card. The backend still uses the
+ * specialist prompts as hidden reference material, but the UI only
+ * shows the decision.
  *
  * Polish stack on top of the basic board:
  *   - generated-at relative timestamp on the action bar (ticks
@@ -112,8 +111,8 @@ export function OptimizationView() {
   const dateLabel = toLabel(date);
 
   // Per-card state, plus a top-level "isStreaming" flag separate
-  // from per-card spinners so the action bar can show "X 位專家
-  // 完成 / 6" while results trickle in.
+  // from per-card spinners. The backend currently returns one
+  // synthesized action-plan card.
   type CardState = { advice_md: string | null; error: string | null } | null;
   const [cards, setCards] = useState<Record<string, CardState>>({});
   const [streamingIds, setStreamingIds] = useState<Set<string>>(new Set());
@@ -164,6 +163,7 @@ export function OptimizationView() {
         // If we already have a local copy that's newer (e.g. user
         // is mid-flow on this same browser), don't overwrite.
         if (generatedAt && generatedAt.getTime() >= serverAt.getTime()) return;
+        if (row.payload.version !== LAST_RUN_VERSION) return;
         const nextCards: Record<string, CardState> = {};
         for (const a of row.payload.advice) {
           nextCards[a.agent_id] = { advice_md: a.advice_md, error: a.error };
@@ -215,8 +215,8 @@ export function OptimizationView() {
   // overview-loading gate so users with persisted runs don't see a
   // progress bar on every page open.
   const hasAnyCards = useMemo(
-    () => Object.values(cards).some((c) => c != null),
-    [cards],
+    () => agents.some((a) => cards[a.id] != null),
+    [agents, cards],
   );
   const usage = usageQuery.data;
   const adviceLimit = usage?.limits.agent_advice ?? 0;
@@ -229,10 +229,10 @@ export function OptimizationView() {
   // Generate is gated on having loaded campaign data — no point
   // calling Gemini with an empty digest.
   const canGenerate =
-    !overviewLoading && digests.length > 0 && !isStreaming && !quotaExhausted;
+    agents.length > 0 && !overviewLoading && digests.length > 0 && !isStreaming && !quotaExhausted;
   const isFirstRun = Object.keys(cards).length === 0 && !isStreaming;
   const isLifetime = usage?.agent_advice_period === "lifetime";
-  const completedCount = agents.length - streamingIds.size;
+  const completedCount = Math.max(0, agents.length - streamingIds.size);
 
   async function runStream() {
     abortRef.current?.abort();
@@ -376,7 +376,7 @@ export function OptimizationView() {
               onOpenFilter={() => setFilterModalOpen(true)}
             />
 
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 md:gap-4">
               {agents.map((agent) => (
                 <AgentAdviceCard
                   key={agent.id}
@@ -449,13 +449,13 @@ function ActionBar({
   const hasResults = generatedAt !== null;
 
   return (
-    <div className="flex flex-col gap-3 rounded-2xl border border-border bg-white p-4 md:flex-row md:items-center md:justify-between md:p-5">
+    <div className="flex flex-col gap-3 rounded-lg border border-border bg-white p-4 md:flex-row md:items-center md:justify-between md:p-5">
       <div className="flex flex-col gap-1">
         <div className="flex items-center gap-2 text-[14px] font-bold text-ink">
           {isStreaming
-            ? `${totalAgents} 位 AI 幕僚分析中(${completedCount} / ${totalAgents} 完成)`
+            ? `正在產生行動建議(${completedCount} / ${totalAgents} 完成)`
             : isFirstRun
-              ? `${totalAgents} 位 AI 幕僚為你診斷`
+              ? "產生優化行動建議"
               : "已產生分析"}
           {hasResults && !isStreaming && (
             <span className="rounded-pill bg-bg px-2 py-0.5 text-[11px] font-normal text-gray-500">
@@ -464,7 +464,7 @@ function ActionBar({
           )}
         </div>
         <div className="text-[12px] text-gray-500">
-          將分析{" "}
+          將整理{" "}
           <button
             type="button"
             onClick={onOpenFilter}
@@ -472,7 +472,7 @@ function ActionBar({
           >
             {accountsCount} 個帳戶{filterActive ? " (已篩選)" : ""}
           </button>{" "}
-          下的 {campaignsCount} 個進行中活動。
+          下的 {campaignsCount} 個進行中活動,直接輸出優先 / 次要 / 一般 action。
           {!blockedByTier && (
             <span className="ml-1 text-gray-400">每次點擊扣 1 次配額。</span>
           )}
@@ -522,10 +522,10 @@ interface AgentAdviceCardProps {
 
 function AgentAdviceCard({ agent, state, isLoading }: AgentAdviceCardProps) {
   return (
-    <section className="flex flex-col rounded-2xl border border-border bg-white p-4 md:p-5">
+    <section className="flex flex-col rounded-lg border border-border bg-white p-4 md:p-5">
       <header className="mb-3 flex items-start gap-3">
         <div
-          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-2xl shadow-sm"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[18px] font-bold shadow-sm"
           style={{ backgroundColor: `${agent.color}1a`, color: agent.color }}
           aria-hidden="true"
         >
@@ -533,20 +533,20 @@ function AgentAdviceCard({ agent, state, isLoading }: AgentAdviceCardProps) {
         </div>
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-[15px] font-bold text-ink">{agent.name_zh}</h2>
-          <div className="truncate text-[11px] text-gray-400">{agent.name_en}</div>
+          <div className="truncate text-[11px] text-gray-400">{agent.role_zh}</div>
         </div>
       </header>
 
-      <div className="min-h-[140px] flex-1">
+      <div className="min-h-[220px] flex-1">
         {isLoading ? (
-          <div className="flex h-[140px] items-center justify-center">
+          <div className="flex h-[220px] items-center justify-center">
             <div className="flex flex-col items-center gap-2 text-[12px] text-gray-400">
               <Spinner size={20} />
-              <span>{agent.name_zh}思考中...</span>
+              <span>正在整理 action...</span>
             </div>
           </div>
         ) : state == null ? (
-          <div className="flex h-[140px] items-center justify-center text-[12px] text-gray-400">
+          <div className="flex h-[220px] items-center justify-center text-[12px] text-gray-400">
             點擊上方「產生分析」開始
           </div>
         ) : state.error ? (

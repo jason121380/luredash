@@ -1236,11 +1236,11 @@ export const api = {
   },
 
   optimization: {
-    /** Metadata for the 5 expert agents (id, name, emoji, color, role).
+    /** Metadata for the single optimization action-plan card.
      *  Cached indefinitely — only changes on a deploy. */
     agents: () => request<{ data: AgentMeta[] }>("GET", "/api/optimization/agents"),
     /** Cross-device hydration — returns the most recent persisted
-     *  AI 幕僚 run for this user, or null if none. Frontend calls
+     *  optimization run for this user, or null if none. Frontend calls
      *  this on mount so opening the page on a new device shows
      *  the same advice the user generated elsewhere. Quota-only
      *  legacy rows (no payload) are filtered out server-side. */
@@ -1261,10 +1261,9 @@ export const api = {
           } | null;
         } | null;
       }>("GET", "/api/optimization/last-run", { query: { fb_user_id: fbUserId } }),
-    /** Streaming variant — emits NDJSON, one event per agent as it
-     *  completes (instead of blocking on the slowest of 5). Same
+    /** Streaming variant — emits NDJSON as the action plan completes. Same
      *  quota semantics as runAgents. The caller hands in two
-     *  callbacks: onAgent fires per agent, onDone fires once at
+     *  callbacks: onAgent fires for the action card, onDone fires once at
      *  the end with the new quota state. Throws ApiError for any
      *  pre-flight 4xx (auth, quota exhausted, no campaigns) so the
      *  existing tier-limit modal flow keeps working — those don't
@@ -1337,8 +1336,8 @@ export const api = {
         }
       }
     },
-    /** Click-to-generate fan-out. Backend issues 5 parallel Gemini
-     *  calls (one per expert) and returns them as one response.
+    /** Click-to-generate action plan. Backend performs one synthesized Gemini
+     *  call and returns it as one response.
      *  Counts as ONE quota use against `agent_advice_limit`. */
     runAgents: (input: {
       fbUserId: string;
@@ -1407,7 +1406,7 @@ export interface BillingUsage {
   grace: BillingGrace;
   /** Whether the agent_advice usage counter resets monthly (paid
    *  tiers) or accumulates for the user's lifetime (Free trial).
-   *  Drives the "本月" vs "免費試用" wording on the AI 幕僚 page. */
+   *  Drives the "本月" vs "免費試用" wording on the optimization page. */
   agent_advice_period: "monthly" | "lifetime";
 }
 
@@ -1423,7 +1422,7 @@ export interface BillingGrace {
   period_days: number;
 }
 
-/** Display metadata for one expert agent in the 成效優化中心 board. */
+/** Display metadata for the 成效優化中心 action-plan card. */
 export interface AgentMeta {
   id: string;
   name_zh: string;
@@ -1433,7 +1432,7 @@ export interface AgentMeta {
   color: string;
 }
 
-/** Per-campaign snapshot the frontend ships with every agent-advice
+/** Per-campaign snapshot the frontend ships with every optimization-advice
  *  request. Keep keys snake_case to match the backend Pydantic model. */
 export interface AgentCampaignDigest {
   name: string;
@@ -1474,7 +1473,7 @@ export interface PricingTier {
   line_channels_limit: number;
   line_groups_limit: number;
   monthly_push_limit: number;
-  /** AI 幕僚 monthly run quota. 0 = not included in this tier;
+  /** Optimization advice monthly run quota. 0 = not included in this tier;
    *  -1 = unlimited (Max). */
   agent_advice_limit: number;
 }

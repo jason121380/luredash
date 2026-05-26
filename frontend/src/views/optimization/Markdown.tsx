@@ -11,7 +11,7 @@ import { Fragment } from "react";
  *   `inline code`
  *   blank line → paragraph break
  *
- * Special: any `## 優先處理` (or 「Action」 / 「Priority」 / 「待辦」)
+ * Special: any `## 優先` (or 「Action」 / 「Priority」 / 「待辦」)
  * heading + the blocks following it (until the next h2) are rendered
  * as an orange callout card so the operator's eye lands on the
  * "do this today" list immediately.
@@ -147,8 +147,7 @@ function renderGrouped(blocks: Block[]): React.ReactNode[] {
           className="mt-1 rounded-xl border-l-4 border-orange bg-[#FFF5F0] p-3 shadow-sm"
         >
           <div className="mb-1 flex items-center gap-1.5 text-[12px] font-bold uppercase tracking-wide text-orange">
-            <span aria-hidden>★</span>
-            <span>立即執行</span>
+            <span>優先</span>
           </div>
           <div className="flex flex-col gap-1.5">
             {group.map((g, j) => (
@@ -167,8 +166,8 @@ function renderGrouped(blocks: Block[]): React.ReactNode[] {
 
 function BlockNode({ block, inCallout = false }: { block: Block; inCallout?: boolean }) {
   if (block.type === "h2") {
-    // Hide the literal "優先處理" text inside the callout — the
-    // pinned "★ 立即執行" badge above already does the job.
+    // Hide the literal "優先" text inside the callout — the pinned
+    // label above already does the job.
     if (inCallout) return null;
     return <h2 className="mt-1 text-[14px] font-bold text-ink">{renderInline(block.text)}</h2>;
   }

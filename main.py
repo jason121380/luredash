@@ -918,8 +918,8 @@ async def lifespan(app: FastAPI):
                     "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS agent_advice_limit INT"
                 )
                 # Per-user log of "Generate" button clicks on the
-                # 成效優化中心 page. Each row = ONE quota use (one
-                # click fans out to all 5 agents in parallel).
+                # 成效優化中心 page. Each row = ONE quota use and one
+                # persisted action-plan payload.
                 await conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS agent_advice_runs (
@@ -3799,10 +3799,9 @@ async def _count_user_push_configs(fb_user_id: str) -> int:
 
 
 async def _count_monthly_advice_runs(fb_user_id: str) -> int:
-    """AI 幕僚 generation clicks this user has fired so far this
+    """Optimization generation clicks this user has fired so far this
     calendar month (UTC). One row in `agent_advice_runs` = one click
-    = one quota use (fans out to all 5 agents in parallel on the
-    backend). Used by paid tiers (basic / plus / max)."""
+    = one quota use. Used by paid tiers (basic / plus / max)."""
     if _db_pool is None or not fb_user_id:
         return 0
     now = datetime.now(timezone.utc)
@@ -10089,72 +10088,26 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     context: Optional[str] = None  # ad data summary from frontend
 
-# ── 成效優化中心 — 5-agent advisor board ─────────────────────────
+# ── 成效優化中心 — action-first advisor ───────────────────────────
 #
-# Each agent is a persona (system-prompt) borrowed from
-# msitarzewski/agency-agents under the paid-media + marketing +
-# support divisions. The persona body lives on disk under
-# agent_personas/ so it can be edited without redeploying code.
-# Loaded once at first /api/optimization/agents call into a module-
-# level cache.
+# Internally we still reuse the six specialist persona prompts as
+# reference material, but the product surface is a single synthesized
+# action plan. Users should not have to reconcile six separate opinions.
 
 AGENT_META = [
     {
-        "id": "social_strategist",
-        "name_zh": "社群策略專家",
-        "name_en": "Paid Social Strategist",
-        "role_zh": "Meta 跨平台策略 / 漏斗結構 / Audience 工程",
-        "emoji": "📱",
-        "color": "#3b82f6",
-    },
-    {
-        "id": "creative_strategist",
-        "name_zh": "素材策略專家",
-        "name_en": "Ad Creative Strategist",
-        "role_zh": "Hook-Body-CTA / A/B 測試 / 素材疲勞偵測",
-        "emoji": "✍️",
-        "color": "#f59e0b",
-    },
-    {
-        "id": "auditor",
-        "name_zh": "稽核專家",
-        "name_en": "Paid Media Auditor",
-        "role_zh": "200+ checkpoint / Severity / 美金影響估算",
-        "emoji": "📋",
-        "color": "#a855f7",
-    },
-    {
-        "id": "growth_hacker",
-        "name_zh": "成長駭客",
-        "name_en": "Growth Hacker",
-        "role_zh": "漏斗 / LTV:CAC / A/B 實驗 / 病毒迴圈",
-        "emoji": "🚀",
-        "color": "#10b981",
-    },
-    {
-        "id": "analytics_reporter",
-        "name_zh": "數據分析師",
-        "name_en": "Analytics Reporter",
-        "role_zh": "KPI / 統計顯著性 / 預測模型 / 數據說故事",
-        "emoji": "📊",
-        "color": "#0891b2",
-    },
-    {
-        "id": "agency_ceo",
-        "name_zh": "代理商 CEO",
-        "name_en": "Agency CEO",
-        # role_zh kept for backwards-compat / Pricing page; the
-        # 6-card grid intentionally hides the third row to make
-        # the layout feel less crowded (per design feedback).
-        "role_zh": "P&L / 客戶組合配置 / 風險與成長",
-        "emoji": "👔",
-        "color": "#475569",
+        "id": "action_plan",
+        "name_zh": "行動建議",
+        "name_en": "Action Plan",
+        "role_zh": "優先 / 次要 / 一般",
+        "emoji": "✓",
+        "color": "#fb5a28",
     },
 ]
 
 
 def _load_agent_prompts() -> dict:
-    """Return the 5 persona system-prompts. Imported from the
+    """Return the persona system-prompts. Imported from the
     `agent_personas` Python module so the bytes are guaranteed to
     ship with the deploy artefact (the previous disk-read approach
     silently failed on Zeabur whenever the agent_personas/ folder
@@ -10164,10 +10117,16 @@ def _load_agent_prompts() -> dict:
     return PERSONAS
 
 
+def _combined_agent_prompt(prompts: dict) -> str:
+    bodies = [str(v).strip() for _, v in sorted(prompts.items()) if str(v).strip()]
+    if not bodies:
+        raise RuntimeError("persona 內容空白(deploy 未包含 agent_personas 檔案?)")
+    return "\n\n---\n\n".join(bodies)
+
+
 @app.get("/api/optimization/agents")
 async def list_optimization_agents():
-    """Return the 5 expert agents' display metadata (no system
-    prompts — those are server-side only)."""
+    """Return the single action-plan card metadata."""
     return {"data": list(AGENT_META)}
 
 
@@ -10290,10 +10249,7 @@ async def _call_one_agent(
     date_label: str,
     n_campaigns: int,
 ) -> str:
-    """Issue one Gemini POST with the persona as the system prompt.
-    Caller wraps with asyncio.gather so all 5 agents run in
-    parallel — each Gemini call is ~5-10s, total wall time stays
-    near the slowest single agent."""
+    """Issue one Gemini POST for the synthesized action plan."""
     if not persona:
         # Persona file missing on disk — bubble up so the per-card
         # error displays "persona 載入失敗" instead of a misleading
@@ -10304,7 +10260,9 @@ async def _call_one_agent(
         f"{persona}\n\n"
         "---\n\n"
         "# 任務\n"
-        "審視多個 FB 廣告帳號,**只輸出有問題、需要修的活動的具體任務**。\n"
+        "你是整合 paid social、creative、audit、growth、analytics、agency leadership 的單一決策大腦。\n"
+        "審視多個 FB 廣告帳號,**直接輸出需要執行的 action**。\n"
+        "不要提到專家、角色、六位、幕僚、觀點分歧或分析過程。\n"
         "全程繁中(術語 / 活動代號 / 數字保留原文)。\n\n"
         "# 嚴格範圍\n"
         "**只針對表現不好、有問題、需要介入的活動寫建議**。範例:\n"
@@ -10315,23 +10273,29 @@ async def _call_one_agent(
         "**表現好的活動完全不要寫**,例如:不要建議「加預算給某活動因為私訊成本低」、"
         "不要建議「複製某活動因為 ROAS 高」、不要鼓勵 scale up。\n\n"
         "# 輸出格式\n"
-        "**只寫待辦,不寫分析、不寫診斷段落、不寫開場白、不寫總結。**\n\n"
-        "每個有問題活動的帳號開 `### [帳號名]` 標題,底下列任務:\n"
+        "**只寫待辦,不寫分析、不寫診斷段落、不寫開場白、不寫總結。**\n"
+        "固定使用以下三個標題,順序不可變:\n\n"
+        "## 優先\n"
+        "最需要今天先處理、正在燒錢或明顯異常的 action。最多 5 條。\n\n"
+        "## 次要\n"
+        "需要排進本週處理,但風險低於優先項目的 action。最多 6 條。\n\n"
+        "## 一般\n"
+        "低風險、觀察或微調項目。最多 6 條。\n\n"
+        "每條格式:\n"
         "```\n"
-        "- [動作動詞] [活動名] — [依據數字]\n"
+        "- [動作動詞] [帳號名] / [活動名] — [依據數字]\n"
         "```\n"
         "例如:\n"
-        "- 暫停 PS40·簡紹倫 廣告組合 A — CPC $12 是帳號均值 3 倍\n"
-        "- 換素材 上越Look·張浩榕 — 頻次 7.2 受眾疲勞\n"
-        "- 縮受眾 AT17·KID — CTR 0.4% / 花費 $5k 沒回應\n\n"
-        "**如果某個帳號所有活動都表現正常,該帳號就完全不要出現在輸出中。**\n\n"
-        "結尾用 `## 今天先做` + 1-3 條跨帳號最優先處理的問題活動,格式同上。\n"
+        "- 暫停 !A 總部 / PS40·簡紹倫 — CPC $12 是帳號均值 3 倍\n"
+        "- 換素材 !B 月結 / 上越Look·張浩榕 — 頻次 7.2 受眾疲勞\n"
+        "- 縮受眾 !C 代操 / AT17·KID — CTR 0.4% / 花費 $5k 沒回應\n\n"
+        "如果某段沒有 action,寫 `- 無`。\n"
         "如果整批活動都沒問題,直接寫「目前無需介入,所有活動表現正常」即可。\n\n"
         "# 嚴格禁止\n"
         "- 不要寫「根據資料」「整體來看」「總結」「值得注意」等開場 / 收尾\n"
         "- 不要對表現好的活動建議 scale up / 加預算 / 複製\n"
         "- 不要解釋 WHY,只寫 WHAT(修什麼問題)+ 數字依據\n"
-        "- 每條 ≤ 30 字,動作必須是負面修正動詞(暫停 / 換素材 / 縮受眾 / 調 bid / 換目標 / 擴受眾)"
+        "- 每條 ≤ 42 字,動作必須是明確操作動詞(暫停 / 換素材 / 縮受眾 / 調 bid / 換目標 / 擴受眾 / 檢查追蹤)"
     )
     user_prompt = (
         f"資料區間: {date_label}\n"
@@ -10339,11 +10303,10 @@ async def _call_one_agent(
         f"(下方資料按帳號分群,只顯示花費 Top {min(60, n_campaigns)} 個活動)\n\n"
         f"{table}"
     )
-    # maxOutputTokens raised from 800 → 4096: 800 was being hit
+    # maxOutputTokens raised from 800 -> 4096: 800 was being hit
     # mid-sentence (CJK uses ~2-3 tokens per character; 800 tokens
-    # ≈ 250-400 zh chars max). 4096 gives ~1500 zh chars per agent
-    # × 5 agents = ~7500 zh chars total — enough for proper
-    # per-account analysis with concrete activity names + numbers,
+    # ≈ 250-400 zh chars max). 4096 gives enough room for a compact
+    # prioritized action plan with concrete activity names + numbers,
     # without bloating into novel-length advice nobody reads.
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
@@ -10473,9 +10436,10 @@ async def _run_optimization_agents_inner(req: RunAgentsRequest):
     prompts = _load_agent_prompts()
     table = _format_campaigns_for_prompt(req.campaigns)
     n = len(req.campaigns)
+    combined_prompt = _combined_agent_prompt(prompts)
 
     tasks = [
-        _call_one_agent(prompts.get(meta["id"], ""), table, req.date_label, n)
+        _call_one_agent(combined_prompt, table, req.date_label, n)
         for meta in AGENT_META
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -10554,7 +10518,7 @@ def _build_run_payload(req: "RunAgentsRequest", advice: list) -> str:
     accounts = sorted({c.account_name for c in req.campaigns if c.account_name})
     return json.dumps(
         {
-            "version": 1,
+            "version": 2,
             "date_label": req.date_label,
             "account_names": accounts,
             "campaigns_count": len(req.campaigns),
@@ -10675,6 +10639,7 @@ async def run_optimization_agents_stream(req: RunAgentsRequest):
     prompts = _load_agent_prompts()
     table = _format_campaigns_for_prompt(req.campaigns)
     n = len(req.campaigns)
+    combined_prompt = _combined_agent_prompt(prompts)
 
     async def stream():
         success_count = 0
@@ -10686,7 +10651,7 @@ async def run_optimization_agents_stream(req: RunAgentsRequest):
         advice_collected: list = []
         tasks = [
             _call_one_agent_with_id(
-                meta["id"], prompts.get(meta["id"], ""),
+                meta["id"], combined_prompt,
                 table, req.date_label, n,
             )
             for meta in AGENT_META
