@@ -1,6 +1,7 @@
 import { api } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useFbAuth } from "@/auth/FbAuthProvider";
+import { useShowBucuInHeader } from "@/components/BucuHeaderChip";
 import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
 import { toast } from "@/components/Toast";
@@ -269,6 +270,7 @@ function FbUsagePanel() {
     staleTime: 0,
   });
   const accountsQuery = useAccounts();
+  const [showBucuInHeader, setShowBucuInHeader] = useShowBucuInHeader();
   const peak = usageQuery.data?.peak_regain_minutes ?? 0;
   // Sort by total_time desc so the busiest rate-limit pool floats to
   // the top. Falls back to call_count then cputime when total_time
@@ -353,6 +355,22 @@ function FbUsagePanel() {
           ⚠ 部分業務已達節流閾值,Facebook 預估約 <b>{peak}</b> 分鐘後可恢復呼叫(此為 FB 的估算值,非精確倒數)
         </div>
       )}
+      <label className="mb-3 flex cursor-pointer items-start gap-2 rounded-md border border-border bg-bg/40 p-2.5 text-[12px]">
+        <input
+          type="checkbox"
+          className="custom-cb mt-0.5"
+          checked={showBucuInHeader}
+          onChange={(e) => setShowBucuInHeader(e.currentTarget.checked)}
+        />
+        <div className="flex-1">
+          <div className="font-semibold text-ink">在 header 顯示 BUCU%</div>
+          <div className="mt-0.5 text-[11px] text-gray-500">
+            打開後,每個頁面的 Topbar 右側會顯示即時 peak BUCU(每 15s
+            更新)。配色:&lt;50% 灰 / 50-69% 琥珀 / 70-89% 橘 / ≥90%
+            紅閃。預設關。
+          </div>
+        </div>
+      </label>
       {usageQuery.isLoading ? (
         <div className="text-sm text-gray-400">載入中…</div>
       ) : entries.length === 0 ? (

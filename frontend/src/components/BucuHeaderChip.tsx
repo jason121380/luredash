@@ -1,0 +1,107 @@
+import { api } from "@/api/client";
+import { useFbAuth } from "@/auth/FbAuthProvider";
+import { cn } from "@/lib/cn";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+
+/**
+ * Topbar 右側的 BUCU% 即時指示器(可由工程模式 toggle 開關)。
+ *
+ * 預設關閉。打開後在每個 view 的 Topbar 右上顯示當下的 peak BUCU,
+ * 讓 operator 隨時看到 FB rate-limit 用量,不必每次都打開工程模式
+ * 滑下去看「FB API 節流狀態」。
+ *
+ * 顏色配:
+ *   < 50%  灰
+ *   50-69% 琥珀
+ *   70-89% 橘
+ *   ≥ 90%  紅 + 閃動
+ *
+ * 共用既有的 ["fb-usage"] React Query key,跟 FbUsagePanel /
+ * FbUsageBanner 共享同一份資料,不會重複打 API。
+ */
+
+const STORAGE_KEY = "show_bucu_in_header";
+
+/** Read the toggle. Subscribers re-render via `storage` event. */
+export function useShowBucuInHeader(): [boolean, (next: boolean) => void] {
+  const [enabled, setEnabledState] = useState(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    const sync = (e: StorageEvent) => {
+      if (e.key && e.key !== STORAGE_KEY) return;
+      try {
+        setEnabledState(localStorage.getItem(STORAGE_KEY) === "1");
+      } catch {
+        setEnabledState(false);
+      }
+    };
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  }, []);
+  const setEnabled = (next: boolean) => {
+    try {
+      if (next) localStorage.setItem(STORAGE_KEY, "1");
+      else localStorage.removeItem(STORAGE_KEY);
+      // Manual event for same-tab subscribers(localStorage's native
+      // 'storage' event only fires across tabs).
+      window.dispatchEvent(new StorageEvent("storage", { key: STORAGE_KEY }));
+    } catch {
+      /* private mode / quota — silently ignore */
+    }
+    setEnabledState(next);
+  };
+  return [enabled, setEnabled];
+}
+
+export function BucuHeaderChip() {
+  const [enabled] = useShowBucuInHeader();
+  const { status } = useFbAuth();
+  const query = useQuery({
+    queryKey: ["fb-usage"],
+    queryFn: () => api.engineering.fbUsage(),
+    refetchInterval: enabled ? 15_000 : false,
+    staleTime: 10_000,
+    enabled: enabled && status === "auth",
+  });
+
+  if (!enabled) return null;
+
+  const data = query.data?.data ?? {};
+  let peak = 0;
+  for (const u of Object.values(data)) {
+    const m = Math.max(
+      u.call_count ?? 0,
+      u.total_cputime ?? 0,
+      u.total_time ?? 0,
+    );
+    if (m > peak) peak = m;
+  }
+
+  const tone =
+    peak >= 90
+      ? "border-red-200 bg-red-100 text-red-700 animate-pulse"
+      : peak >= 70
+        ? "border-orange-border bg-orange-bg text-orange"
+        : peak >= 50
+          ? "border-amber-200 bg-amber-50 text-amber-700"
+          : "border-border bg-bg text-gray-500";
+
+  return (
+    <span
+      className={cn(
+        "inline-flex h-7 select-none items-center gap-1 whitespace-nowrap rounded-full border px-2.5 text-[11px] font-semibold",
+        tone,
+      )}
+      title={`FB BUCU 當下峰值。任一帳戶任一 metric(呼叫次數 / CPU / 處理時間)取最大值。背景任務 ≥ 80% 自動暫停。`}
+    >
+      <span className="text-[10px] uppercase tracking-wider opacity-70">BUCU</span>
+      <span className="font-mono tabular-nums">{peak}%</span>
+    </span>
+  );
+}
