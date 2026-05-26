@@ -110,6 +110,16 @@ export function useMultiAccountOverview(
     /** Tags the resulting FB calls in the engineering panel's 來源 column.
      * e.g. "security-scan" when fired by 立即掃描. */
     source?: string;
+    /** Override default 5min staleTime. Pass Infinity to keep cached
+     * data fresh forever; combined with the global refetchOnMount:false
+     * this means the view shows cached results until the user
+     * explicitly clicks a rescan(which invalidates the query). */
+    staleTime?: number;
+    /** Override default 30min gcTime. Pass Infinity to prevent the
+     * cache entry from ever being garbage-collected — useful for the
+     * on-demand security scan where we want「上次結果一直在」即使
+     * tab 開了一整天沒動。 */
+    gcTime?: number;
   } = {},
 ): MultiAccountOverviewResult {
   const { status } = useFbAuth();
@@ -145,7 +155,8 @@ export function useMultiAccountOverview(
       return api.overview.batch(sortedIds, date, { ...opts, lite: true });
     },
     enabled: enabled && !hasSnapshot,
-    staleTime: 5 * 60_000,
+    staleTime: opts.staleTime ?? 5 * 60_000,
+    gcTime: opts.gcTime,
   });
 
   // Phase 2: full (with insights — slow). placeholderData seeds the
@@ -164,7 +175,8 @@ export function useMultiAccountOverview(
       return api.overview.batch(sortedIds, date, opts);
     },
     enabled,
-    staleTime: 5 * 60_000,
+    staleTime: opts.staleTime ?? 5 * 60_000,
+    gcTime: opts.gcTime,
     placeholderData: () => readOverviewSnapshot(snapHash),
   });
 

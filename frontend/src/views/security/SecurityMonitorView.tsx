@@ -144,6 +144,13 @@ export function SecurityMonitorView() {
     includeArchived: true,
     includeAdsets: true,
     source: "security-scan",
+    // Cached results stay visible across mounts / hours of inactivity
+    // until user clicks 重新掃描(which invalidates → forces refetch).
+    // Without Infinity gcTime, React Query would GC after 30 min and
+    // the next mount would silently re-fetch, violating the「user 按
+    // 才打」principle.
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
   });
 
   // SECOND overview query at the user's chosen date — only used to
@@ -154,6 +161,8 @@ export function SecurityMonitorView() {
   const spendOverview = useMultiAccountOverview(scanAccounts, date, {
     includeArchived: true,
     source: "security-scan",
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
   });
 
   // Track when the most-recent scan finishes so we can show
