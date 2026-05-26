@@ -40,12 +40,13 @@ export function Topbar({ title, titleAction, children, className }: TopbarProps)
       // desktop browsers return 0 for the env() which is a no-op.
       style={{ paddingTop: "env(safe-area-inset-top)" }}
       className={cn(
-        // Mobile: 64px tall, more breathing room (was 56px). The hamburger
-        // button + page title sit on the left; per-view controls scroll
-        // on the right with overflow-x-auto if they're too wide.
-        "sticky top-0 z-[50] flex min-h-[64px] shrink-0 items-center gap-2 border-b border-border bg-white px-3 py-2",
+        // Mobile: fixed content height instead of min-height + vertical
+        // padding. This keeps controls optically centered; otherwise
+        // mixed 40px / 36px buttons made the header look top-light /
+        // bottom-heavy.
+        "sticky top-0 z-[50] flex h-[56px] shrink-0 items-center gap-2 border-b border-border bg-white px-3 py-0",
         "[&_button]:leading-none [&_button_svg]:block",
-        "md:min-h-[60px] md:gap-3 md:px-6 md:py-0",
+        "md:h-[60px] md:gap-3 md:px-6",
         className,
       )}
     >
