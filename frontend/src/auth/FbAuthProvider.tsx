@@ -134,6 +134,46 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
   const exchangeToken = useCallback(
     async (token: string) => {
       try {
+        // Fast path: if we recently verified this exact token (same
+        // browser, < 4 min ago), reuse the cached user info and skip
+        // the POST entirely. Each POST is a /me round-trip on the
+        // backend cache miss path, and a multi-tab page reload would
+        // otherwise fan out to N concurrent verifies → app-level
+        // rate limit. The backend has its own dedup lock, but
+        // skipping the round-trip is even cheaper.
+        const VERIFY_CACHE_KEY = "meta_dash_fb_verified";
+        const VERIFY_CACHE_TTL = 4 * 60_000;
+        try {
+          const cached = localStorage.getItem(VERIFY_CACHE_KEY);
+          if (cached) {
+            const parsed = JSON.parse(cached) as {
+              token?: string;
+              id?: string;
+              name?: string;
+              pictureUrl?: string;
+              at?: number;
+            };
+            if (
+              parsed.token === token &&
+              parsed.id &&
+              typeof parsed.at === "number" &&
+              Date.now() - parsed.at < VERIFY_CACHE_TTL
+            ) {
+              setApiUserId(parsed.id);
+              setUser({
+                id: parsed.id,
+                name: parsed.name ?? "User",
+                pictureUrl: parsed.pictureUrl,
+              });
+              setStatus("auth");
+              setError(null);
+              return;
+            }
+          }
+        } catch {
+          /* fall through to real verify */
+        }
+
         const result = await api.auth.setToken(token);
         // Cache token locally to survive refreshes without relying on FB cookies
         localStorage.setItem("meta_dash_fb_token", token);
@@ -141,6 +181,15 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
         const name = result.name ?? "User";
         const id = result.id ?? "";
         const pictureUrl = result.pictureUrl;
+
+        try {
+          localStorage.setItem(
+            VERIFY_CACHE_KEY,
+            JSON.stringify({ token, id, name, pictureUrl, at: Date.now() }),
+          );
+        } catch {
+          /* quota — ignore */
+        }
 
         // Register the user id with the api client BEFORE flipping
         // status → auth, so the first wave of data queries (fired by
@@ -244,6 +293,7 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
       /* ignore */
     }
     localStorage.removeItem("meta_dash_fb_token");
+    localStorage.removeItem("meta_dash_fb_verified");
     setApiUserId(null);
     setUser(null);
     setStatus("unauth");
