@@ -63,10 +63,21 @@ function hasRecentSnapshot(idsKey: string): boolean {
   }
 }
 
+/**
+ * Production default: do not prefetch every visible ad account on app
+ * boot. The normal views already fetch the exact account/date tuple
+ * they need; this preloader can multiply cold-start FB API volume by
+ * 20 concurrent requests before the user has even opened a report.
+ *
+ * Keep the component around as a disabled experiment, but make "no
+ * background FB API" the default posture.
+ */
+const PRELOAD_ENABLED = false;
+
 /** Module-level flag so the preloader only runs once per page load.
  * React Strict Mode double-mount won't retrigger it.
  * Exported so Shell can read the initial value for its state. */
-export let didPreload = false;
+export let didPreload = !PRELOAD_ENABLED;
 
 interface Progress {
   loaded: number;
