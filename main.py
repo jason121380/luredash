@@ -9302,10 +9302,17 @@ async def _security_push_tick() -> None:
             run_error = str(e)[:500]
             print(f"[security-push] config={cid} run failed: {e}", flush=True)
             async with _db_pool.acquire() as conn:
+                # Update last_run_at on failure too — operator needs to
+                # see「tick 確實有跑,只是失敗」not「上次檢查停在 3 天
+                # 前」(which is what happened when we only set this
+                # on success). last_success_at stays at the older
+                # successful tick time so you can still see「上次成
+                # 功」separately in the modal.
                 await conn.execute(
                     """
                     UPDATE security_push_configs
-                    SET last_error = $2,
+                    SET last_run_at = $3,
+                        last_error = $2,
                         fail_count = fail_count + 1,
                         next_run_at = $3 + (poll_interval_minutes || ' minutes')::INTERVAL,
                         updated_at = $3,
