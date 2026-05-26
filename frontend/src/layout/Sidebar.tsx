@@ -5,7 +5,7 @@ import { TierBadge } from "@/components/TierBadge";
 import { cn } from "@/lib/cn";
 import { withReloadOnChunkError } from "@/lib/chunkReload";
 import { prefetchView } from "@/router";
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import { NavLink } from "react-router-dom";
 
 const importEngineeringModal = withReloadOnChunkError(
@@ -102,6 +102,19 @@ const ICON_CARD = (
     <line x1="2" y1="10" x2="22" y2="10" />
   </svg>
 );
+const ICON_TERMINAL = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="4 17 10 11 4 5" />
+    <line x1="12" y1="19" x2="20" y2="19" />
+  </svg>
+);
+const ICON_LOGOUT = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+    <polyline points="16 17 21 12 16 7" />
+    <line x1="21" y1="12" x2="9" y2="12" />
+  </svg>
+);
 
 // ── Nav groups ─────────────────────────────────────────────────
 // Each group corresponds to a labeled section in the sidebar
@@ -154,33 +167,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
   const { user, logout } = useFbAuth();
   const subQuery = useSubscription();
   const sub = subQuery.data;
-  const [menuOpen, setMenuOpen] = useState(false);
   const [engineeringOpen, setEngineeringOpen] = useState(false);
-  const menuWrapRef = useRef<HTMLDivElement | null>(null);
-
-  // Close the user menu on click-outside. Hover-close (onMouseLeave)
-  // caused "滑鼠移過去，選單消失" because the 8px gap between trigger
-  // and popover sits outside the relative container's hit box — the
-  // cursor transitioning across the gap fires mouseleave and kills
-  // the menu before the user can click an item.
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onPointerDown = (e: PointerEvent) => {
-      if (!menuWrapRef.current) return;
-      if (!menuWrapRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
 
   return (
     <aside
@@ -226,27 +213,47 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
             {group.items.map((item) => (
               <SidebarLink key={item.to} item={item} />
             ))}
+            {group.label === "設定" && (
+              <>
+                <SidebarActionButton
+                  icon={ICON_TERMINAL}
+                  label="工程模式"
+                  onMouseEnter={() => {
+                    void importEngineeringModal();
+                  }}
+                  onFocus={() => {
+                    void importEngineeringModal();
+                  }}
+                  onClick={() => {
+                    setEngineeringOpen(true);
+                  }}
+                />
+                <SidebarActionButton
+                  icon={ICON_LOGOUT}
+                  label="登出"
+                  onClick={() => {
+                    void logout();
+                  }}
+                />
+              </>
+            )}
           </div>
         ))}
       </nav>
 
-      {/* User dropdown — opens upward from the bottom */}
+      {/* User footer */}
       <div className="shrink-0 border-t border-border px-2 py-3">
         <div
           className="relative"
-          ref={menuWrapRef}
           // Mobile drawer: the parent <aside> has a belt-and-suspenders
           // onClick that closes the drawer for any non-link tap. Without
-          // stopping propagation here the user-name tap would close the
-          // drawer before the dropdown could render → menu never appears.
+          // stopping propagation here the user-name tap would close the drawer.
           onClick={(e) => e.stopPropagation()}
         >
-          <button
-            type="button"
-            onClick={() => setMenuOpen((v) => !v)}
+          <div
             className={cn(
               "flex w-full select-none items-center gap-2.5 rounded-lg px-2.5 py-2.5",
-              "bg-transparent hover:bg-transparent", // no hover per style.md
+              "bg-transparent",
             )}
           >
             <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-orange-bg text-[12px] font-bold text-orange">
@@ -271,51 +278,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
                 <BucuHeaderChip />
               </span>
             </div>
-          </button>
-
-          {menuOpen && (
-            <div
-              className={cn(
-                "absolute bottom-[calc(100%+8px)] left-0 z-[999]",
-                "w-[165px] rounded-xl border-[1.5px] border-border bg-white p-1.5 shadow-md",
-              )}
-            >
-              <div className="mb-1 border-b border-border px-2 pb-1.5 pt-2 text-xs font-bold text-ink">
-                <div className="flex items-center gap-1.5">
-                  <span className="truncate">{user?.name}</span>
-                  {sub && <TierBadge tier={sub.tier} />}
-                </div>
-                <div className="mt-0.5 text-[10px] font-normal text-gray-300">Facebook 帳號</div>
-              </div>
-              {/* 我的訂閱 moved to 設定 group in sidebar */}
-              <button
-                type="button"
-                onMouseEnter={() => {
-                  void importEngineeringModal();
-                }}
-                onFocus={() => {
-                  void importEngineeringModal();
-                }}
-                onClick={() => {
-                  setMenuOpen(false);
-                  setEngineeringOpen(true);
-                }}
-                className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-[13px] text-gray-500 hover:bg-orange-bg hover:text-orange"
-              >
-                工程模式
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  void logout();
-                }}
-                className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-[13px] text-gray-500 hover:bg-orange-bg hover:text-orange"
-              >
-                登出
-              </button>
-            </div>
-          )}
+          </div>
         </div>
       </div>
       {engineeringOpen && (
@@ -355,5 +318,38 @@ function SidebarLink({ item }: { item: NavItem }) {
       </span>
       {item.label}
     </NavLink>
+  );
+}
+
+function SidebarActionButton({
+  icon,
+  label,
+  onClick,
+  onMouseEnter,
+  onFocus,
+}: {
+  icon: JSX.Element;
+  label: string;
+  onClick: () => void;
+  onMouseEnter?: () => void;
+  onFocus?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={onMouseEnter}
+      onFocus={onFocus}
+      className={cn(
+        "mb-0.5 flex min-h-[32px] w-full select-none items-center gap-2.5 rounded-lg px-2.5 py-1.5",
+        "text-[13px] font-medium text-gray-500 transition-[all] duration-150 cursor-pointer",
+        "hover:bg-orange-bg hover:text-orange active:scale-[0.98]",
+      )}
+    >
+      <span className="flex w-[18px] shrink-0 items-center justify-center">
+        {icon}
+      </span>
+      {label}
+    </button>
   );
 }
