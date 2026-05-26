@@ -66,7 +66,10 @@ export function OptimizationView() {
   const date = useFiltersStore((s) => s.date.optimization);
   const setDate = useFiltersStore((s) => s.setDate);
 
-  const overview = useMultiAccountOverview(visibleAll, date, { includeArchived: false });
+  const overview = useMultiAccountOverview(visibleAll, date, {
+    includeArchived: false,
+    source: "ai-staff",
+  });
   const { user } = useFbAuth();
   const usageQuery = useBillingUsage();
 

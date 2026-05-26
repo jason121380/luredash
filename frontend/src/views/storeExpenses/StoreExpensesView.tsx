@@ -83,7 +83,10 @@ export function StoreExpensesView() {
 
   // include_archived: true so historical spend rolls up correctly,
   // matching the Finance view's behaviour.
-  const overview = useMultiAccountOverview(effectiveAccounts, date, { includeArchived: true });
+  const overview = useMultiAccountOverview(effectiveAccounts, date, {
+    includeArchived: true,
+    source: "store-expenses",
+  });
 
   const allRows = useMemo(
     () => buildStoreRows(overview.campaigns, nicknames, rowMarkups, defaultMarkup),

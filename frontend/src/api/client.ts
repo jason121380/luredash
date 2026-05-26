@@ -319,6 +319,11 @@ async function request<T>(
     signal?: AbortSignal;
     /** Override the default 30s timeout when needed. */
     timeoutMs?: number;
+    /** Tag for the engineering panel's「來源」column so the operator
+     * can tell「我剛剛點什麼觸發了這次 FB call」. Sent as the
+     * X-Fb-Source header; backend reads into _fb_call_source contextvar.
+     * Examples: "security-scan", "dashboard", "preload". */
+    source?: string;
   },
 ): Promise<T> {
   let url = path;
@@ -345,6 +350,7 @@ async function request<T>(
   // fb_user_id as an explicit query/path param still work — the
   // middleware prefers the query param, header is the fallback.
   if (_apiFbUserId) headers["x-fb-user-id"] = _apiFbUserId;
+  if (options?.source) headers["x-fb-source"] = options.source;
 
   let response: Response;
   try {
@@ -649,7 +655,7 @@ export const api = {
     batch: (
       accountIds: string[],
       date: DateConfig,
-      opts?: { includeArchived?: boolean; lite?: boolean; includeAdsets?: boolean },
+      opts?: { includeArchived?: boolean; lite?: boolean; includeAdsets?: boolean; source?: string },
     ) =>
       request<{
         data: Record<
@@ -672,6 +678,7 @@ export const api = {
           // `campaign.adsets.data`.
           include_adsets: opts?.includeAdsets ? "true" : undefined,
         },
+        source: opts?.source,
       }),
   },
 
