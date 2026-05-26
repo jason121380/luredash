@@ -125,11 +125,19 @@ export function SecurityMonitorView() {
   //      client-side filter on `created_time`, which matches the
   //      view's actual semantics ("campaigns CREATED in this window").
   const fetchDate = useMemo<DateConfig>(() => ({ preset: "last_90d", from: null, to: null }), []);
-  // Pass `[]` when scan hasn't been requested → useMultiAccountOverview
-  // sees accounts.length === 0 → query.enabled = false → no fetch.
-  // The moment user clicks 立即掃描, `scanRequested` flips and the
-  // queries fire against the full visible account set.
-  const scanAccounts = scanRequested ? visibleAll : [];
+  // 「之前掃過嗎」— 從 DB 看有沒有 last scan 紀錄。有 → 自動展示
+  // 上次的 cache(不打 FB,React Query Infinity staleTime 接住)。
+  // 沒有 → 維持「尚未掃描」空狀態,等 user 主動點按鈕。
+  //
+  // 換 device / 換瀏覽器 / 關 tab 重開 都會走到這條:DB 有紀錄就
+  // 自動顯示,讓 user 不用每次重新整理還要再按一次「立即掃描」。
+  const hasEverScanned = !!lastScanQuery.data;
+  // Pass `[]` when neither just-requested NOR ever-scanned →
+  // useMultiAccountOverview sees accounts.length === 0 → query
+  // disabled → 0 FB call. 點按鈕或 DB 有紀錄就帶完整帳戶集合進去,
+  // React Query 跨進出 cache(Infinity)會直接顯示上次結果,user
+  // 沒按重新掃描就絕對不會打 FB。
+  const scanAccounts = scanRequested || hasEverScanned ? visibleAll : [];
 
   // includeAdsets:true here only — `effectiveDailyBudget` reads
   // `campaign.adsets.data` to aggregate ABO budgets. Dashboard / Alerts /

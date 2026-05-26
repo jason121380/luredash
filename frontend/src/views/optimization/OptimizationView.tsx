@@ -310,7 +310,7 @@ export function OptimizationView() {
 
   return (
     <>
-      <Topbar title="AI 幕僚">
+      <Topbar title="優化中心">
         <DatePicker value={date} onChange={(cfg) => setDate("optimization", cfg)} />
       </Topbar>
       <UpgradeModal state={upgradeState} onClose={() => setUpgradeState(null)} />

@@ -2636,6 +2636,17 @@ _AUTH_VERIFY_CACHE: dict[str, tuple[float, dict]] = {}
 _AUTH_VERIFY_TTL_SECONDS = 5 * 60
 _AUTH_VERIFY_PG_TTL_SECONDS = 24 * 60 * 60
 
+# Per-token-hash dedup lock. When N tabs (or N users in an agency
+# sharing the same FB token cache prefix) simultaneously POST
+# /api/auth/token after a Zeabur redeploy or app cold-start, they ALL
+# miss the in-memory + PG verify cache and ALL fire /me concurrently.
+# That stacks against FB's app-level rate limit (code 4) and surfaces
+# as the「FB 觸發頻率限制」toast even though every request is for the
+# same token. The lock makes the first call do the FB round-trip and
+# subsequent concurrent calls await + read the populated cache, so the
+# total FB /me cost for a burst is 1 call regardless of fan-in.
+_AUTH_VERIFY_LOCKS: dict[str, asyncio.Lock] = {}
+
 
 def _auth_cache_key(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
@@ -2727,15 +2738,18 @@ async def set_token(payload: TokenPayload):
     # On PG hit, write back into the in-memory cache so subsequent
     # requests in this process don't even need the DB roundtrip.
     cache_key = _auth_cache_key(payload.token)
-    cached = _AUTH_VERIFY_CACHE.get(cache_key)
-    me_cached: Optional[dict] = None
-    if cached and time.time() - cached[0] < _AUTH_VERIFY_TTL_SECONDS:
-        me_cached = cached[1]
-    if me_cached is None:
+
+    async def _read_cached() -> Optional[dict]:
+        cached = _AUTH_VERIFY_CACHE.get(cache_key)
+        if cached and time.time() - cached[0] < _AUTH_VERIFY_TTL_SECONDS:
+            return cached[1]
         pg_hit = await _auth_verify_pg_lookup(cache_key)
         if pg_hit is not None:
-            me_cached = pg_hit
             _AUTH_VERIFY_CACHE[cache_key] = (time.time(), pg_hit)
+            return pg_hit
+        return None
+
+    me_cached = await _read_cached()
     if me_cached is not None:
         uid = str(me_cached.get("id") or "")
         _runtime_token = payload.token
@@ -2752,10 +2766,52 @@ async def set_token(payload: TokenPayload):
 
     if _http_client is None:
         raise HTTPException(status_code=503, detail="伺服器尚未初始化,請稍後再試")
+
+    # Coalesce concurrent verifies for the same token. Without this
+    # lock, N tabs reloading at once each fire their own /me and pile
+    # onto FB's app-level rate limit. The first call populates the
+    # cache and everyone else returns from it. setdefault is atomic
+    # under cooperative asyncio so two concurrent tasks can't both
+    # create separate locks for the same key.
+    lock = _AUTH_VERIFY_LOCKS.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        # Re-read cache under the lock — another concurrent verify may
+        # have populated it while we were queued.
+        me_cached = await _read_cached()
+        if me_cached is not None:
+            uid = str(me_cached.get("id") or "")
+            _runtime_token = payload.token
+            if uid:
+                _user_token_cache[uid] = payload.token
+                _KNOWN_FB_USERS.add(uid)
+            return {
+                "ok": True,
+                "name": me_cached.get("name"),
+                "id": me_cached.get("id"),
+                "pictureUrl": me_cached.get("picture", {}).get("data", {}).get("url"),
+                "cached": True,
+            }
+        try:
+            return await _verify_token_with_fb(payload.token, cache_key)
+        finally:
+            # Best-effort cleanup so the lock dict doesn't grow forever
+            # across token rotations. Safe to drop because new arrivals
+            # will just create a fresh lock (and immediately hit the
+            # cache we just populated).
+            _AUTH_VERIFY_LOCKS.pop(cache_key, None)
+
+
+async def _verify_token_with_fb(token: str, cache_key: str) -> dict:
+    """Do the actual FB /me round-trip + cache population. Split out
+    so the dedup lock wrapper in `set_token` stays readable. Raises
+    HTTPException on FB rejection; on success, returns the same dict
+    shape `set_token` returns."""
+    global _runtime_token
+    assert _http_client is not None
     try:
         resp = await _http_client.get(
             f"{BASE_URL}/me",
-            params={"fields": "id,name,picture", "access_token": payload.token},
+            params={"fields": "id,name,picture", "access_token": token},
             timeout=10.0,
         )
     except httpx.HTTPError as e:
@@ -2802,11 +2858,11 @@ async def set_token(payload: TokenPayload):
         pic = me.get("picture", {}).get("data", {}).get("url")
         # Only persist after the token verifies — avoids storing
         # garbage that would 401 every share-page viewer.
-        _runtime_token = payload.token
-        await _persist_runtime_token(payload.token)
+        _runtime_token = token
+        await _persist_runtime_token(token)
         if uid:
-            _user_token_cache[uid] = payload.token
-            await _persist_user_token(uid, payload.token)
+            _user_token_cache[uid] = token
+            await _persist_user_token(uid, token)
             _KNOWN_FB_USERS.add(uid)
             await _persist_known_user(uid)
         # Cache the verified /me response in both layers so subsequent
@@ -8341,11 +8397,31 @@ async def test_security_push_config(
         finally:
             _current_fb_user_id.reset(ctx_token)
 
+    synthetic_used = False
     if not matches:
-        raise HTTPException(
-            status_code=404,
-            detail="近 30 天沒有可用的活動可供測試。請先在所選帳戶建立一些活動。",
-        )
+        # Last-resort synthetic sample so the user can verify LINE
+        # plumbing even when no recent campaigns exist (new accounts,
+        # paused-only accounts, or accounts whose campaigns are all
+        # older than 30 days). Labeled clearly so recipients know
+        # this is a connectivity probe, not a real alert.
+        synthetic_used = True
+        now_iso = datetime.now(timezone.utc).isoformat()
+        matches = [
+            {
+                "campaign": {
+                    "id": "test_synthetic",
+                    "name": "[範例] 測試廣告活動",
+                    "created_time": now_iso,
+                    "daily_budget": "500",
+                },
+                "account_id": "",
+                "account_name": "[範例帳戶]",
+                "anomalies": list(cfg.get("anomaly_filters") or ["deep_night"]),
+                "creator": "[範例]",
+                "spend": 0,
+                "spend_range_label": None,
+            }
+        ]
 
     if _http_client is None:
         raise HTTPException(status_code=503, detail="伺服器尚未初始化,請稍後再試")
@@ -8356,7 +8432,9 @@ async def test_security_push_config(
 
     # Mark test pushes in the altText so recipients can tell sample
     # from production. (Body text already says 「Meta後台系統警示」.)
-    if payload and payload.cards:
+    if synthetic_used:
+        flex["altText"] = f"[測試 · 範例資料] {flex.get('altText', '')}"
+    elif payload and payload.cards:
         flex["altText"] = f"[測試] {flex.get('altText', '')}"
     elif fallback_used:
         flex["altText"] = f"[測試 · 示範格式] {flex.get('altText', '')}"
@@ -8383,7 +8461,13 @@ async def test_security_push_config(
 
     if errors and sent == 0:
         raise HTTPException(status_code=502, detail="; ".join(errors))
-    return {"ok": True, "sent": sent, "errors": errors, "fallback": fallback_used}
+    return {
+        "ok": True,
+        "sent": sent,
+        "errors": errors,
+        "fallback": fallback_used,
+        "synthetic": synthetic_used,
+    }
 
 
 # ── Scheduler loop ────────────────────────────────────────────
@@ -9302,10 +9386,17 @@ async def _security_push_tick() -> None:
             run_error = str(e)[:500]
             print(f"[security-push] config={cid} run failed: {e}", flush=True)
             async with _db_pool.acquire() as conn:
+                # Update last_run_at on failure too — operator needs to
+                # see「tick 確實有跑,只是失敗」not「上次檢查停在 3 天
+                # 前」(which is what happened when we only set this
+                # on success). last_success_at stays at the older
+                # successful tick time so you can still see「上次成
+                # 功」separately in the modal.
                 await conn.execute(
                     """
                     UPDATE security_push_configs
-                    SET last_error = $2,
+                    SET last_run_at = $3,
+                        last_error = $2,
                         fail_count = fail_count + 1,
                         next_run_at = $3 + (poll_interval_minutes || ' minutes')::INTERVAL,
                         updated_at = $3,

@@ -570,7 +570,13 @@ export const api = {
      * passing it lets backend skip FB scanning entirely. Does not
      * advance `last_run_at`. */
     test: (fbUserId: string, id: string, cards?: SecurityPushTestCard[]) =>
-      request<{ ok: boolean; sent: number; errors: string[] }>(
+      request<{
+        ok: boolean;
+        sent: number;
+        errors: string[];
+        fallback?: boolean;
+        synthetic?: boolean;
+      }>(
         "POST",
         `/api/security-push/configs/${encodeURIComponent(id)}/test`,
         {
