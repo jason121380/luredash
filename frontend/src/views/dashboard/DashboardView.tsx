@@ -213,7 +213,7 @@ export function DashboardView() {
         </div>
       </Topbar>
 
-      <div className="flex min-w-0 items-stretch md:flex-row">
+      <div className="flex min-h-[calc(100dvh_-_52px_-_env(safe-area-inset-top))] min-w-0 items-stretch md:min-h-0 md:flex-row">
         {/* Desktop sidebar (≥768px) */}
         <div className="hidden md:flex">
           <AccountPanel
@@ -224,7 +224,7 @@ export function DashboardView() {
           />
         </div>
 
-        <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
           {!statsCollapsed && (
             <StatsGrid
               accounts={activeAccounts}
@@ -233,11 +233,10 @@ export function DashboardView() {
             />
           )}
 
-          {/* Tree card — sized to content. The entire right column
-              scrolls as one unit (overflow-y-auto on parent), so the
-              card only occupies the height its table rows need. No
-              more blank space below the last row. */}
-          <div className="mx-3 mb-3 mt-3 flex flex-col overflow-hidden rounded-2xl border border-border bg-white md:mx-4 md:mb-4 md:mt-4">
+          {/* Tree card — on mobile it fills the remaining viewport so
+              sparse tables don't leave a dead white field underneath;
+              desktop keeps content-sized height for dense scanning. */}
+          <div className="mx-3 mb-3 mt-3 flex flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-white md:mx-4 md:mb-4 md:mt-4 md:flex-none">
             <div className="flex shrink-0 flex-wrap items-center gap-2.5 border-b border-border bg-white px-3 py-2.5 md:px-4 md:py-3">
               <input
                 value={searchTerm}

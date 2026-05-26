@@ -178,9 +178,8 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
       // status bar. Respecting safe-area-inset-top pushes the logo
       // row below the clock/signal indicators when the drawer slides
       // in on mobile. Desktop env() resolves to 0, so no change.
-      style={{ paddingTop: "env(safe-area-inset-top)" }}
       className={cn(
-        "shell-sidebar fixed inset-y-0 left-0 z-[100] flex w-sidebar flex-col overflow-hidden border-r border-border bg-white",
+        "shell-sidebar fixed inset-y-0 left-0 z-[100] flex w-sidebar flex-col overflow-hidden border-r border-border bg-white pt-[env(safe-area-inset-top)]",
       )}
       onClick={() => {
         // Tapping a link inside the sidebar triggers a route change
@@ -190,7 +189,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
       }}
     >
       {/* Logo header */}
-      <div className="flex h-[56px] shrink-0 items-center gap-2 border-b border-border px-4 md:h-[60px]">
+      <div className="flex h-[50px] shrink-0 items-center gap-2 border-b border-border px-4 md:h-[60px]">
         <div className="text-[15px] font-bold tracking-[-0.2px] text-ink">
           METADASH <span className="text-orange">by LURE</span>
         </div>
@@ -200,7 +199,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
           glued to the sidebar bottom on iOS PWA. Putting overflow-y
           on the parent <aside> instead causes flex-1 + mt-auto to
           mis-measure and leave a dead-air gap below the avatar. */}
-      <nav className="min-h-0 flex-1 overflow-y-auto p-2">
+      <nav className="min-h-0 flex-1 overflow-y-auto px-2 py-1.5">
         {NAV_GROUPS.map((group, idx) => (
           <div key={group.label}>
             <div
@@ -243,7 +242,10 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
       </nav>
 
       {/* User footer */}
-      <div className="shrink-0 border-t border-border px-2 py-3">
+      <div
+        className="shrink-0 border-t border-border px-2 pt-2.5"
+        style={{ paddingBottom: "max(12px, env(safe-area-inset-bottom))" }}
+      >
         <div
           className="relative"
           // Mobile drawer: the parent <aside> has a belt-and-suspenders

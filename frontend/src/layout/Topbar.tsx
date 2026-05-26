@@ -33,18 +33,12 @@ export function Topbar({ title, titleAction, children, className }: TopbarProps)
 
   return (
     <div
-      // PWA safe-area: on iOS standalone, viewport-fit=cover puts the
-      // status bar (time, signal, battery) on top of y=0. Without
-      // padding-top: env(safe-area-inset-top), the topbar's content
-      // lives UNDER the status bar. The inline style is mobile-only;
-      // desktop browsers return 0 for the env() which is a no-op.
-      style={{ paddingTop: "env(safe-area-inset-top)" }}
       className={cn(
-        // Mobile: fixed content height instead of min-height + vertical
-        // padding. This keeps controls optically centered; otherwise
-        // mixed 40px / 36px buttons made the header look top-light /
-        // bottom-heavy.
-        "sticky top-0 z-[50] flex h-[56px] shrink-0 items-center gap-2 border-b border-border bg-white px-3 py-0",
+        // Mobile PWA: include the iOS status-bar safe area in the
+        // outer height, while keeping a real 52px content row. Using
+        // plain h-56 + padding-top squeezes the controls on standalone
+        // iOS because border-box subtracts the safe-area from content.
+        "sticky top-0 z-[50] flex h-[calc(52px_+_env(safe-area-inset-top))] shrink-0 items-center gap-2 border-b border-border bg-white px-3 pb-0 pt-[env(safe-area-inset-top)]",
         "[&_button]:leading-none [&_button_svg]:block",
         "md:h-[60px] md:gap-3 md:px-6",
         className,
@@ -55,7 +49,7 @@ export function Topbar({ title, titleAction, children, className }: TopbarProps)
         type="button"
         onClick={toggleSidebar}
         aria-label="開啟選單"
-        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-ink hover:bg-bg active:scale-95 md:hidden"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-ink hover:bg-bg active:scale-95 md:hidden"
       >
         <svg
           width="22"

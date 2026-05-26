@@ -301,9 +301,6 @@
     transition: transform 0.2s ease-out;
     width: 300px;
     box-shadow: var(--shadow-md);
-    /* Respect the iOS home-indicator safe area so the user dropdown
-       is never hidden under it. */
-    padding-bottom: env(safe-area-inset-bottom);
   }
   .shell-sidebar[data-mobile-open="true"] {
     transform: translateX(0);
