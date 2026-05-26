@@ -129,16 +129,28 @@ function renderGrouped(blocks: Block[]): React.ReactNode[] {
         i++;
       }
       out.push(
-        <div
+        <details
           key={`account-${i}`}
-          className="min-w-0 overflow-visible rounded-xl border border-border bg-white p-3 shadow-sm"
+          open
+          className="group min-w-0 overflow-visible rounded-xl border border-border bg-white p-3 shadow-sm"
         >
-          <div className="flex flex-col gap-1.5">
-            {group.map((g, j) => (
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+            <h2 className="min-w-0 truncate text-[15px] font-bold text-ink">
+              {renderInline(b.text)}
+            </h2>
+            <span
+              className="shrink-0 text-[12px] text-gray-300 transition-transform group-open:rotate-180"
+              aria-hidden="true"
+            >
+              ▼
+            </span>
+          </summary>
+          <div className="mt-2 flex flex-col gap-1.5">
+            {group.slice(1).map((g, j) => (
               <BlockNode key={j} block={g} inAccountCard />
             ))}
           </div>
-        </div>,
+        </details>,
       );
       continue;
     }
