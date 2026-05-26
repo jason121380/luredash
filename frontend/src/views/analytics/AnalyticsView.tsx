@@ -80,7 +80,7 @@ export function AnalyticsView() {
 
   return (
     <>
-      <Topbar title="數據分析">
+      <Topbar title="數據圖表">
         <div className="flex items-center gap-3">
           <DatePicker value={date} onChange={(cfg) => setDate("shared", cfg)} />
         </div>

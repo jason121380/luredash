@@ -302,7 +302,7 @@ export function SecurityMonitorView() {
 
   return (
     <>
-      <Topbar title="安全監控">
+      <Topbar title="安全防護">
         <div className="flex items-center gap-2 md:gap-3">
           {/* 安全監控限定到「上個月」為止 — 立即掃描 fetch 固定
               last_90d,選 last_90d 或更久的自訂區間會看不到資料。

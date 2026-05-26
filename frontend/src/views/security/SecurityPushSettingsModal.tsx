@@ -20,7 +20,7 @@ import { useAccountsStore } from "@/stores/accountsStore";
 import { useEffect, useMemo, useState } from "react";
 
 /**
- * 安全監控推播設定 — opens from /security topbar. Lists existing
+ * 安全防護推播設定 — opens from /security topbar. Lists existing
  * alert subscriptions and lets the user create / edit / delete them.
  *
  * Each config is "when a new campaign is created and matches any of
@@ -96,7 +96,7 @@ export function SecurityPushSettingsModal({
         onOpenChange(v);
         if (!v) setState({ mode: "list" });
       }}
-      title="安全監控推播設定"
+      title="安全防護推播設定"
       subtitle={
         state.mode === "list"
           ? "新建立廣告活動命中異常時自動發 LINE 訊息"
