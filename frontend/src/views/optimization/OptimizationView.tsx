@@ -27,8 +27,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "./Markdown";
 
 /** localStorage key + payload contract for "last successful run".
- *  Bumped to 5 → wipe on schema change so old truncated output
- *  don't show up as half-rendered cards. */
+ *  Keep hydration backward-compatible: old successful reports should
+ *  still render even when the generation prompt/schema version changes. */
 const LAST_RUN_STORAGE_KEY = "ai-staff-last-run";
 const LAST_RUN_VERSION = 5;
 interface StoredLastRun {
@@ -37,6 +37,7 @@ interface StoredLastRun {
   dateLabel: string;
   cards: Record<string, { advice_md: string | null; error: string | null } | null>;
 }
+type CardState = { advice_md: string | null; error: string | null } | null;
 
 /**
  * 優化中心 — action-first advisor board with NDJSON streaming.
@@ -113,7 +114,6 @@ export function OptimizationView() {
   // Per-card state, plus a top-level "isStreaming" flag separate
   // from per-card spinners. The backend currently returns one
   // synthesized action-plan card.
-  type CardState = { advice_md: string | null; error: string | null } | null;
   const [cards, setCards] = useState<Record<string, CardState>>({});
   const [streamingIds, setStreamingIds] = useState<Set<string>>(new Set());
   const [isStreaming, setIsStreaming] = useState(false);
@@ -139,10 +139,10 @@ export function OptimizationView() {
     try {
       const raw = localStorage.getItem(LAST_RUN_STORAGE_KEY);
       if (!raw) return;
-      const parsed = JSON.parse(raw) as StoredLastRun | null;
-      if (!parsed || parsed.version !== LAST_RUN_VERSION) return;
+      const parsed = JSON.parse(raw) as Partial<StoredLastRun> | null;
+      if (!parsed?.cards || !hasHydratableCards(parsed.cards)) return;
       setCards(parsed.cards);
-      setGeneratedAt(new Date(parsed.generatedAt));
+      setGeneratedAt(toValidDate(parsed.generatedAt) ?? new Date());
     } catch {
       localStorage.removeItem(LAST_RUN_STORAGE_KEY);
     }
@@ -163,11 +163,8 @@ export function OptimizationView() {
         // If we already have a local copy that's newer (e.g. user
         // is mid-flow on this same browser), don't overwrite.
         if (generatedAt && generatedAt.getTime() >= serverAt.getTime()) return;
-        if (row.payload.version !== LAST_RUN_VERSION) return;
-        const nextCards: Record<string, CardState> = {};
-        for (const a of row.payload.advice) {
-          nextCards[a.agent_id] = { advice_md: a.advice_md, error: a.error };
-        }
+        const nextCards = cardsFromAdvice(row.payload.advice);
+        if (!hasHydratableCards(nextCards)) return;
         setCards(nextCards);
         setGeneratedAt(serverAt);
         // Sync the local cache so the next sync-phase load matches.
@@ -668,6 +665,26 @@ function AccountFilterModal({
 }
 
 // ── Helpers ──────────────────────────────────────────────────
+
+function cardsFromAdvice(
+  advice: Array<{ agent_id: string; advice_md: string | null; error: string | null }> | undefined,
+): Record<string, CardState> {
+  const out: Record<string, CardState> = {};
+  for (const a of advice ?? []) {
+    out[a.agent_id] = { advice_md: a.advice_md, error: a.error };
+  }
+  return out;
+}
+
+function hasHydratableCards(cards: Record<string, CardState>): boolean {
+  return Object.values(cards).some((card) => Boolean(card?.advice_md || card?.error));
+}
+
+function toValidDate(value: string | undefined): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
 
 function buildDigests(
   campaigns: FbCampaign[],
