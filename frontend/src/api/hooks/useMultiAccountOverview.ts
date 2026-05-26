@@ -120,6 +120,9 @@ export function useMultiAccountOverview(
      * on-demand security scan where we want「上次結果一直在」即使
      * tab 開了一整天沒動。 */
     gcTime?: number;
+    /** Fetch only the lite campaign metadata phase. Use for workflows
+     * that do not need insights/account metrics, such as security scan. */
+    liteOnly?: boolean;
   } = {},
 ): MultiAccountOverviewResult {
   const { status } = useFbAuth();
@@ -154,7 +157,7 @@ export function useMultiAccountOverview(
       }
       return api.overview.batch(sortedIds, date, { ...opts, lite: true });
     },
-    enabled: enabled && !hasSnapshot,
+    enabled: enabled && (opts.liteOnly || !hasSnapshot),
     staleTime: opts.staleTime ?? 5 * 60_000,
     gcTime: opts.gcTime,
   });
@@ -174,7 +177,7 @@ export function useMultiAccountOverview(
       }
       return api.overview.batch(sortedIds, date, opts);
     },
-    enabled,
+    enabled: enabled && !opts.liteOnly,
     staleTime: opts.staleTime ?? 5 * 60_000,
     gcTime: opts.gcTime,
     placeholderData: () => readOverviewSnapshot(snapHash),
@@ -199,7 +202,7 @@ export function useMultiAccountOverview(
   }, [fullQuery.isSuccess, fullQuery.isFetching, fullQuery.data, snapHash]);
 
   // Prefer full data when available, fall back to lite.
-  const activeData = fullQuery.data ?? liteQuery.data;
+  const activeData = opts.liteOnly ? liteQuery.data : (fullQuery.data ?? liteQuery.data);
 
   const { campaigns, insights, errors } = useMemo(() => {
     const camps: FbCampaign[] = [];
@@ -229,22 +232,24 @@ export function useMultiAccountOverview(
   // `fullQuery.data` is populated either by a live success OR by
   // the localStorage placeholder. Either way we have insight numbers
   // to show — UI shouldn't shimmer when cached numbers are in hand.
-  const hasFullData = fullQuery.data !== undefined;
+  const hasFullData = opts.liteOnly ? liteQuery.data !== undefined : fullQuery.data !== undefined;
 
   // isLoading = nothing to show yet (no live data, no placeholder,
   // and lite is also still in flight).
-  const isLoading = !hasFullData && liteQuery.isLoading && fullQuery.isLoading;
+  const isLoading = opts.liteOnly
+    ? liteQuery.isLoading
+    : !hasFullData && liteQuery.isLoading && fullQuery.isLoading;
 
   return {
     campaigns,
     insights,
     errors,
     isLoading,
-    isFetching: fullQuery.isFetching,
-    isError: fullQuery.isError && liteQuery.isError,
+    isFetching: opts.liteOnly ? liteQuery.isFetching : fullQuery.isFetching,
+    isError: opts.liteOnly ? liteQuery.isError : fullQuery.isError && liteQuery.isError,
     // Treat placeholder-from-localStorage as "we have insights" so
     // StatsGrid renders the cached numbers instead of shimmer.
-    insightsPending: !hasFullData && !fullQuery.isError,
+    insightsPending: opts.liteOnly ? false : !hasFullData && !fullQuery.isError,
     loadedCount: isLoading ? 0 : accounts.length,
     totalCount: accounts.length,
   };

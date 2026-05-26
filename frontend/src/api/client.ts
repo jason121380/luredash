@@ -876,8 +876,29 @@ export const api = {
           retried: boolean;
           source: string;
         }>;
-        top_paths_5m: Array<{ path: string; count: number }>;
+        top_paths_5m: Array<{
+          path: string;
+          count: number;
+          live: number;
+          cache_hits: number;
+          blocked: number;
+          errors: number;
+          top_source: string;
+        }>;
         top_accounts_5m: Array<{ account_id: string; count: number }>;
+        top_sources_5m: Array<{
+          source: string;
+          count: number;
+          live: number;
+          cache_hits: number;
+          blocked: number;
+          errors: number;
+          retried: number;
+          avg_ms: number;
+          last_status: number;
+          last_path: string;
+        }>;
+        status_counts_5m: Array<{ status: string; count: number }>;
         throttle_events: Array<{
           ts: number;
           account_id: string;
@@ -886,7 +907,11 @@ export const api = {
         }>;
         cache_hit_rate_5m: number;
         account_throttle_until: Record<string, number>;
+        global_throttle_until: number | null;
         error_count_5m: number;
+        live_total_5m: number;
+        blocked_total_5m: number;
+        retried_total_5m: number;
         total_5m: number;
       }>("GET", "/api/engineering/fb-calls"),
   },

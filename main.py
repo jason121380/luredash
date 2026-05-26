@@ -124,6 +124,13 @@ _fb_semaphore: asyncio.Semaphore = asyncio.Semaphore(_FB_GLOBAL_CONCURRENCY)
 _PER_ACCOUNT_CONCURRENCY = _env_int("FB_PER_ACCOUNT_CONCURRENCY", 2)
 _per_account_semaphores: dict[str, asyncio.Semaphore] = {}
 
+# Security monitor background work is extra conservative because it is
+# not user-facing latency. It should never compete aggressively with
+# the dashboard for FB quota.
+_SECURITY_SCAN_CONCURRENCY = _env_int("SECURITY_SCAN_CONCURRENCY", 2)
+_SECURITY_PUSH_MAX_CONFIGS_PER_TICK = _env_int("SECURITY_PUSH_MAX_CONFIGS_PER_TICK", 3)
+_SECURITY_PUSH_ENRICH_CREATORS = os.getenv("SECURITY_PUSH_ENRICH_CREATORS", "0") == "1"
+
 
 class _NullAsyncContext:
     """No-op async context manager used in place of the per-account
@@ -4491,10 +4498,15 @@ async def get_engineering_fb_calls():
       - `recent`: last 200 call log entries (newest last)
       - `top_paths_5m`: paths sorted by call count in last 5 min
       - `top_accounts_5m`: account ids sorted by call count in last 5 min
+      - `top_sources_5m`: source tags sorted by live/gated call volume
+      - `status_counts_5m`: HTTP status distribution in last 5 min
       - `throttle_events`: recent 80000-80014 events per account
       - `cache_hit_rate_5m`: fraction of calls served from cache (0-1)
       - `account_throttle_until`: per-account cooldown deadlines (epoch seconds)
+      - `global_throttle_until`: process-wide cooldown deadline, if active
       - `error_count_5m`: count of non-200 responses in last 5 min
+      - `live_total_5m`: non-cache, non-gated calls that actually hit FB
+      - `blocked_total_5m`: fail-fast calls blocked by our cooldown gates
       - `total_5m`: total calls (cache + live) in last 5 min
 
     All read-only; doesn't itself hit FB."""
@@ -4511,16 +4523,85 @@ async def get_engineering_fb_calls():
     recent_window = [e for e in snapshot if e["ts"] >= cutoff_ts]
     path_counts: "Counter[str]" = Counter()
     account_counts: "Counter[str]" = Counter()
+    status_counts: "Counter[str]" = Counter()
+    source_stats: dict[str, dict] = {}
+    path_stats: dict[str, dict] = {}
     cache_hits = 0
     error_count = 0
+    live_total = 0
+    blocked_total = 0
+    retried_total = 0
     for e in recent_window:
-        path_counts[e["path"]] += 1
-        if e["account_id"]:
-            account_counts[e["account_id"]] += 1
-        if e["cache_hit"]:
+        path = str(e.get("path") or "")
+        source = str(e.get("source") or "unknown")
+        status = int(e.get("status") or 0)
+        ms = int(e.get("ms") or 0)
+        cache_hit = bool(e.get("cache_hit"))
+        is_error = status >= 400
+        is_blocked = status == 429 and ms == 0
+        is_live = not cache_hit and not is_blocked
+
+        path_counts[path] += 1
+        if e.get("account_id"):
+            account_counts[str(e["account_id"])] += 1
+        status_counts[str(status)] += 1
+        if cache_hit:
             cache_hits += 1
-        if e["status"] >= 400:
+        if is_error:
             error_count += 1
+        if is_live:
+            live_total += 1
+        if is_blocked:
+            blocked_total += 1
+        if e.get("retried"):
+            retried_total += 1
+
+        ss = source_stats.setdefault(
+            source,
+            {
+                "source": source,
+                "count": 0,
+                "live": 0,
+                "cache_hits": 0,
+                "blocked": 0,
+                "errors": 0,
+                "retried": 0,
+                "ms_total": 0,
+                "last_ts": 0.0,
+                "last_status": 0,
+                "last_path": "",
+            },
+        )
+        ss["count"] += 1
+        ss["live"] += 1 if is_live else 0
+        ss["cache_hits"] += 1 if cache_hit else 0
+        ss["blocked"] += 1 if is_blocked else 0
+        ss["errors"] += 1 if is_error else 0
+        ss["retried"] += 1 if e.get("retried") else 0
+        ss["ms_total"] += ms
+        if float(e.get("ts") or 0) >= float(ss["last_ts"] or 0):
+            ss["last_ts"] = float(e.get("ts") or 0)
+            ss["last_status"] = status
+            ss["last_path"] = path
+
+        ps = path_stats.setdefault(
+            path,
+            {
+                "path": path,
+                "count": 0,
+                "live": 0,
+                "cache_hits": 0,
+                "blocked": 0,
+                "errors": 0,
+                "sources": Counter(),
+            },
+        )
+        ps["count"] += 1
+        ps["live"] += 1 if is_live else 0
+        ps["cache_hits"] += 1 if cache_hit else 0
+        ps["blocked"] += 1 if is_blocked else 0
+        ps["errors"] += 1 if is_error else 0
+        ps["sources"][source] += 1
     total = len(recent_window)
     cache_hit_rate = (cache_hits / total) if total else 0.0
 
@@ -4558,10 +4639,43 @@ async def get_engineering_fb_calls():
     return {
         "recent": recent_slice,
         "top_paths_5m": [
-            {"path": p, "count": c} for p, c in path_counts.most_common(15)
+            {
+                "path": p,
+                "count": c,
+                "live": int(path_stats[p]["live"]),
+                "cache_hits": int(path_stats[p]["cache_hits"]),
+                "blocked": int(path_stats[p]["blocked"]),
+                "errors": int(path_stats[p]["errors"]),
+                "top_source": path_stats[p]["sources"].most_common(1)[0][0]
+                if path_stats[p]["sources"]
+                else "unknown",
+            }
+            for p, c in path_counts.most_common(15)
         ],
         "top_accounts_5m": [
             {"account_id": a, "count": c} for a, c in account_counts.most_common(15)
+        ],
+        "top_sources_5m": [
+            {
+                "source": s["source"],
+                "count": int(s["count"]),
+                "live": int(s["live"]),
+                "cache_hits": int(s["cache_hits"]),
+                "blocked": int(s["blocked"]),
+                "errors": int(s["errors"]),
+                "retried": int(s["retried"]),
+                "avg_ms": round(float(s["ms_total"]) / max(1, int(s["count"]))),
+                "last_status": int(s["last_status"]),
+                "last_path": s["last_path"],
+            }
+            for s in sorted(
+                source_stats.values(),
+                key=lambda x: (int(x["live"]) + int(x["blocked"]), int(x["errors"]), int(x["count"])),
+                reverse=True,
+            )[:15]
+        ],
+        "status_counts_5m": [
+            {"status": status, "count": count} for status, count in status_counts.most_common()
         ],
         "throttle_events": throttle_events,
         "global_throttle_events": list(_global_throttle_events),
@@ -4569,6 +4683,9 @@ async def get_engineering_fb_calls():
         "account_throttle_until": cooldowns,
         "global_throttle_until": (now_wall + global_remaining) if global_remaining > 0 else None,
         "error_count_5m": error_count,
+        "live_total_5m": live_total,
+        "blocked_total_5m": blocked_total,
+        "retried_total_5m": retried_total,
         "total_5m": total,
     }
 
@@ -8468,9 +8585,8 @@ async def test_security_push_config(
     visible in the 待查看 tab) and we push exactly those — zero FB
     calls, instant.
 
-    Fallback (no `cards` in body): re-scan up to 10 accounts on FB to
-    find sample data, falling back to most-recent if no anomaly hits.
-    Used when called from a context that doesn't have a view snapshot.
+    If no cards are supplied, we send a synthetic sample. The test
+    button verifies LINE plumbing; it must never trigger an FB scan.
 
     Does NOT advance `last_run_at`, so the next scheduler tick
     processes real events normally."""
@@ -8495,9 +8611,6 @@ async def test_security_push_config(
         raise HTTPException(status_code=400, detail="LINE channel 已停用或缺 access_token")
 
     cfg = dict(row)
-    owner_uid = cfg["owner_fb_user_id"]
-
-    fallback_used = False
 
     if payload and payload.cards:
         # Snapshot path — zero FB calls. Just transcode the cards
@@ -8512,7 +8625,7 @@ async def test_security_push_config(
                 },
                 "account_id": "",
                 "account_name": c.account_name,
-                "anomalies": list(c.anomalies),
+                "anomalies": _security_anomaly_tags(c.anomalies),
                 "creator": c.creator,
                 "spend": c.spend,
                 "spend_range_label": c.spend_range_label,
@@ -8520,23 +8633,7 @@ async def test_security_push_config(
             for c in payload.cards
         ]
     else:
-        # Fallback: no snapshot supplied → scan FB. Look back 30 days
-        # wide enough to find samples even on quiet accounts. Cap
-        # fan-out at 10 accounts (test is just plumbing verification,
-        # not full audit).
-        since_dt = datetime.now(timezone.utc) - timedelta(days=30)
-        ctx_token = _current_fb_user_id.set(owner_uid)
-        try:
-            matches = await _collect_security_matches(
-                cfg, since_dt, require_anomaly=True, limit=2, max_accounts=10
-            )
-            if not matches:
-                fallback_used = True
-                matches = await _collect_security_matches(
-                    cfg, since_dt, require_anomaly=False, limit=2, max_accounts=10
-                )
-        finally:
-            _current_fb_user_id.reset(ctx_token)
+        matches = []
 
     synthetic_used = False
     if not matches:
@@ -8557,7 +8654,7 @@ async def test_security_push_config(
                 },
                 "account_id": "",
                 "account_name": "[範例帳戶]",
-                "anomalies": list(cfg.get("anomaly_filters") or ["deep_night"]),
+                "anomalies": _security_anomaly_tags(cfg.get("anomaly_filters")) or ["deep_night"],
                 "creator": "[範例]",
                 "spend": 0,
                 "spend_range_label": None,
@@ -8577,14 +8674,15 @@ async def test_security_push_config(
         flex["altText"] = f"[測試 · 範例資料] {flex.get('altText', '')}"
     elif payload and payload.cards:
         flex["altText"] = f"[測試] {flex.get('altText', '')}"
-    elif fallback_used:
-        flex["altText"] = f"[測試 · 示範格式] {flex.get('altText', '')}"
     else:
         flex["altText"] = f"[測試] {flex.get('altText', '')}"
 
     errors: List[str] = []
     sent = 0
-    for gid in row["group_ids"] or []:
+    group_ids = [str(g) for g in _jsonb_list(row["group_ids"]) if g]
+    if not group_ids:
+        raise HTTPException(status_code=400, detail="此設定沒有 LINE 群組")
+    for gid in group_ids:
         try:
             await line_client.line_push(
                 _http_client,
@@ -8606,7 +8704,7 @@ async def test_security_push_config(
         "ok": True,
         "sent": sent,
         "errors": errors,
-        "fallback": fallback_used,
+        "fallback": False,
         "synthetic": synthetic_used,
     }
 
@@ -9053,6 +9151,45 @@ def _has_abnormal_language(name: str) -> bool:
     return False
 
 
+def _jsonb_list(value: Any) -> list:
+    """Decode asyncpg JSONB-ish values into a Python list.
+
+    asyncpg may hand jsonb back as a JSON string in this codebase. Never
+    iterate raw strings here: `"["act_1"]"` would become one fake
+    account id per character and explode the security scan fan-out.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
+_SECURITY_ANOMALY_TAGS = {
+    "deep_night",
+    "weekend",
+    "high_budget",
+    "burst",
+    "abnormal_language",
+}
+
+
+def _security_anomaly_tags(value: Any) -> list[str]:
+    """Return validated anomaly tags from ARRAY / JSONB / string input."""
+    raw = _jsonb_list(value)
+    out: list[str] = []
+    for item in raw:
+        tag = str(item or "").strip()
+        if tag in _SECURITY_ANOMALY_TAGS and tag not in out:
+            out.append(tag)
+    return out
+
+
 _ANOMALY_LABELS = {
     "deep_night": "深夜創建",
     "weekend": "週末創建",
@@ -9223,24 +9360,23 @@ async def _collect_security_matches(
                 owner_uid,
             )
         if row and row["value"]:
-            try:
-                account_ids = [str(x) for x in row["value"] if x]
-            except (TypeError, ValueError):
-                account_ids = []
+            account_ids = [str(x) for x in _jsonb_list(row["value"]) if x]
     if not account_ids:
         return []
 
     if max_accounts is not None and max_accounts > 0:
         account_ids = account_ids[:max_accounts]
 
-    filters = set(cfg.get("anomaly_filters") or [])
+    filters = set(_security_anomaly_tags(cfg.get("anomaly_filters")))
+    if not filters:
+        filters = {"deep_night", "weekend", "high_budget"}
     safe_ids = await _load_safe_campaign_ids() if exclude_safe else set()
 
     # Cap parallel fan-out so a 30-account config doesn't burst 30
-    # simultaneous campaign fetches against FB. 5 in-flight per
-    # config keeps us well clear of the 80004 per-account ceiling
-    # AND of the global 40-cap when multiple configs tick at once.
-    scan_sem = asyncio.Semaphore(5)
+    # simultaneous campaign fetches against FB. Default 2 in-flight
+    # because this is background work; operators can raise it via
+    # SECURITY_SCAN_CONCURRENCY after watching BUCU.
+    scan_sem = asyncio.Semaphore(_SECURITY_SCAN_CONCURRENCY)
 
     async def _scan_one(aid: str) -> list:
         async with scan_sem:
@@ -9346,7 +9482,7 @@ async def _collect_security_matches(
     if limit is not None:
         matches = matches[:limit]
 
-    # Enrich: account names + creator from Activity Log. Best-effort.
+    # Enrich: account names. Best-effort and cached by fb_get_paginated.
     try:
         accts_raw = await fb_get_paginated(
             "me/adaccounts",
@@ -9358,14 +9494,19 @@ async def _collect_security_matches(
     for m in matches:
         m["account_name"] = name_by_aid.get(m["account_id"], "")
 
+    if not _SECURITY_PUSH_ENRICH_CREATORS:
+        for m in matches:
+            m.pop("_created_dt", None)
+        return matches
+
     since_epoch = int(since_dt.timestamp())
     until_epoch = int(datetime.now(timezone.utc).timestamp())
     affected_aids = list({m["account_id"] for m in matches})
 
-    # Reuse the same 5-wide gate for activities fan-out so we don't
+    # Reuse the same conservative gate for activities fan-out so we don't
     # burst 30 concurrent /activities calls right after the campaigns
     # fan-out settled.
-    act_sem = asyncio.Semaphore(5)
+    act_sem = asyncio.Semaphore(_SECURITY_SCAN_CONCURRENCY)
 
     async def _fetch_activities(aid: str) -> list:
         # We ONLY need create-campaign events to attach a creator name
@@ -9503,10 +9644,11 @@ async def _security_push_tick() -> None:
                 SELECT * FROM security_push_configs
                 WHERE enabled AND next_run_at <= $1
                 ORDER BY next_run_at ASC
-                LIMIT 50
+                LIMIT $2
                 FOR UPDATE SKIP LOCKED
                 """,
                 now,
+                _SECURITY_PUSH_MAX_CONFIGS_PER_TICK,
             )
     for row in due:
         cfg = dict(row)

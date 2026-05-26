@@ -122,19 +122,17 @@ export function SecurityCampaignRow({
   const dailyBudget = effectiveDailyBudget(campaign);
   const dailyBudgetIsAggregate = dailyBudget !== null && !campaign.daily_budget;
 
-  // Spend within the user-selected date range — comes from the view's
-  // SECOND overview query (date follows the topbar DatePicker) and is
-  // passed in via the `spend` prop. Three-state display:
+  // Spend is optional; security scan runs in metadata-only mode to
+  // avoid extra FB insights calls. Three-state display:
   //   - insightsPending → "—" (full-phase still loading)
   //   - finite number → "$X"
-  //   - undefined / NaN after settle → "$0" (FB omits envelope for
-  //     campaigns with no spend in the window)
+  //   - undefined / NaN after settle → "—" (not fetched for this view)
   const spendDollars = spend !== undefined ? Number(spend) : Number.NaN;
   const spendLabel = insightsPending
     ? "—"
     : Number.isFinite(spendDollars)
       ? `$${fM(spendDollars)}`
-      : "$0";
+      : "—";
 
   const matchedActivities = useMemo<FbActivity[]>(() => {
     if (!activitiesQuery.data) return [];

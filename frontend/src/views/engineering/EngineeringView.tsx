@@ -48,18 +48,9 @@ function useTabVisible(): boolean {
 function EngineeringPanels() {
   return (
     <div className="flex flex-col gap-4">
-      <IdentityPanel />
-      <MemoryPanel />
-      <FbUsagePanel />
       <FbCallsPanel />
-      <div className="grid gap-4 md:grid-cols-2">
-        <ReactQueryPanel />
-        <BrowserPanel />
-      </div>
-      <div className="grid gap-4 md:grid-cols-2">
-        <ApiHealthPanel />
-        <StoragePanel />
-      </div>
+      <FbUsagePanel />
+      <RuntimeDiagnosticsPanel />
     </div>
   );
 }
@@ -75,6 +66,68 @@ export function EngineeringModal({
     <Modal open={open} onOpenChange={onOpenChange} title="工程模式" width={1100}>
       <EngineeringPanels />
     </Modal>
+  );
+}
+
+function RuntimeDiagnosticsPanel() {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="rounded-2xl border border-border bg-white p-4 md:p-5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          "-m-1 flex w-[calc(100%+0.5rem)] cursor-pointer items-start justify-between gap-3 rounded-lg p-1 text-left hover:bg-bg/60",
+          open ? "mb-3" : "mb-0",
+        )}
+        aria-expanded={open}
+      >
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className={cn(
+                "shrink-0 text-gray-400 transition-transform",
+                open ? "rotate-90" : "rotate-0",
+              )}
+              aria-hidden="true"
+            >
+              <title>{open ? "收合" : "展開"}</title>
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+            <h2 className="text-[15px] font-bold text-ink">其他診斷</h2>
+          </div>
+          {open ? (
+            <p className="mt-0.5 pl-[18px] text-xs text-gray-400">
+              身分、記憶體、前端快取與本機環境。平常收合，避免干擾 rate-limit 判讀。
+            </p>
+          ) : null}
+        </div>
+      </button>
+      {open ? (
+        <>
+          <div className="grid gap-4 md:grid-cols-2">
+            <IdentityPanel />
+            <MemoryPanel />
+          </div>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <ReactQueryPanel />
+            <ApiHealthPanel />
+          </div>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <BrowserPanel />
+            <StoragePanel />
+          </div>
+        </>
+      ) : null}
+    </section>
   );
 }
 
@@ -619,6 +672,9 @@ function FbCallsPanel() {
       .filter((c) => c.remainingSec > 0)
       .sort((a, b) => b.remainingSec - a.remainingSec);
   }, [data?.account_throttle_until]);
+  const globalCooldownRemainingSec = data?.global_throttle_until
+    ? Math.max(0, Math.floor(data.global_throttle_until - Date.now() / 1000))
+    : 0;
 
   const formatTs = (ts: number) => {
     const d = new Date(ts * 1000);
@@ -744,13 +800,43 @@ function FbCallsPanel() {
       </span>
     );
   };
+  const sourceReason = (source: string) => {
+    const reasons: Record<string, string> = {
+      warm: "背景 cache 預熱",
+      "line-push": "活動推播排程",
+      "security-push": "安全維護自動檢查",
+      "security-probe": "安全維護輕量探測",
+      "security-test": "推播設定測試",
+      "security-scan": "安全維護手動檢查",
+      dashboard: "儀表板資料載入",
+      alerts: "警示列表載入",
+      finance: "費用中心資料載入",
+      analytics: "數據分析載入",
+      history: "歷史花費查詢",
+      preload: "登入後預載",
+      auth: "登入驗證",
+      "store-expenses": "店家花費查詢",
+      "ai-staff": "AI 幕僚查詢",
+      view: "一般畫面載入",
+      report: "報告頁載入",
+      "accounts-list": "帳戶清單查詢",
+      "account-insights": "帳戶成效查詢",
+      "campaigns-list": "活動清單查詢",
+      activities: "編輯紀錄查詢",
+      "drill-adsets": "展開廣告組合",
+      "drill-ads": "展開廣告",
+      breakdown: "分眾分析查詢",
+      media: "素材媒體載入",
+      mutation: "修改 FB 物件",
+      unknown: "未標記呼叫來源",
+    };
+    return reasons[source] ?? "自訂或尚未歸類來源";
+  };
 
   return (
     <Card
-      title="最近 FB 呼叫 / 節流事件"
-      subtitle="後端 ring buffer:每一次 FB Graph API 呼叫(含 cache hit 與 gated)都在這裡。用來追「80004 發生前我們在打誰」。"
-      collapsible
-      defaultOpen={false}
+      title="FB Rate Limit 戰情室"
+      subtitle="只看真正 matter 的訊號:誰觸發、為什麼打、狀態如何、是否被我們擋下。此頁本身不打 FB。"
       action={
         <Button
           size="sm"
@@ -769,8 +855,13 @@ function FbCallsPanel() {
       ) : (
         <>
           {/* Aggregate cards */}
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-            <Stat label="5 分鐘總呼叫" value={data.total_5m} />
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
+            <Stat
+              label="真實 FB 呼叫"
+              value={data.live_total_5m}
+              tone={data.live_total_5m > 30 ? "warn" : "default"}
+            />
+            <Stat label="全部事件" value={data.total_5m} />
             <Stat
               label="Cache 命中率"
               value={Math.round(data.cache_hit_rate_5m * 100)}
@@ -781,8 +872,46 @@ function FbCallsPanel() {
               value={data.error_count_5m}
               tone={data.error_count_5m > 0 ? "err" : "default"}
             />
-            <Stat label="冷卻中帳戶" value={cooldowns.length} tone={cooldowns.length > 0 ? "err" : "default"} />
+            <Stat
+              label="主動擋下"
+              value={data.blocked_total_5m}
+              tone={data.blocked_total_5m > 0 ? "warn" : "default"}
+            />
+            <Stat
+              label="Retry"
+              value={data.retried_total_5m}
+              tone={data.retried_total_5m > 0 ? "warn" : "default"}
+            />
           </div>
+          {data.status_counts_5m.length > 0 ? (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-gray-500">
+              <span className="font-semibold text-gray-400">狀態分布</span>
+              {data.status_counts_5m.map((s) => (
+                <span
+                  key={s.status}
+                  className={cn(
+                    "rounded px-1.5 py-0.5 font-mono",
+                    Number(s.status) >= 400
+                      ? "bg-red-50 text-red-700"
+                      : "bg-gray-100 text-gray-600",
+                  )}
+                >
+                  {s.status}:{s.count}
+                </span>
+              ))}
+            </div>
+          ) : null}
+
+          {globalCooldownRemainingSec > 0 && (
+            <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-700">
+              <div className="font-semibold">全域 FB API 冷卻中</div>
+              <div className="mt-0.5">
+                code 4/17/32/613 這類 app/user/page bucket 已觸發，剩餘約{" "}
+                {Math.floor(globalCooldownRemainingSec / 60)}分{globalCooldownRemainingSec % 60}秒。
+                期間所有 FB 呼叫會 fail-fast，不會繼續打 FB。
+              </div>
+            </div>
+          )}
 
           {/* Per-account cooldowns */}
           {cooldowns.length > 0 && (
@@ -805,6 +934,58 @@ function FbCallsPanel() {
             </div>
           )}
 
+          {/* Source root-cause table */}
+          <div className="mt-3">
+            <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
+              5 分鐘來源 / 原因 / 狀態
+            </h3>
+            {data.top_sources_5m.length === 0 ? (
+              <div className="text-[12px] text-gray-400">尚無資料</div>
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-border">
+                <table className="w-full text-[11px]">
+                  <thead className="bg-bg text-left text-gray-500">
+                    <tr>
+                      <th className="px-2 py-1 font-semibold">來源</th>
+                      <th className="px-2 py-1 font-semibold">原因</th>
+                      <th className="px-2 py-1 text-right font-semibold">真打</th>
+                      <th className="px-2 py-1 text-right font-semibold">Cache</th>
+                      <th className="px-2 py-1 text-right font-semibold">已擋</th>
+                      <th className="px-2 py-1 text-right font-semibold">錯誤</th>
+                      <th className="px-2 py-1 text-right font-semibold">Retry</th>
+                      <th className="px-2 py-1 font-semibold">最後狀態</th>
+                      <th className="px-2 py-1 font-semibold">最後路徑</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.top_sources_5m.map((s) => (
+                      <tr key={s.source} className="border-t border-border">
+                        <td className="px-2 py-1">{formatSourceBadge(s.source)}</td>
+                        <td className="px-2 py-1 text-gray-600">{sourceReason(s.source)}</td>
+                        <td className="px-2 py-1 text-right font-mono text-ink">{s.live}</td>
+                        <td className="px-2 py-1 text-right font-mono text-emerald-700">{s.cache_hits}</td>
+                        <td className="px-2 py-1 text-right font-mono text-amber-700">{s.blocked}</td>
+                        <td
+                          className={cn(
+                            "px-2 py-1 text-right font-mono",
+                            s.errors > 0 ? "text-red-600" : "text-gray-500",
+                          )}
+                        >
+                          {s.errors}
+                        </td>
+                        <td className="px-2 py-1 text-right font-mono text-gray-500">{s.retried}</td>
+                        <td className="px-2 py-1 font-mono text-gray-600">{s.last_status || "—"}</td>
+                        <td className="max-w-[320px] truncate px-2 py-1 font-mono text-gray-500" title={s.last_path}>
+                          {s.last_path || "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
           {/* Top paths + Top accounts */}
           <div className="mt-3 grid gap-3 md:grid-cols-2">
             <div>
@@ -825,11 +1006,29 @@ function FbCallsPanel() {
                       >
                         <span className="min-w-0 flex-1 truncate" title={p.path}>
                           {nm ? <span className="mr-1 text-ink">{nm}</span> : null}
-                          <span className={cn("font-mono", nm ? "text-[10px] text-gray-400" : "text-ink")}>
+                          <span
+                            className={cn(
+                              "font-mono",
+                              nm ? "text-[10px] text-gray-400" : "text-ink",
+                            )}
+                          >
                             {p.path}
                           </span>
                         </span>
-                        <span className="shrink-0 font-mono text-gray-500">{p.count}</span>
+                        <span className="flex shrink-0 items-center gap-1.5">
+                          {formatSourceBadge(p.top_source)}
+                          <span
+                            className="font-mono text-gray-500"
+                            title={`總數 ${p.count} · cache ${p.cache_hits}`}
+                          >
+                            {p.live}
+                          </span>
+                          {p.errors > 0 ? (
+                            <span className="rounded bg-red-100 px-1 font-mono text-[10px] text-red-700">
+                              err {p.errors}
+                            </span>
+                          ) : null}
+                        </span>
                       </li>
                     );
                   })}

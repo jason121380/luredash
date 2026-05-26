@@ -63,34 +63,17 @@ export function SecurityMonitorView() {
   const [tab, setTab] = useState<SecurityTab>("pending");
   const [pushModalOpen, setPushModalOpen] = useState(false);
 
-  // 「立即掃描」 gate — flipping this to true triggers the two
-  // useMultiAccountOverview queries below. Default false so just
+  // 「立即掃描」 gate — flipping this to true triggers the
+  // useMultiAccountOverview query below. Default false so just
   // navigating into the view costs ZERO FB calls.
   //
-  // scanRequested is the only piece of UI state still kept in
-  // sessionStorage(per-tab,代表「我這 tab 已經請求過至少一次掃描」)。
-  // lastScanAt 改成從 DB 算出來(用 security_scan_records 最新一筆),
-  // 跨裝置同步;掃描完成後 invalidate query 取最新值。
-  const [scanRequested, setScanRequested] = useState(() => {
-    try {
-      return sessionStorage.getItem("security_scan_requested") === "1";
-    } catch {
-      return false;
-    }
-  });
+  // Do NOT hydrate this from sessionStorage / lastScanQuery. React Query
+  // cache is memory-only, so a browser refresh with "scan requested"
+  // persisted would silently re-hit FB. Security is now strictly
+  // click-to-scan.
+  const [scanRequested, setScanRequested] = useState(false);
   const [scanStartAt, setScanStartAt] = useState<number | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
-
-  // Persist scanRequested per-tab so navigating away / coming back
-  // restores the「已掃過」狀態(controls 重新掃描 vs 立即掃描 label).
-  useEffect(() => {
-    try {
-      if (scanRequested) sessionStorage.setItem("security_scan_requested", "1");
-      else sessionStorage.removeItem("security_scan_requested");
-    } catch {
-      /* private mode / quota — ignore */
-    }
-  }, [scanRequested]);
 
   // 「上次掃描時間」改從 DB 拉。security_scan_records 最新一筆的
   // scanned_at 就是答案。30s staleTime 足以讓 UI 看起來即時但不
@@ -125,19 +108,10 @@ export function SecurityMonitorView() {
   //      client-side filter on `created_time`, which matches the
   //      view's actual semantics ("campaigns CREATED in this window").
   const fetchDate = useMemo<DateConfig>(() => ({ preset: "last_90d", from: null, to: null }), []);
-  // 「之前掃過嗎」— 從 DB 看有沒有 last scan 紀錄。有 → 自動展示
-  // 上次的 cache(不打 FB,React Query Infinity staleTime 接住)。
-  // 沒有 → 維持「尚未掃描」空狀態,等 user 主動點按鈕。
-  //
-  // 換 device / 換瀏覽器 / 關 tab 重開 都會走到這條:DB 有紀錄就
-  // 自動顯示,讓 user 不用每次重新整理還要再按一次「立即掃描」。
-  const hasEverScanned = !!lastScanQuery.data;
-  // Pass `[]` when neither just-requested NOR ever-scanned →
-  // useMultiAccountOverview sees accounts.length === 0 → query
-  // disabled → 0 FB call. 點按鈕或 DB 有紀錄就帶完整帳戶集合進去,
-  // React Query 跨進出 cache(Infinity)會直接顯示上次結果,user
-  // 沒按重新掃描就絕對不會打 FB。
-  const scanAccounts = scanRequested || hasEverScanned ? visibleAll : [];
+  // Pass `[]` until the user explicitly clicks「立即掃描」. This is the
+  // key rate-limit guarantee for the page: DB history is shown via the
+  // scan-record endpoints, never by auto-replaying a FB scan.
+  const scanAccounts = scanRequested ? visibleAll : [];
 
   // includeAdsets:true here only — `effectiveDailyBudget` reads
   // `campaign.adsets.data` to aggregate ABO budgets. Dashboard / Alerts /
@@ -147,6 +121,7 @@ export function SecurityMonitorView() {
     includeArchived: true,
     includeAdsets: true,
     source: "security-scan",
+    liteOnly: true,
     // Cached results stay visible across mounts / hours of inactivity
     // until user clicks 重新掃描(which invalidates → forces refetch).
     // Without Infinity gcTime, React Query would GC after 30 min and
@@ -156,23 +131,10 @@ export function SecurityMonitorView() {
     gcTime: Number.POSITIVE_INFINITY,
   });
 
-  // SECOND overview query at the user's chosen date — only used to
-  // surface spend numbers that match the date-picker label (儀表板
-  // 也是這樣)。campaigns from this query may be a subset (FB throttle
-  // / fallback); we look up insights by id and fall back to "$0" /
-  // "—" when missing.
-  const spendOverview = useMultiAccountOverview(scanAccounts, date, {
-    includeArchived: true,
-    source: "security-scan",
-    staleTime: Number.POSITIVE_INFINITY,
-    gcTime: Number.POSITIVE_INFINITY,
-  });
-
   // 「上次掃描:N 分鐘前」 label 來自 lastScanQuery,scan 結束後在
   // POST record 那一段 invalidate 就會自動更新。這裡只需要追 isScanning
   // 用來 disable 按鈕 + edge-detect 完成的 transition。
-  const isScanning =
-    scanRequested && (overview.isFetching || spendOverview.isFetching);
+  const isScanning = scanRequested && overview.isFetching;
 
   // Edge-detect the "scanning → done" transition. Without the ref,
   // the history append runs on every render where !isScanning (even
@@ -182,12 +144,12 @@ export function SecurityMonitorView() {
   const wasScanning = useRef(false);
   const spendByCampaignId = useMemo(() => {
     const map = new Map<string, string>();
-    for (const c of spendOverview.campaigns) {
+    for (const c of overview.campaigns) {
       const s = c.insights?.data?.[0]?.spend;
       if (s !== undefined) map.set(c.id, s);
     }
     return map;
-  }, [spendOverview.campaigns]);
+  }, [overview.campaigns]);
 
   const allDays = useMemo(
     () => buildSecurityDays(overview.campaigns, date),
@@ -303,7 +265,7 @@ export function SecurityMonitorView() {
   // so the「測試」button can echo exactly what the user sees on screen
   // without backend re-scanning FB. Spend + range label travel along
   // so the LINE card shows「已花費 $X(本月)」exactly like the table.
-  const spendRangeLabel = useMemo(() => toShortLabel(date), [date]);
+  const spendRangeLabel = useMemo(() => toShortLabel(fetchDate), [fetchDate]);
   const pendingCardsSnapshot = useMemo<SecurityPushTestCard[]>(() => {
     const out: SecurityPushTestCard[] = [];
     for (const day of allDays) {
@@ -512,7 +474,7 @@ export function SecurityMonitorView() {
                   days={visibleDays}
                   creatorByCampaignId={creatorByCampaignId}
                   spendByCampaignId={spendByCampaignId}
-                  insightsPending={spendOverview.insightsPending}
+                  insightsPending={overview.insightsPending}
                   // Default collapsed for BOTH tabs — old default
                   // (待查看 auto-expanded) fired an /activities call
                   // for every visible account on view mount, which was
