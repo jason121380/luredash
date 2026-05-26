@@ -45,12 +45,82 @@ function useTabVisible(): boolean {
  * closed modal stops issuing requests immediately (the Modal unmounts
  * children when `open` flips false).
  */
+type EngineeringTab = "dashboard" | "ad-account" | "other";
+
+const ENGINEERING_TABS: Array<{
+  id: EngineeringTab;
+  label: string;
+  subtitle: string;
+}> = [
+  {
+    id: "dashboard",
+    label: "FB Rate Limit Dashboard",
+    subtitle: "原 FB Rate Limit 戰情室",
+  },
+  {
+    id: "ad-account",
+    label: "FB Rate Limit by Ad Account",
+    subtitle: "FB API 節流狀態",
+  },
+  {
+    id: "other",
+    label: "Other",
+    subtitle: "其他診斷",
+  },
+];
+
 function EngineeringPanels() {
+  const [activeTab, setActiveTab] = useState<EngineeringTab>("dashboard");
+  const activeMeta = ENGINEERING_TABS.find((t) => t.id === activeTab) ?? ENGINEERING_TABS[0];
+
   return (
-    <div className="flex flex-col gap-4">
-      <FbCallsPanel />
-      <FbUsagePanel />
-      <RuntimeDiagnosticsPanel />
+    <div className="grid gap-4 md:grid-cols-[240px_minmax(0,1fr)]">
+      <aside className="md:sticky md:top-0 md:self-start">
+        <div
+          className="flex gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0"
+          role="tablist"
+          aria-label="工程模式分類"
+        >
+          {ENGINEERING_TABS.map((tab) => {
+            const selected = tab.id === activeTab;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                onClick={() => setActiveTab(tab.id)}
+                className={cn(
+                  "min-w-[210px] rounded-lg px-3 py-2 text-left transition md:min-w-0",
+                  selected
+                    ? "bg-ink text-white"
+                    : "bg-bg text-gray-500 hover:bg-gray-100 hover:text-ink",
+                )}
+              >
+                <div className="text-[12px] font-bold leading-tight">{tab.label}</div>
+                <div
+                  className={cn(
+                    "mt-1 text-[10px] leading-tight",
+                    selected ? "text-white/70" : "text-gray-400",
+                  )}
+                >
+                  {tab.subtitle}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </aside>
+
+      <div role="tabpanel" aria-label={activeMeta?.label ?? "工程模式"} className="min-w-0">
+        {activeTab === "dashboard" ? (
+          <FbCallsPanel />
+        ) : activeTab === "ad-account" ? (
+          <FbUsagePanel />
+        ) : (
+          <RuntimeDiagnosticsPanel />
+        )}
+      </div>
     </div>
   );
 }
@@ -70,63 +140,26 @@ export function EngineeringModal({
 }
 
 function RuntimeDiagnosticsPanel() {
-  const [open, setOpen] = useState(false);
   return (
-    <section className="rounded-2xl border border-border bg-white p-4 md:p-5">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className={cn(
-          "-m-1 flex w-[calc(100%+0.5rem)] cursor-pointer items-start justify-between gap-3 rounded-lg p-1 text-left hover:bg-bg/60",
-          open ? "mb-3" : "mb-0",
-        )}
-        aria-expanded={open}
-      >
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className={cn(
-                "shrink-0 text-gray-400 transition-transform",
-                open ? "rotate-90" : "rotate-0",
-              )}
-              aria-hidden="true"
-            >
-              <title>{open ? "收合" : "展開"}</title>
-              <polyline points="9 18 15 12 9 6" />
-            </svg>
-            <h2 className="text-[15px] font-bold text-ink">其他診斷</h2>
-          </div>
-          {open ? (
-            <p className="mt-0.5 pl-[18px] text-xs text-gray-400">
-              身分、記憶體、前端快取與本機環境。平常收合，避免干擾 rate-limit 判讀。
-            </p>
-          ) : null}
-        </div>
-      </button>
-      {open ? (
-        <>
-          <div className="grid gap-4 md:grid-cols-2">
-            <IdentityPanel />
-            <MemoryPanel />
-          </div>
-          <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <ReactQueryPanel />
-            <ApiHealthPanel />
-          </div>
-          <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <BrowserPanel />
-            <StoragePanel />
-          </div>
-        </>
-      ) : null}
+    <section>
+      <header className="mb-3">
+        <h2 className="text-[15px] font-bold text-ink">Other</h2>
+        <p className="mt-0.5 text-xs text-gray-400">
+          其他診斷:身分、記憶體、前端快取與本機環境。
+        </p>
+      </header>
+      <div className="grid gap-4 md:grid-cols-2">
+        <IdentityPanel />
+        <MemoryPanel />
+      </div>
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        <ReactQueryPanel />
+        <ApiHealthPanel />
+      </div>
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        <BrowserPanel />
+        <StoragePanel />
+      </div>
     </section>
   );
 }
@@ -392,9 +425,8 @@ function FbUsagePanel() {
 
   return (
     <Card
-      title="FB API 節流狀態"
-      collapsible
-      defaultOpen={false}
+      title="FB Rate Limit by Ad Account"
+      subtitle="FB API 節流狀態"
       action={
         <Button
           size="sm"
@@ -840,7 +872,7 @@ function FbCallsPanel() {
 
   return (
     <Card
-      title="FB Rate Limit 戰情室"
+      title="FB Rate Limit Dashboard"
       subtitle="只看真正 matter 的訊號:誰觸發、為什麼打、狀態如何、是否被我們擋下。此頁本身不打 FB。"
       frameless
       action={
