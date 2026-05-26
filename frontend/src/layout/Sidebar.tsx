@@ -31,6 +31,7 @@ interface NavItem {
   to: string;
   icon: JSX.Element;
   label: string;
+  beta?: boolean;
 }
 
 // ── Icons(reused across groups so we don't duplicate SVG markup) ──
@@ -130,14 +131,14 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: "/dashboard", label: "儀表板", icon: ICON_DASHBOARD },
       { to: "/analytics", label: "數據圖表", icon: ICON_CHART },
-      { to: "/security", label: "安全防護", icon: ICON_SHIELD },
+      { to: "/security", label: "安全防護", icon: ICON_SHIELD, beta: true },
     ],
   },
   {
     label: "成效",
     items: [
       { to: "/alerts", label: "警示列表", icon: ICON_ALERT },
-      { to: "/optimization", label: "優化中心", icon: ICON_TARGET },
+      { to: "/optimization", label: "優化中心", icon: ICON_TARGET, beta: true },
     ],
   },
   {
@@ -316,8 +317,17 @@ function SidebarLink({ item }: { item: NavItem }) {
       <span className="flex w-[18px] shrink-0 items-center justify-center">
         {item.icon}
       </span>
-      {item.label}
+      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+      {item.beta && <BetaTag />}
     </NavLink>
+  );
+}
+
+function BetaTag() {
+  return (
+    <span className="shrink-0 rounded-full bg-orange-bg px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wider text-orange">
+      Beta
+    </span>
   );
 }
 
