@@ -173,8 +173,10 @@ function ConfigList({
 }) {
   const del = useDeleteSecurityPushConfig();
   const test = useTestSecurityPushConfig();
+  const [testingId, setTestingId] = useState<string | null>(null);
 
   const handleTest = async (id: string) => {
+    setTestingId(id);
     try {
       const resp = await test.mutateAsync({ id, cards: pendingCards });
       if (resp.errors.length > 0) {
@@ -183,15 +185,16 @@ function ConfigList({
           "error",
           6000,
         );
+      } else if (resp.synthetic) {
+        toast(`已送出範例測試訊息到 ${resp.sent} 個群組`, "success");
       } else {
         toast(`已送出測試推播到 ${resp.sent} 個群組`, "success");
       }
     } catch (e) {
       const raw = e instanceof Error ? e.message : "未知錯誤";
-      // Surface the raw backend error so the user can tell us what
-      // went wrong — pattern-matching to "friendly" text was hiding
-      // useful detail (rate limit codes, validation errors, etc.).
       toast(`測試失敗:${raw}`, "error", 8000);
+    } finally {
+      setTestingId(null);
     }
   };
 
@@ -255,10 +258,10 @@ function ConfigList({
                   <Button
                     size="sm"
                     variant="ghost"
-                    disabled={test.isPending}
+                    disabled={testingId === cfg.id}
                     onClick={() => void handleTest(cfg.id)}
                   >
-                    {test.isPending ? "測試中..." : "測試"}
+                    {testingId === cfg.id ? "測試中..." : "測試"}
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => onEdit(cfg)}>
                     編輯

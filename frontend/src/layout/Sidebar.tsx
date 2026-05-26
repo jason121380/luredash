@@ -208,13 +208,13 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
           glued to the sidebar bottom on iOS PWA. Putting overflow-y
           on the parent <aside> instead causes flex-1 + mt-auto to
           mis-measure and leave a dead-air gap below the avatar. */}
-      <nav className="min-h-0 flex-1 overflow-y-auto p-2.5">
+      <nav className="min-h-0 flex-1 overflow-y-auto p-2">
         {NAV_GROUPS.map((group, idx) => (
           <div key={group.label}>
             <div
               className={cn(
-                "px-2.5 pt-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.8px] text-gray-300",
-                idx > 0 && "mt-2",
+                "px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-[0.8px] text-gray-300",
+                idx > 0 && "mt-1",
               )}
             >
               {group.label}
@@ -334,8 +334,8 @@ function SidebarLink({ item }: { item: NavItem }) {
       onTouchStart={prefetch}
       className={({ isActive }) =>
         cn(
-          "mb-1 flex min-h-[44px] select-none items-center gap-3 rounded-xl px-3.5 py-2.5",
-          "text-[14px] font-medium transition-[all] duration-150 cursor-pointer",
+          "mb-0.5 flex min-h-[32px] select-none items-center gap-2.5 rounded-lg px-2.5 py-1.5",
+          "text-[13px] font-medium transition-[all] duration-150 cursor-pointer",
           "active:scale-[0.98]",
           isActive
             ? "bg-orange-bg font-semibold text-orange"
@@ -343,7 +343,7 @@ function SidebarLink({ item }: { item: NavItem }) {
         )
       }
     >
-      <span className="flex w-[22px] shrink-0 items-center justify-center text-[17px]">
+      <span className="flex w-[18px] shrink-0 items-center justify-center">
         {item.icon}
       </span>
       {item.label}

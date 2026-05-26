@@ -8341,11 +8341,31 @@ async def test_security_push_config(
         finally:
             _current_fb_user_id.reset(ctx_token)
 
+    synthetic_used = False
     if not matches:
-        raise HTTPException(
-            status_code=404,
-            detail="近 30 天沒有可用的活動可供測試。請先在所選帳戶建立一些活動。",
-        )
+        # Last-resort synthetic sample so the user can verify LINE
+        # plumbing even when no recent campaigns exist (new accounts,
+        # paused-only accounts, or accounts whose campaigns are all
+        # older than 30 days). Labeled clearly so recipients know
+        # this is a connectivity probe, not a real alert.
+        synthetic_used = True
+        now_iso = datetime.now(timezone.utc).isoformat()
+        matches = [
+            {
+                "campaign": {
+                    "id": "test_synthetic",
+                    "name": "[範例] 測試廣告活動",
+                    "created_time": now_iso,
+                    "daily_budget": "500",
+                },
+                "account_id": "",
+                "account_name": "[範例帳戶]",
+                "anomalies": list(cfg.get("anomaly_filters") or ["deep_night"]),
+                "creator": "[範例]",
+                "spend": 0,
+                "spend_range_label": None,
+            }
+        ]
 
     if _http_client is None:
         raise HTTPException(status_code=503, detail="伺服器尚未初始化,請稍後再試")
@@ -8356,7 +8376,9 @@ async def test_security_push_config(
 
     # Mark test pushes in the altText so recipients can tell sample
     # from production. (Body text already says 「Meta後台系統警示」.)
-    if payload and payload.cards:
+    if synthetic_used:
+        flex["altText"] = f"[測試 · 範例資料] {flex.get('altText', '')}"
+    elif payload and payload.cards:
         flex["altText"] = f"[測試] {flex.get('altText', '')}"
     elif fallback_used:
         flex["altText"] = f"[測試 · 示範格式] {flex.get('altText', '')}"
@@ -8383,7 +8405,13 @@ async def test_security_push_config(
 
     if errors and sent == 0:
         raise HTTPException(status_code=502, detail="; ".join(errors))
-    return {"ok": True, "sent": sent, "errors": errors, "fallback": fallback_used}
+    return {
+        "ok": True,
+        "sent": sent,
+        "errors": errors,
+        "fallback": fallback_used,
+        "synthetic": synthetic_used,
+    }
 
 
 # ── Scheduler loop ────────────────────────────────────────────
