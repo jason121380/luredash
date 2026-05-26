@@ -91,17 +91,19 @@ function EngineeringPanels() {
                 aria-selected={selected}
                 onClick={() => setActiveTab(tab.id)}
                 className={cn(
-                  "min-w-[210px] rounded-lg px-3 py-2 text-left transition md:min-w-0",
+                  "min-w-[210px] select-none rounded-lg px-2.5 py-2 text-left transition-[all] duration-150 active:scale-[0.98] md:min-w-0",
                   selected
-                    ? "bg-ink text-white"
-                    : "bg-bg text-gray-500 hover:bg-gray-100 hover:text-ink",
+                    ? "bg-orange-bg text-orange"
+                    : "text-gray-500 hover:bg-orange-bg hover:text-orange",
                 )}
               >
-                <div className="text-[12px] font-bold leading-tight">{tab.label}</div>
+                <div className={cn("text-[13px] leading-tight", selected ? "font-semibold" : "font-medium")}>
+                  {tab.label}
+                </div>
                 <div
                   className={cn(
                     "mt-1 text-[10px] leading-tight",
-                    selected ? "text-white/70" : "text-gray-400",
+                    selected ? "text-orange/70" : "text-gray-400",
                   )}
                 >
                   {tab.subtitle}
