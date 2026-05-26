@@ -29,7 +29,10 @@ interface NavItem {
   label: string;
 }
 
-const NAV_ITEMS: NavItem[] = [
+// 一般 — high-frequency「進來看數字」類的 view。儀表板給跨帳戶的
+// 即時 KPI;數據圖表(原「數據分析」)給切片趨勢圖。其餘 view 分
+// 別放在 NAV_ITEMS(主選單)/ TOOL_ITEMS(工具)下方。
+const GENERAL_ITEMS: NavItem[] = [
   {
     to: "/dashboard",
     label: "儀表板",
@@ -54,7 +57,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     to: "/analytics",
-    label: "數據分析",
+    label: "數據圖表",
     icon: (
       <svg
         width="16"
@@ -71,6 +74,9 @@ const NAV_ITEMS: NavItem[] = [
       </svg>
     ),
   },
+];
+
+const NAV_ITEMS: NavItem[] = [
   {
     to: "/alerts",
     label: "警示列表",
@@ -311,6 +317,13 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
           mis-measure and leave a dead-air gap below the avatar. */}
       <nav className="min-h-0 flex-1 overflow-y-auto p-2.5">
         <div className="px-2.5 pt-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.8px] text-gray-300">
+          一般
+        </div>
+        {GENERAL_ITEMS.map((item) => (
+          <SidebarLink key={item.to} item={item} />
+        ))}
+
+        <div className="mt-2 px-2.5 pt-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.8px] text-gray-300">
           主選單
         </div>
         {NAV_ITEMS.map((item) => (
