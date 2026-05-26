@@ -1,7 +1,7 @@
 import { api, type SecurityPushTestCard } from "@/api/client";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { queryClient } from "@/lib/queryClient";
-import { ScanHistoryModal } from "./ScanHistoryModal";
+import { ScanHistoryPanel } from "./ScanHistoryPanel";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
 import { DatePicker } from "@/components/DatePicker";
@@ -73,7 +73,6 @@ export function SecurityMonitorView() {
   // click-to-scan.
   const [scanRequested, setScanRequested] = useState(false);
   const [scanStartAt, setScanStartAt] = useState<number | null>(null);
-  const [historyOpen, setHistoryOpen] = useState(false);
 
   // 「上次掃描時間」改從 DB 拉。security_scan_records 最新一筆的
   // scanned_at 就是答案。30s staleTime 足以讓 UI 看起來即時但不
@@ -365,35 +364,6 @@ export function SecurityMonitorView() {
           </button>
           <button
             type="button"
-            onClick={() => setHistoryOpen(true)}
-            className={cn(
-              "flex h-10 select-none items-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 md:h-9",
-              "text-[13px] font-medium text-ink font-sans",
-              "transition-all duration-150 cursor-pointer active:scale-95",
-              "border-border bg-white hover:border-orange-border hover:bg-orange-bg",
-            )}
-          >
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="shrink-0 text-orange"
-              aria-hidden="true"
-            >
-              <title>history</title>
-              <path d="M3 3v5h5" />
-              <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
-              <path d="M12 7v5l4 2" />
-            </svg>
-            <span>掃描紀錄</span>
-          </button>
-          <button
-            type="button"
             onClick={() => setPushModalOpen(true)}
             className={cn(
               "flex h-10 select-none items-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 md:h-9",
@@ -427,9 +397,8 @@ export function SecurityMonitorView() {
         onOpenChange={setPushModalOpen}
         pendingCards={pendingCardsSnapshot}
       />
-      <ScanHistoryModal open={historyOpen} onOpenChange={setHistoryOpen} />
 
-      <div className="flex min-w-0 items-start md:flex-row">
+      <div className="flex min-w-0 flex-col items-stretch xl:flex-row">
         {/* 帳戶清單面板已移除 — 安全監控是 review 用,只關心
             「跨帳戶有哪些新建立的可疑活動」。要看單一帳戶細節
             (insights / 廣告組合 / 廣告) 請回儀表板。 */}
@@ -491,6 +460,9 @@ export function SecurityMonitorView() {
               )}
             </div>
           )}
+        </div>
+        <div className="min-h-[360px] shrink-0 xl:h-[calc(100vh-57px)] xl:w-[340px]">
+          <ScanHistoryPanel />
         </div>
       </div>
     </>
