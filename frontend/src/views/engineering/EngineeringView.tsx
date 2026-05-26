@@ -532,7 +532,9 @@ function FbCallsPanel() {
     return nameByActId.get(aid) ?? null;
   };
 
-  const [hideCacheHits, setHideCacheHits] = useState(false);
+  // Default ON — cache hits are noise(同帳戶連看 3 筆綠色「快取」),
+  // operator 大部分時候想看的是「真的打 FB 的」。
+  const [hideCacheHits, setHideCacheHits] = useState(true);
   const recent = useMemo(() => {
     const r = data?.recent ?? [];
     // Newest first for the table — backend returns oldest-first.
@@ -653,11 +655,24 @@ function FbCallsPanel() {
       "ai-staff": { label: "AI 幕僚", cls: "bg-emerald-50 text-emerald-700" },
       view: { label: "瀏覽畫面", cls: "bg-gray-100 text-gray-700" },
       report: { label: "報告頁", cls: "bg-gray-100 text-gray-700" },
-      unknown: { label: "其他", cls: "bg-gray-50 text-gray-500" },
+      // ── 各種 drill-down / 單次 fetch — 共用灰色 ──
+      "accounts-list": { label: "帳戶清單", cls: "bg-gray-100 text-gray-700" },
+      "account-insights": { label: "帳戶數據", cls: "bg-gray-100 text-gray-700" },
+      "campaigns-list": { label: "活動清單", cls: "bg-gray-100 text-gray-700" },
+      activities: { label: "編輯紀錄", cls: "bg-gray-100 text-gray-700" },
+      "drill-adsets": { label: "點開廣告組合", cls: "bg-gray-100 text-gray-700" },
+      "drill-ads": { label: "點開廣告", cls: "bg-gray-100 text-gray-700" },
+      breakdown: { label: "分眾分析", cls: "bg-gray-100 text-gray-700" },
+      media: { label: "媒體載入", cls: "bg-gray-100 text-gray-700" },
+      mutation: { label: "修改操作", cls: "bg-pink-50 text-pink-700" },
+      unknown: { label: "未標記", cls: "bg-gray-50 text-gray-500" },
     };
-    const m = meta[source] ?? { label: source || "其他", cls: "bg-gray-50 text-gray-500" };
+    const m = meta[source] ?? { label: source || "未標記", cls: "bg-gray-50 text-gray-500" };
     return (
-      <span className={cn("whitespace-nowrap rounded px-1.5 py-0.5 text-[10px]", m.cls)}>
+      <span
+        className={cn("whitespace-nowrap rounded px-1.5 py-0.5 text-[10px]", m.cls)}
+        title={`原始 source tag: ${source || "(empty)"}`}
+      >
         {m.label}
       </span>
     );
