@@ -1,5 +1,6 @@
 import { useSubscription } from "@/api/hooks/useSubscription";
 import { useFbAuth } from "@/auth/FbAuthProvider";
+import { BucuHeaderChip } from "@/components/BucuHeaderChip";
 import { TierBadge } from "@/components/TierBadge";
 import { cn } from "@/lib/cn";
 import { withReloadOnChunkError } from "@/lib/chunkReload";
@@ -265,7 +266,10 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
               <span className="w-full truncate text-[13px] font-semibold text-ink">
                 {user?.name ?? ""}
               </span>
-              {sub && <TierBadge tier={sub.tier} />}
+              <span className="flex max-w-full items-center gap-1.5">
+                {sub && <TierBadge tier={sub.tier} />}
+                <BucuHeaderChip />
+              </span>
             </div>
           </button>
 
