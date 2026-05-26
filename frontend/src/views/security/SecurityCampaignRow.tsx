@@ -92,6 +92,8 @@ export interface SecurityCampaignRowProps {
   activitiesUntil: number;
   /** Fixed fetch range for row-level lazy details. */
   detailDate: DateConfig;
+  /** Hide this row from the current UI without deleting scan records. */
+  onHide?: (campaignId: string) => void;
 }
 
 export function SecurityCampaignRow({
@@ -103,6 +105,7 @@ export function SecurityCampaignRow({
   activitiesSince,
   activitiesUntil,
   detailDate,
+  onHide,
 }: SecurityCampaignRowProps) {
   const [expanded, setExpanded] = useState(defaultExpanded ?? false);
   const campaign = row.campaign;
@@ -264,6 +267,31 @@ export function SecurityCampaignRow({
           >
             {expanded ? "收合編輯紀錄" : "編輯紀錄"}
           </button>
+          {onHide && (
+            <button
+              type="button"
+              onClick={() => onHide(campaign.id)}
+              title="從畫面隱藏(不刪除資料庫)"
+              aria-label="從畫面隱藏"
+              className="flex h-[27px] w-[27px] items-center justify-center rounded-md border border-border bg-white text-gray-400 hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+            >
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <title>hide</title>
+                <path d="M18 6 6 18" />
+                <path d="m6 6 12 12" />
+              </svg>
+            </button>
+          )}
         </div>
       </div>
 
