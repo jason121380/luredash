@@ -445,6 +445,7 @@ function FbUsagePanel() {
     <Card
       title="FB Rate Limit by Ad Account"
       subtitle="FB API 節流狀態"
+      frameless
       action={
         <Button
           size="sm"
