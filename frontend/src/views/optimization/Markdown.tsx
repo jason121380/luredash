@@ -132,7 +132,7 @@ function renderGrouped(blocks: Block[]): React.ReactNode[] {
         <details
           key={`account-${i}`}
           open
-          className="group min-w-0 overflow-visible rounded-xl border border-border bg-white p-3 shadow-sm"
+          className="group min-w-0 overflow-visible rounded-xl border border-border bg-white p-3"
         >
           <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
             <h2 className="min-w-0 truncate text-[15px] font-bold text-ink">
