@@ -187,6 +187,8 @@ function ConfigList({
         );
       } else if (resp.synthetic) {
         toast(`已送出範例測試訊息到 ${resp.sent} 個群組`, "success");
+      } else if (resp.source === "scan_record") {
+        toast(`已用最近掃描紀錄送出測試推播到 ${resp.sent} 個群組`, "success");
       } else {
         toast(`已送出測試推播到 ${resp.sent} 個群組`, "success");
       }

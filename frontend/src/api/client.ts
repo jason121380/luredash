@@ -610,6 +610,7 @@ export const api = {
         errors: string[];
         fallback?: boolean;
         synthetic?: boolean;
+        source?: "screen" | "scan_record" | "synthetic";
       }>(
         "POST",
         `/api/security-push/configs/${encodeURIComponent(id)}/test`,

@@ -8818,6 +8818,77 @@ class SecurityPushTestPayload(BaseModel):
     cards: List[_TestCardPayload] = []
 
 
+def _security_test_match_from_record(raw: Any) -> Optional[dict]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    if not isinstance(raw, dict):
+        return None
+
+    campaign = raw.get("campaign")
+    if isinstance(campaign, dict):
+        campaign = dict(campaign)
+    else:
+        cid = raw.get("campaign_id") or raw.get("id")
+        if not cid:
+            return None
+        campaign = {
+            "id": cid,
+            "name": raw.get("name") or raw.get("campaign_name"),
+            "status": raw.get("status"),
+            "created_time": raw.get("created_time"),
+            "daily_budget": raw.get("daily_budget"),
+            "lifetime_budget": raw.get("lifetime_budget"),
+        }
+
+    if not campaign.get("id"):
+        return None
+    return {
+        "campaign": campaign,
+        "account_id": raw.get("account_id") or "",
+        "account_name": raw.get("account_name") or "",
+        "anomalies": _security_anomaly_tags(raw.get("anomalies")),
+        "creator": raw.get("creator"),
+        "spend": raw.get("spend"),
+        "spend_range_label": raw.get("spend_range_label"),
+    }
+
+
+async def _latest_security_scan_matches_for_test(
+    conn: Any,
+    *,
+    config_id: str,
+    fb_user_id: str,
+) -> list[dict]:
+    row = await conn.fetchrow(
+        """
+        SELECT matches
+        FROM security_scan_records
+        WHERE matches_count > 0
+          AND (
+            config_id = $1::uuid
+            OR fb_user_id = $2
+          )
+        ORDER BY
+          CASE WHEN config_id = $1::uuid THEN 0 ELSE 1 END,
+          scanned_at DESC
+        LIMIT 1
+        """,
+        config_id,
+        fb_user_id,
+    )
+    if not row:
+        return []
+    out: list[dict] = []
+    for raw in _jsonb_list(row["matches"]):
+        m = _security_test_match_from_record(raw)
+        if m:
+            out.append(m)
+    return out
+
+
 @app.post("/api/security-push/configs/{config_id}/test")
 async def test_security_push_config(
     config_id: str,
@@ -8857,6 +8928,7 @@ async def test_security_push_config(
 
     cfg = dict(row)
 
+    test_source = "screen"
     if payload and payload.cards:
         # Snapshot path — zero FB calls. Just transcode the cards
         # into the shape `build_security_alert_flex` expects.
@@ -8880,8 +8952,18 @@ async def test_security_push_config(
     else:
         matches = []
 
+    if not matches:
+        test_source = "scan_record"
+        async with pool.acquire() as conn:
+            matches = await _latest_security_scan_matches_for_test(
+                conn,
+                config_id=config_id,
+                fb_user_id=fb_user_id,
+            )
+
     synthetic_used = False
     if not matches:
+        test_source = "synthetic"
         # Last-resort synthetic sample so the user can verify LINE
         # plumbing even when no recent campaigns exist (new accounts,
         # paused-only accounts, or accounts whose campaigns are all
@@ -8917,6 +8999,8 @@ async def test_security_push_config(
     # from production. (Body text already says 「Meta後台系統警示」.)
     if synthetic_used:
         flex["altText"] = f"[測試 · 範例資料] {flex.get('altText', '')}"
+    elif test_source == "scan_record":
+        flex["altText"] = f"[測試 · 最近掃描紀錄] {flex.get('altText', '')}"
     elif payload and payload.cards:
         flex["altText"] = f"[測試] {flex.get('altText', '')}"
     else:
@@ -8951,6 +9035,7 @@ async def test_security_push_config(
         "errors": errors,
         "fallback": False,
         "synthetic": synthetic_used,
+        "source": test_source,
     }
 
 
