@@ -139,10 +139,20 @@ function renderGrouped(blocks: Block[]): React.ReactNode[] {
               {renderInline(b.text)}
             </h2>
             <span
-              className="shrink-0 text-[12px] text-gray-300 transition-transform group-open:rotate-180"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-orange-bg text-orange transition-colors group-hover:bg-orange/10"
               aria-hidden="true"
             >
-              ▼
+              <svg
+                className="h-4 w-4 transition-transform group-open:rotate-180"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
             </span>
           </summary>
           <div className="mt-2 flex flex-col gap-1.5">
