@@ -237,6 +237,30 @@ export function setApiUserId(id: string | null): void {
 // lock just wait for it to clear instead of firing their own POST.
 const REFRESH_LOCK_KEY = "auth_refresh_lock";
 const REFRESH_LOCK_MAX_MS = 8000;
+const AUTH_COOLDOWN_KEY = "meta_dash_fb_auth_cooldown_until";
+const AUTH_COOLDOWN_FALLBACK_MS = 10 * 60_000;
+
+function getAuthCooldown(): number | null {
+  try {
+    const raw = localStorage.getItem(AUTH_COOLDOWN_KEY);
+    const until = raw ? Number(raw) : 0;
+    if (Number.isFinite(until) && until > Date.now()) return until;
+    localStorage.removeItem(AUTH_COOLDOWN_KEY);
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function rememberAuthCooldown(detail: string): void {
+  const match = detail.match(/(\d+)\s*秒/);
+  const waitMs = match ? Math.max(30_000, Number(match[1]) * 1000) : AUTH_COOLDOWN_FALLBACK_MS;
+  try {
+    localStorage.setItem(AUTH_COOLDOWN_KEY, String(Date.now() + waitMs));
+  } catch {
+    /* ignore */
+  }
+}
 
 async function waitForOtherTabRefresh(): Promise<void> {
   const start = Date.now();
@@ -259,6 +283,10 @@ async function waitForOtherTabRefresh(): Promise<void> {
 function refreshBackendToken(): Promise<void> {
   if (refreshPromise) return refreshPromise;
   refreshPromise = (async () => {
+    const activeCooldown = getAuthCooldown();
+    if (activeCooldown) {
+      throw new Error("FB auth verify cooldown active");
+    }
     // If another tab is already refreshing, just wait for it. After
     // it finishes, our next user-facing request will retry with the
     // updated token / runtime cache.
@@ -300,9 +328,15 @@ function refreshBackendToken(): Promise<void> {
             request<{ ok: boolean }>("POST", "/api/auth/token", {
               body: { token: accessToken },
               skipAuthRefresh: true,
+              source: "auth",
             })
               .then(() => resolve())
-              .catch(reject);
+              .catch((err) => {
+                if (err instanceof ApiError && err.status === 429) {
+                  rememberAuthCooldown(err.detail);
+                }
+                reject(err);
+              });
           } else {
             reject(new Error("FB session not connected"));
           }

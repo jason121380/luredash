@@ -81,6 +81,7 @@ export interface FbAuthContextValue {
   status: FbAuthStatus;
   user: FbAuthUser | null;
   error: string | null;
+  cooldownUntil: number | null;
   login: () => void;
   logout: () => Promise<void>;
 }
@@ -92,6 +93,8 @@ const FbAuthContext = createContext<FbAuthContextValue | null>(null);
 let sdkLoading = false;
 let sdkReady = false;
 const sdkCallbacks: Array<() => void> = [];
+const AUTH_COOLDOWN_KEY = "meta_dash_fb_auth_cooldown_until";
+const AUTH_COOLDOWN_FALLBACK_MS = 10 * 60_000;
 
 function ensureSdkLoaded(): Promise<void> {
   if (sdkReady) return Promise.resolve();
@@ -124,16 +127,48 @@ function ensureSdkLoaded(): Promise<void> {
   });
 }
 
+function getStoredAuthCooldown(): number | null {
+  try {
+    const raw = localStorage.getItem(AUTH_COOLDOWN_KEY);
+    const until = raw ? Number(raw) : 0;
+    if (Number.isFinite(until) && until > Date.now()) return until;
+    localStorage.removeItem(AUTH_COOLDOWN_KEY);
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function rememberAuthCooldown(detail: string): number {
+  const match = detail.match(/(\d+)\s*秒/);
+  const waitMs = match ? Math.max(30_000, Number(match[1]) * 1000) : AUTH_COOLDOWN_FALLBACK_MS;
+  const until = Date.now() + waitMs;
+  try {
+    localStorage.setItem(AUTH_COOLDOWN_KEY, String(until));
+  } catch {
+    /* ignore */
+  }
+  return until;
+}
+
 export function FbAuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<FbAuthStatus>("checking");
   const [user, setUser] = useState<FbAuthUser | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cooldownUntil, setCooldownUntil] = useState<number | null>(() => getStoredAuthCooldown());
   const didRunRef = useRef(false);
   const queryClient = useQueryClient();
 
   const exchangeToken = useCallback(
     async (token: string) => {
       try {
+        const activeCooldown = getStoredAuthCooldown();
+        if (activeCooldown) {
+          setCooldownUntil(activeCooldown);
+          setError("FB 登入驗證冷卻中,先不要重複點登入。系統目前不會再呼叫 FB。");
+          setStatus("unauth");
+          return;
+        }
         // Fast path: if we recently verified this exact token (same
         // browser, < 4 min ago), reuse the cached user info and skip
         // the POST entirely. Each POST is a /me round-trip on the
@@ -202,6 +237,12 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
         setUser({ id, name, pictureUrl });
         setStatus("auth");
         setError(null);
+        setCooldownUntil(null);
+        try {
+          localStorage.removeItem(AUTH_COOLDOWN_KEY);
+        } catch {
+          /* ignore */
+        }
         // Force every cached query to re-fetch with the new token.
         // Without this, if the backend had just restarted and was
         // returning 401 errors for existing queries, those stale
@@ -213,6 +254,9 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
         localStorage.removeItem("meta_dash_fb_token");
         setApiUserId(null);
         const msg = err instanceof ApiError ? err.detail : (err as Error).message;
+        if (err instanceof ApiError && err.status === 429) {
+          setCooldownUntil(rememberAuthCooldown(msg));
+        }
         setError(msg);
         setStatus("unauth");
       }
@@ -235,6 +279,14 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
     setTimeout(() => {
       setStatus((prev) => (prev === "checking" ? "unauth" : prev));
     }, 6000);
+
+    const activeCooldown = getStoredAuthCooldown();
+    if (activeCooldown) {
+      setCooldownUntil(activeCooldown);
+      setError("FB 登入驗證冷卻中,先不要重複點登入。系統目前不會再呼叫 FB。");
+      setStatus("unauth");
+      return;
+    }
 
     // Fast path: use cached token if available so we skip the
     // "checking" screen delay and bypass browser third-party cookie limits
@@ -269,6 +321,13 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
   }, [exchangeToken]);
 
   const login = useCallback(() => {
+    const activeCooldown = getStoredAuthCooldown();
+    if (activeCooldown) {
+      setCooldownUntil(activeCooldown);
+      setError("FB 登入驗證冷卻中,先不要重複點登入。系統目前不會再呼叫 FB。");
+      setStatus("unauth");
+      return;
+    }
     ensureSdkLoaded().then(() => {
       window.FB?.login(
         (resp) => {
@@ -294,13 +353,15 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
     }
     localStorage.removeItem("meta_dash_fb_token");
     localStorage.removeItem("meta_dash_fb_verified");
+    localStorage.removeItem(AUTH_COOLDOWN_KEY);
+    setCooldownUntil(null);
     setApiUserId(null);
     setUser(null);
     setStatus("unauth");
   }, []);
 
   return (
-    <FbAuthContext.Provider value={{ status, user, error, login, logout }}>
+    <FbAuthContext.Provider value={{ status, user, error, cooldownUntil, login, logout }}>
       {children}
     </FbAuthContext.Provider>
   );
@@ -327,6 +388,7 @@ export function ShareModeAuthProvider({ children }: { children: ReactNode }) {
         status: "auth",
         user: null,
         error: null,
+        cooldownUntil: null,
         login: () => {},
         logout: async () => {},
       }}

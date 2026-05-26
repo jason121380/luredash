@@ -2769,6 +2769,7 @@ def _check_agent_rate_limit(uid: str) -> None:
 _AUTH_VERIFY_CACHE: dict[str, tuple[float, dict]] = {}
 _AUTH_VERIFY_TTL_SECONDS = 5 * 60
 _AUTH_VERIFY_PG_TTL_SECONDS = 24 * 60 * 60
+_AUTH_VERIFY_RATE_LIMIT_FLOOR_SECONDS = 10 * 60
 
 # Per-token-hash dedup lock. When N tabs (or N users in an agency
 # sharing the same FB token cache prefix) simultaneously POST
@@ -2901,6 +2902,14 @@ async def set_token(payload: TokenPayload):
     if _http_client is None:
         raise HTTPException(status_code=503, detail="伺服器尚未初始化,請稍後再試")
 
+    global_remaining = _global_throttle_remaining()
+    if global_remaining > 0:
+        wait = int(global_remaining) + 1
+        raise HTTPException(
+            status_code=429,
+            detail=f"FB 登入驗證冷卻中,請等待 {wait} 秒後再試。期間不會再呼叫 FB /me。",
+        )
+
     # Coalesce concurrent verifies for the same token. Without this
     # lock, N tabs reloading at once each fire their own /me and pile
     # onto FB's app-level rate limit. The first call populates the
@@ -2942,13 +2951,25 @@ async def _verify_token_with_fb(token: str, cache_key: str) -> dict:
     shape `set_token` returns."""
     global _runtime_token
     assert _http_client is not None
+    started = time.perf_counter()
+    status_code = 0
+    fb_code: Optional[int] = None
     try:
         resp = await _http_client.get(
             f"{BASE_URL}/me",
             params={"fields": "id,name,picture", "access_token": token},
             timeout=10.0,
         )
+        status_code = resp.status_code
     except httpx.HTTPError as e:
+        _log_fb_call(
+            path="/me",
+            account_id=None,
+            method="GET",
+            ms=(time.perf_counter() - started) * 1000,
+            status=502,
+            cache_hit=False,
+        )
         print(f"[auth] token verify network error: {type(e).__name__}: {e}", flush=True)
         raise HTTPException(
             status_code=502,
@@ -2969,6 +2990,19 @@ async def _verify_token_with_fb(token: str, cache_key: str) -> dict:
         except Exception:
             fb_code = fb_subcode = fb_type = None
             fb_msg = resp.text[:200]
+        try:
+            fb_code_int = int(fb_code) if fb_code is not None else None
+        except (TypeError, ValueError):
+            fb_code_int = None
+        _log_fb_call(
+            path="/me",
+            account_id=None,
+            method="GET",
+            ms=(time.perf_counter() - started) * 1000,
+            status=status_code,
+            cache_hit=False,
+            error_code=fb_code_int,
+        )
         print(
             f"[auth] token verify rejected: HTTP {resp.status_code} "
             f"code={fb_code} subcode={fb_subcode} type={fb_type} msg={fb_msg}",
@@ -2979,15 +3013,26 @@ async def _verify_token_with_fb(token: str, cache_key: str) -> dict:
         elif fb_code == 104 or fb_type == "GraphMethodException":
             detail = "FB App 設定問題(可能需要 App Secret 重設)。"
         elif fb_code == 4 or "rate" in fb_msg.lower():
-            detail = "FB 觸發頻率限制,請稍後再試。"
+            code = int(fb_code) if fb_code is not None else 4
+            _record_global_throttle("/me", code)
+            wait = max(_AUTH_VERIFY_RATE_LIMIT_FLOOR_SECONDS, int(_global_throttle_remaining()) + 1)
+            detail = f"FB 觸發頻率限制,請等待 {wait} 秒後再試。系統已暫停登入驗證,不會繼續呼叫 FB /me。"
         elif fb_code:
             detail = f"FB 驗證失敗(代碼 {fb_code}):{fb_msg}"
         else:
             detail = f"FB 驗證失敗(HTTP {resp.status_code}):{fb_msg or '無回應內容'}"
-        raise HTTPException(status_code=400, detail=detail)
+        raise HTTPException(status_code=429 if fb_code == 4 or "rate" in fb_msg.lower() else 400, detail=detail)
 
     try:
         me = resp.json()
+        _log_fb_call(
+            path="/me",
+            account_id=None,
+            method="GET",
+            ms=(time.perf_counter() - started) * 1000,
+            status=status_code,
+            cache_hit=False,
+        )
         uid = str(me.get("id") or "")
         pic = me.get("picture", {}).get("data", {}).get("url")
         # Only persist after the token verifies — avoids storing

@@ -1,5 +1,6 @@
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { Spinner } from "@/components/Spinner";
+import { useEffect, useMemo, useState } from "react";
 
 /**
  * Login page — full-screen split layout matching the original design lines
@@ -13,7 +14,22 @@ import { Spinner } from "@/components/Spinner";
  *       redirects to /dashboard instead.)
  */
 export function LoginView() {
-  const { status, login, error } = useFbAuth();
+  const { status, login, error, cooldownUntil } = useFbAuth();
+  const [now, setNow] = useState(() => Date.now());
+  const cooldownRemainingSec = cooldownUntil ? Math.max(0, Math.ceil((cooldownUntil - now) / 1000)) : 0;
+  const isCoolingDown = cooldownRemainingSec > 0;
+  const cooldownLabel = useMemo(() => {
+    if (!isCoolingDown) return "";
+    const min = Math.floor(cooldownRemainingSec / 60);
+    const sec = cooldownRemainingSec % 60;
+    return `${min}分${String(sec).padStart(2, "0")}秒`;
+  }, [cooldownRemainingSec, isCoolingDown]);
+
+  useEffect(() => {
+    if (!cooldownUntil) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [cooldownUntil]);
 
   return (
     <div className="fixed inset-0 z-[9999] flex flex-col items-stretch justify-center bg-[#F2F2F2] md:flex-row">
@@ -79,12 +95,13 @@ export function LoginView() {
             <button
               type="button"
               onClick={login}
-              className="flex h-12 w-full cursor-pointer items-center justify-center gap-2.5 rounded-[10px] bg-[#1877f2] text-sm font-bold tracking-[0.2px] text-white transition-colors hover:bg-[#1464cc]"
+              disabled={isCoolingDown}
+              className="flex h-12 w-full cursor-pointer items-center justify-center gap-2.5 rounded-[10px] bg-[#1877f2] text-sm font-bold tracking-[0.2px] text-white transition-colors hover:bg-[#1464cc] disabled:cursor-not-allowed disabled:bg-gray-300"
             >
               <svg width="20" height="20" viewBox="0 0 24 24" fill="white" aria-hidden="true">
                 <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
               </svg>
-              使用 Facebook 帳號登入
+              {isCoolingDown ? `冷卻中 ${cooldownLabel}` : "使用 Facebook 帳號登入"}
             </button>
             {error && (
               <div className="mt-4 rounded-lg bg-red-bg px-3 py-2 text-xs text-red">{error}</div>
