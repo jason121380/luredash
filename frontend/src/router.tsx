@@ -30,7 +30,6 @@ const importOptimization = () => import("@/views/optimization/OptimizationView")
 const importFinance = () => import("@/views/finance/FinanceView");
 const importHistory = () => import("@/views/history/HistoryView");
 const importStoreExpenses = () => import("@/views/storeExpenses/StoreExpensesView");
-const importLaunch = () => import("@/views/launch/QuickLaunchView");
 const importSettings = () => import("@/views/settings/SettingsView");
 const importLinePush = () => import("@/views/settings/LinePushSettingsView");
 const importPaymentAccounts = () => import("@/views/settings/PaymentAccountsView");
@@ -59,9 +58,6 @@ const StoreExpensesView = lazy(() =>
   withReloadOnChunkError(importStoreExpenses)().then((m) => ({
     default: m.StoreExpensesView,
   })),
-);
-const QuickLaunchView = lazy(() =>
-  withReloadOnChunkError(importLaunch)().then((m) => ({ default: m.QuickLaunchView })),
 );
 const SettingsView = lazy(() =>
   withReloadOnChunkError(importSettings)().then((m) => ({ default: m.SettingsView })),
@@ -105,9 +101,6 @@ export const prefetchView = (path: string): void => {
     case "/store-expenses":
       void importStoreExpenses();
       return;
-    case "/launch":
-      void importLaunch();
-      return;
     case "/settings":
       void importSettings();
       return;
@@ -143,7 +136,6 @@ export const router = createBrowserRouter([
       { path: "finance", element: lazyView(<FinanceView />) },
       { path: "history", element: lazyView(<HistoryView />) },
       { path: "store-expenses", element: lazyView(<StoreExpensesView />) },
-      { path: "launch", element: lazyView(<QuickLaunchView />) },
       { path: "settings", element: lazyView(<SettingsView />) },
       { path: "line-push", element: lazyView(<LinePushSettingsView />) },
       { path: "payment-accounts", element: lazyView(<PaymentAccountsView />) },

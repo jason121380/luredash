@@ -846,27 +846,6 @@ export const api = {
       }),
   },
 
-  launch: {
-    campaign: (payload: {
-      account_id: string;
-      name: string;
-      objective: string;
-      daily_budget: number;
-      status: string;
-    }) =>
-      request<{ id: string }>("POST", "/api/quick-launch/campaign", {
-        body: payload,
-        source: "mutation",
-      }),
-  },
-
-  ai: {
-    chat: (messages: Array<{ role: "user" | "model"; text: string }>, context?: string) =>
-      request<{ reply: string }>("POST", "/api/ai/chat", {
-        body: { messages, context },
-      }),
-  },
-
   engineering: {
     /** Latest parsed `X-Business-Use-Case-Usage` snapshot from FB,
      * plus peak `estimated_time_to_regain_access` across all business

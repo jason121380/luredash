@@ -4711,30 +4711,6 @@ async def proxy_asset(
     )
 
 
-# ── Quick Launch ──────────────────────────────────────────────────────
-
-class CampaignCreate(BaseModel):
-    account_id: str
-    name: str
-    objective: str = "OUTCOME_TRAFFIC"
-    daily_budget: int = 500  # TWD
-    status: str = "PAUSED"
-
-@app.post("/api/quick-launch/campaign")
-async def quick_launch_campaign(payload: CampaignCreate):
-    return await fb_post(
-        f"{payload.account_id}/campaigns",
-        {
-            "name": payload.name,
-            "objective": payload.objective,
-            "status": payload.status,
-            "special_ad_categories": "[]",
-            "daily_budget": str(payload.daily_budget),
-        },
-        invalidate_account=payload.account_id,
-    )
-
-
 # ── 廣告帳戶 ─────────────────────────────────────────────────────────
 
 @app.get("/api/accounts")
@@ -10394,16 +10370,6 @@ async def _cache_warm_loop() -> None:
         raise
 
 
-# ── AI Chat (Gemini) ──────────────────────────────────────────
-
-class ChatMessage(BaseModel):
-    role: str   # "user" | "model"
-    text: str
-
-class ChatRequest(BaseModel):
-    messages: List[ChatMessage]
-    context: Optional[str] = None  # ad data summary from frontend
-
 # ── 成效優化中心 — action-first advisor ───────────────────────────
 #
 # Internally we still reuse the six specialist persona prompts as
@@ -11042,70 +11008,6 @@ async def run_optimization_agents_stream(req: RunAgentsRequest):
         # which defeats the entire point of streaming.
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
-
-
-
-
-@app.post("/api/ai/chat")
-async def ai_chat(req: ChatRequest):
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=503, detail="Gemini API key not configured")
-
-    system_prompt = """你是 LURE 廣告代理商的 AI 廣告顧問，專門分析 Facebook / Meta 廣告成效。
-使用繁體中文回答。回答要簡潔、有洞察力、直接提供可執行的建議。
-專業術語：CTR（點擊率）、CPC（每次點擊成本）、CPM（每千次曝光成本）、ROAS（廣告投資報酬率）、私訊轉換。"""
-
-    if req.context:
-        system_prompt += f"\n\n目前廣告數據摘要：\n{req.context}"
-
-    contents = []
-    for m in req.messages:
-        contents.append({
-            "role": m.role,
-            "parts": [{"text": m.text}]
-        })
-
-    payload = {
-        "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": contents,
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 1024,
-        }
-    }
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    try:
-        r = await _http_client.post(
-            url, json=payload,
-            headers={"x-goog-api-key": GEMINI_API_KEY},
-            timeout=_POST_TIMEOUT,
-        )
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Gemini API timeout")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Cannot reach Gemini API: {e}")
-
-    try:
-        data = r.json()
-    except Exception:
-        raise HTTPException(status_code=502, detail=f"Gemini returned non-JSON (HTTP {r.status_code})")
-
-    if "error" in data:
-        raise HTTPException(status_code=400, detail=data["error"].get("message", "Gemini error"))
-
-    candidates = data.get("candidates") or []
-    if not candidates:
-        raise HTTPException(status_code=502, detail="Gemini returned no candidates")
-    text = (
-        candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-        if isinstance(candidates[0], dict) else ""
-    )
-    if not text:
-        raise HTTPException(status_code=502, detail="Gemini returned empty response")
-    return {"reply": text}
-
-
 # ── SPA catch-all (MUST be registered last) ─────────────────────────
 # React Router uses client-side paths like /dashboard, /analytics, /finance.
 # A browser hard-refresh on those paths hits FastAPI, which otherwise 404s.
