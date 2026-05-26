@@ -131,7 +131,7 @@ _OVERVIEW_ACCOUNT_CONCURRENCY = _env_int("OVERVIEW_ACCOUNT_CONCURRENCY", 4)
 _SECURITY_SCAN_CONCURRENCY = _env_int("SECURITY_SCAN_CONCURRENCY", 2)
 _SECURITY_PUSH_MAX_CONFIGS_PER_TICK = _env_int("SECURITY_PUSH_MAX_CONFIGS_PER_TICK", 3)
 _SECURITY_PUSH_ENRICH_CREATORS = os.getenv("SECURITY_PUSH_ENRICH_CREATORS", "0") == "1"
-_SECURITY_PUSH_SCAN_CACHE_TTL_SECONDS = _env_int("SECURITY_PUSH_SCAN_CACHE_TTL_SECONDS", 60 * 60)
+_SECURITY_PUSH_SCAN_CACHE_TTL_SECONDS = _env_int("SECURITY_PUSH_SCAN_CACHE_TTL_SECONDS", 120)
 
 
 class _NullAsyncContext:
@@ -178,13 +178,52 @@ def _account_semaphore(account_id: str) -> asyncio.Semaphore:
 # the same user context the original read used. Entries older than
 # 10 min are skipped (cold accounts don't get re-warmed; this keeps
 # background FB usage bounded by what's actually being looked at).
-_warm_targets: dict[tuple[str, str, str, Optional[str], str], float] = {}
+WarmTargetKey = tuple[str, str, str, Optional[str], str]
+_warm_targets: dict[WarmTargetKey, float] = {}
+# Last time the warm loop attempted a target. Kept separate from
+# `_warm_targets` so background refreshes don't pretend the user is
+# still actively looking at that account.
+_warm_attempted_at: dict[WarmTargetKey, float] = {}
+_WARM_TARGET_SUPPRESSED_SOURCES = {
+    "warm",
+    "line-push",
+    "security-push",
+    "security-probe",
+    "security-test",
+}
+
+
+def _register_warm_target(
+    account_id: str,
+    kind: str,
+    date_preset: str,
+    time_range: Optional[str],
+) -> None:
+    """Track user-facing reads for optional cache warming.
+
+    Background jobs must not extend the "recently accessed" window.
+    Otherwise the warm loop can keep a once-viewed account alive
+    forever by refreshing it and then re-registering itself as fresh
+    access.
+    """
+    if _fb_call_source.get() in _WARM_TARGET_SUPPRESSED_SOURCES:
+        return
+    warm_uid = _current_fb_user_id.get() or ""
+    if not warm_uid:
+        return
+    key: WarmTargetKey = (account_id, kind, date_preset, time_range, warm_uid)
+    now = time.monotonic()
+    _warm_targets[key] = now
+    # A foreground read just used or populated the cache. Give the
+    # entry most of its TTL before the warm loop considers it again.
+    _warm_attempted_at[key] = now
 
 # Security push scan result cache. Multiple configs often belong to the
 # same owner and watch the same selected account set; without this each
-# config repeats the same FB campaign probes/fetches. Cache the raw
-# anomaly candidates for an hour, then each config applies its own
-# filters/groups locally.
+# config repeats the same FB campaign probes/fetches inside one scheduler
+# tick. Keep it short-lived only: a one-hour cache can make the next
+# hourly scan reuse the previous scan window and miss campaigns created
+# after that run.
 _security_push_scan_cache: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
 
 # Set whenever we observe an 80004 throttle response. The warm loop
@@ -5146,11 +5185,7 @@ async def _fetch_campaigns_for_account(
     # cache-warm loop refreshes it before TTL. Lite reads (skeleton)
     # aren't registered.
     if not lite:
-        warm_uid = _current_fb_user_id.get() or ""
-        if warm_uid:
-            _warm_targets[(account_id, "campaigns", date_preset, time_range, warm_uid)] = (
-                time.monotonic()
-            )
+        _register_warm_target(account_id, "campaigns", date_preset, time_range)
 
     if lite:
         # Lite path is just metadata — return without stitching.
@@ -5720,11 +5755,7 @@ async def _fetch_account_insights(
     takes 10-15s before returning, which was pushing the old 10s
     GET timeout into "sometimes works, sometimes doesn't" territory.
     """
-    warm_uid = _current_fb_user_id.get() or ""
-    if warm_uid:
-        _warm_targets[(account_id, "insights", date_preset, time_range, warm_uid)] = (
-            time.monotonic()
-        )
+    _register_warm_target(account_id, "insights", date_preset, time_range)
     params = {
         "fields": "spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions",
     }
@@ -10275,72 +10306,80 @@ _WARM_THROTTLE_BACKOFF_S = 600
 
 
 async def _cache_warm_tick() -> None:
-    _fb_call_source.set("warm")
-    now = time.monotonic()
-    if _last_ads_throttle_at and (now - _last_ads_throttle_at) < _WARM_THROTTLE_BACKOFF_S:
-        return
-    # Self-imposed BUCU gate — pauses background work when any account
-    # crosses 80% on any metric, even if FB hasn't explicitly told us
-    # to wait yet. Without this, the warm loop keeps pushing already-
-    # hot accounts higher (處理時間 climbs faster than CPU / count
-    # for heavy accounts like !B 新城區) until FB finally throttles —
-    # by which point BUCU is at 95%+ and recovery takes ages.
-    reason = _background_gate_reason()
-    if reason:
-        print(f"[warm-loop] skipping tick — {reason}", flush=True)
-        return
-
-    # Pick up to _WARM_MAX_PER_TICK candidates: most-recently-accessed
-    # entries that are entering the last _WARM_REFRESH_WINDOW_S of
-    # their TTL. Older-than-_WARM_RECENT_ACCESS_S entries are dropped
-    # from the warm set to prevent unbounded growth on accounts
-    # nobody's looking at any more.
-    WarmKey = tuple[str, str, str, Optional[str], str]
-    candidates: list[tuple[float, WarmKey]] = []
-    expired_targets: list[WarmKey] = []
-    for key, last_seen in list(_warm_targets.items()):
-        if (now - last_seen) > _WARM_RECENT_ACCESS_S:
-            expired_targets.append(key)
-            continue
-        candidates.append((last_seen, key))
-    for key in expired_targets:
-        _warm_targets.pop(key, None)
-
-    candidates.sort(reverse=True)  # most recent first
-    refreshed = 0
-    for _, (account_id, kind, date_preset, time_range, uid) in candidates:
-        if refreshed >= _WARM_MAX_PER_TICK:
-            break
-        # User logged out / token revoked → skip silently. Next time
-        # they log in, fresh warm entries get registered under the
-        # new login.
-        if not _token_for_user(uid):
-            continue
-        ctx_token = _current_fb_user_id.set(uid)
-        try:
-            if kind == "insights":
-                await _fetch_account_insights(account_id, date_preset, time_range)
-            elif kind == "campaigns":
-                # Warm refresh matches the dashboard's primary use
-                # (include_adsets=False). Security view's cache entry
-                # (include_adsets=True) is a different key and doesn't
-                # warm — that's intentional, security push uses
-                # lite=True which doesn't register warm targets anyway.
-                await _fetch_campaigns_for_account(
-                    account_id, date_preset, time_range,
-                    include_archived=False, lite=False, include_adsets=False,
-                )
-            refreshed += 1
-        except Exception:
-            # Any failure (incl. fresh 80004) — bail and let the next
-            # tick retry. _last_ads_throttle_at gets set inside the
-            # FB error handler so the next tick's backoff guard fires.
+    source_token = _fb_call_source.set("warm")
+    try:
+        now = time.monotonic()
+        if _last_ads_throttle_at and (now - _last_ads_throttle_at) < _WARM_THROTTLE_BACKOFF_S:
             return
-        finally:
-            _current_fb_user_id.reset(ctx_token)
-        # Spread out the refreshes a little so bursts of warm-loop
-        # activity don't themselves contribute to throttle.
-        await asyncio.sleep(0.5)
+        # Self-imposed BUCU gate — pauses background work when any account
+        # crosses 80% on any metric, even if FB hasn't explicitly told us
+        # to wait yet. Without this, the warm loop keeps pushing already-
+        # hot accounts higher (處理時間 climbs faster than CPU / count
+        # for heavy accounts like !B 新城區) until FB finally throttles —
+        # by which point BUCU is at 95%+ and recovery takes ages.
+        reason = _background_gate_reason()
+        if reason:
+            print(f"[warm-loop] skipping tick — {reason}", flush=True)
+            return
+
+        # Pick up to _WARM_MAX_PER_TICK candidates: recently accessed
+        # entries whose last warm attempt is old enough that they may be
+        # entering the final refresh window. Background refreshes do not
+        # update last_seen, so a target naturally ages out after the user
+        # stops looking at it.
+        candidates: list[tuple[float, WarmTargetKey]] = []
+        expired_targets: list[WarmTargetKey] = []
+        min_attempt_gap = max(0.0, _CACHE_TTL_SECONDS - _WARM_REFRESH_WINDOW_S)
+        for key, last_seen in list(_warm_targets.items()):
+            if (now - last_seen) > _WARM_RECENT_ACCESS_S:
+                expired_targets.append(key)
+                continue
+            last_attempt = _warm_attempted_at.get(key, 0.0)
+            if (now - last_attempt) < min_attempt_gap:
+                continue
+            candidates.append((last_seen, key))
+        for key in expired_targets:
+            _warm_targets.pop(key, None)
+            _warm_attempted_at.pop(key, None)
+
+        candidates.sort(reverse=True)  # most recent first
+        refreshed = 0
+        for _, (account_id, kind, date_preset, time_range, uid) in candidates:
+            if refreshed >= _WARM_MAX_PER_TICK:
+                break
+            # User logged out / token revoked → skip silently. Next time
+            # they log in, fresh warm entries get registered under the
+            # new login.
+            if not _token_for_user(uid):
+                continue
+            _warm_attempted_at[(account_id, kind, date_preset, time_range, uid)] = now
+            ctx_token = _current_fb_user_id.set(uid)
+            try:
+                if kind == "insights":
+                    await _fetch_account_insights(account_id, date_preset, time_range)
+                elif kind == "campaigns":
+                    # Warm refresh matches the dashboard's primary use
+                    # (include_adsets=False). Security view's cache entry
+                    # (include_adsets=True) is a different key and doesn't
+                    # warm — that's intentional, security push uses
+                    # lite=True which doesn't register warm targets anyway.
+                    await _fetch_campaigns_for_account(
+                        account_id, date_preset, time_range,
+                        include_archived=False, lite=False, include_adsets=False,
+                    )
+                refreshed += 1
+            except Exception:
+                # Any failure (incl. fresh 80004) — bail and let the next
+                # tick retry. _last_ads_throttle_at gets set inside the
+                # FB error handler so the next tick's backoff guard fires.
+                return
+            finally:
+                _current_fb_user_id.reset(ctx_token)
+            # Spread out the refreshes a little so bursts of warm-loop
+            # activity don't themselves contribute to throttle.
+            await asyncio.sleep(0.5)
+    finally:
+        _fb_call_source.reset(source_token)
 
 
 async def _cache_warm_loop() -> None:
