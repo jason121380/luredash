@@ -87,7 +87,6 @@ function formatNextScanTime(iso: string): string {
 export function ScanHistoryPanel() {
   const { user } = useFbAuth();
   const uid = user?.id ?? "";
-  const [filter, setFilter] = useState<"all" | "auto" | "manual">("all");
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => readHiddenRecordIds(uid));
   const sharedQuery = useSharedSettings();
   const masterEnabled = sharedQuery.data?.security_push_master_enabled === true;
@@ -107,14 +106,10 @@ export function ScanHistoryPanel() {
   }, [uid]);
 
   const query = useQuery({
-    queryKey: ["security-scan-records", uid, filter],
+    queryKey: ["security-scan-records", uid],
     queryFn: async () => {
       if (!uid) return [];
-      const resp = await api.securityScan.listRecords(
-        uid,
-        20,
-        filter === "all" ? undefined : filter,
-      );
+      const resp = await api.securityScan.listRecords(uid, 20);
       return resp.data ?? [];
     },
     enabled: !!uid,
@@ -170,24 +165,6 @@ export function ScanHistoryPanel() {
         >
           {query.isFetching ? "更新中" : "更新"}
         </button>
-      </div>
-
-      <div className="flex items-center gap-1 border-b border-border px-3 py-2">
-        {(["all", "manual", "auto"] as const).map((t) => (
-          <button
-            key={t}
-            type="button"
-            onClick={() => setFilter(t)}
-            className={cn(
-              "rounded-md px-2 py-1 text-[11px] font-medium",
-              filter === t
-                ? "bg-orange text-white"
-                : "bg-bg text-gray-500 hover:bg-orange-bg hover:text-orange",
-            )}
-          >
-            {t === "all" ? "全部" : t === "manual" ? "手動" : "自動"}
-          </button>
-        ))}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
