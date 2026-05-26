@@ -2,11 +2,14 @@ import { useSubscription } from "@/api/hooks/useSubscription";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { TierBadge } from "@/components/TierBadge";
 import { cn } from "@/lib/cn";
+import { withReloadOnChunkError } from "@/lib/chunkReload";
 import { prefetchView } from "@/router";
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
 
-const importEngineeringModal = () => import("@/views/engineering/EngineeringView");
+const importEngineeringModal = withReloadOnChunkError(
+  () => import("@/views/engineering/EngineeringView"),
+);
 const EngineeringModal = lazy(() =>
   importEngineeringModal().then((m) => ({ default: m.EngineeringModal })),
 );
