@@ -6,10 +6,9 @@ import { type ReactNode, useEffect, useState } from "react";
  * <Loading/> primitive. Designed for the "user opens a view and
  * waits for multi-account data" case. Shows:
  *
- *   - A centered 32px spinner
  *   - A bold title line ("載入資料中...")
  *   - A percentage number that counts up during the wait
- *   - A progress bar that tracks the same percentage
+ *   - A 3x3 blocks-shuffle loader in the product orange gradient
  *
  * Designed to look OBVIOUSLY different from an empty state — no
  * gray-300 text, no ambiguous "—" placeholder, no risk the user
@@ -121,24 +120,12 @@ export function LoadingState({
     >
       <div className="text-[16px] font-bold text-ink">{title}</div>
       {effectiveSubtitle && <div className="text-[12px] text-gray-500">{effectiveSubtitle}</div>}
-      <div className="flex w-[min(78vw,360px)] flex-col items-center gap-2">
+      <div className="flex flex-col items-center gap-2.5">
+        <BlocksShuffleLoader />
         <div className="text-[13px] font-semibold tabular-nums text-orange">{pct}%</div>
         <progress value={pct} max={100} className="sr-only" aria-label="載入進度">
           {pct}%
         </progress>
-        <div
-          className="h-2.5 w-full overflow-hidden rounded-full bg-orange-bg"
-          aria-hidden="true"
-        >
-          <div
-            className="h-full rounded-full transition-[width] duration-300 ease-out animate-progress-shimmer"
-            style={{
-              width: `${pct}%`,
-              background: "linear-gradient(90deg, #FFB388 0%, #FF7A45 45%, #FF5A1F 100%)",
-              backgroundSize: "200% 100%",
-            }}
-          />
-        </div>
       </div>
       {hint && (
         <div className="mt-1 max-w-[280px] text-center text-[11px] leading-relaxed text-gray-300">
@@ -146,5 +133,133 @@ export function LoadingState({
         </div>
       )}
     </div>
+  );
+}
+
+function BlocksShuffleLoader() {
+  return (
+    <svg
+      width="76"
+      height="76"
+      viewBox="-13 -13 45 45"
+      role="img"
+      aria-label="載入中"
+      className="overflow-visible"
+    >
+      <title>載入中</title>
+      <defs>
+        <linearGradient id="loading-orange-gradient" x1="0" x2="1" y1="0" y2="1">
+          <stop offset="0%" stopColor="#FFB388" />
+          <stop offset="45%" stopColor="#FF7A45" />
+          <stop offset="100%" stopColor="#FF5A1F" />
+        </linearGradient>
+      </defs>
+      <style>{`
+        .loading-block {
+          transform-origin: 50% 50%;
+          fill: url(#loading-orange-gradient);
+        }
+        .loading-block:nth-of-type(1) { animation: loadingBlock1 4s infinite; }
+        .loading-block:nth-of-type(2) { animation: loadingBlock2 4s infinite; }
+        .loading-block:nth-of-type(3) { animation: loadingBlock3 4s infinite; }
+        .loading-block:nth-of-type(4) { animation: loadingBlock4 4s infinite; }
+        .loading-block:nth-of-type(5) { animation: loadingBlock5 4s infinite; }
+        .loading-block:nth-of-type(6) { animation: loadingBlock6 4s infinite; }
+        .loading-block:nth-of-type(7) { animation: loadingBlock7 4s infinite; }
+        .loading-block:nth-of-type(8) { animation: loadingBlock8 4s infinite; }
+        .loading-block:nth-of-type(9) { animation: loadingBlock9 4s infinite; }
+        @keyframes loadingBlock1 {
+          9.0909% { transform: translate(-12px, 0); }
+          18.1818%, 27.2727% { transform: translate(0, 0); }
+          36.3636% { transform: translate(12px, 0); }
+          45.4545%, 54.5455%, 63.6364% { transform: translate(12px, 12px); }
+          72.7273% { transform: translate(12px, 0); }
+          81.8182% { transform: translate(0, 0); }
+          90.9091% { transform: translate(-12px, 0); }
+          100% { transform: translate(0, 0); }
+        }
+        @keyframes loadingBlock2 {
+          9.0909% { transform: translate(0, 0); }
+          18.1818% { transform: translate(12px, 0); }
+          27.2727% { transform: translate(0, 0); }
+          36.3636% { transform: translate(12px, 0); }
+          45.4545%, 54.5455%, 63.6364%, 72.7273% { transform: translate(12px, 12px); }
+          81.8182%, 90.9091% { transform: translate(0, 12px); }
+          100% { transform: translate(0, 0); }
+        }
+        @keyframes loadingBlock3 {
+          9.0909%, 18.1818% { transform: translate(-12px, 0); }
+          27.2727% { transform: translate(0, 0); }
+          36.3636%, 45.4545%, 54.5455%, 63.6364%, 72.7273% { transform: translate(-12px, 0); }
+          81.8182% { transform: translate(-12px, -12px); }
+          90.9091% { transform: translate(0, -12px); }
+          100% { transform: translate(0, 0); }
+        }
+        @keyframes loadingBlock4 {
+          9.0909%, 18.1818% { transform: translate(-12px, 0); }
+          27.2727% { transform: translate(-12px, -12px); }
+          36.3636% { transform: translate(0, -12px); }
+          45.4545% { transform: translate(0, 0); }
+          54.5455%, 63.6364%, 72.7273% { transform: translate(0, -12px); }
+          81.8182% { transform: translate(-12px, -12px); }
+          90.9091% { transform: translate(-12px, 0); }
+          100% { transform: translate(0, 0); }
+        }
+        @keyframes loadingBlock5 {
+          9.0909%, 18.1818%, 27.2727% { transform: translate(0, 0); }
+          36.3636%, 45.4545%, 54.5455%, 63.6364%, 72.7273% { transform: translate(12px, 0); }
+          81.8182% { transform: translate(12px, -12px); }
+          90.9091% { transform: translate(0, -12px); }
+          100% { transform: translate(0, 0); }
+        }
+        @keyframes loadingBlock6 {
+          9.0909% { transform: translate(0, 0); }
+          18.1818%, 27.2727% { transform: translate(-12px, 0); }
+          36.3636%, 45.4545%, 54.5455%, 63.6364% { transform: translate(0, 0); }
+          72.7273% { transform: translate(0, 12px); }
+          81.8182% { transform: translate(-12px, 12px); }
+          90.9091% { transform: translate(-12px, 0); }
+          100% { transform: translate(0, 0); }
+        }
+        @keyframes loadingBlock7 {
+          9.0909%, 18.1818%, 27.2727% { transform: translate(12px, 0); }
+          36.3636% { transform: translate(0, 0); }
+          45.4545% { transform: translate(0, -12px); }
+          54.5455% { transform: translate(12px, -12px); }
+          63.6364%, 72.7273% { transform: translate(0, -12px); }
+          81.8182% { transform: translate(0, 0); }
+          90.9091% { transform: translate(12px, 0); }
+          100% { transform: translate(0, 0); }
+        }
+        @keyframes loadingBlock8 {
+          9.0909% { transform: translate(0, 0); }
+          18.1818% { transform: translate(-12px, 0); }
+          27.2727% { transform: translate(-12px, -12px); }
+          36.3636%, 45.4545%, 54.5455%, 63.6364%, 72.7273% { transform: translate(0, -12px); }
+          81.8182% { transform: translate(12px, -12px); }
+          90.9091% { transform: translate(12px, 0); }
+          100% { transform: translate(0, 0); }
+        }
+        @keyframes loadingBlock9 {
+          9.0909%, 18.1818% { transform: translate(-12px, 0); }
+          27.2727% { transform: translate(0, 0); }
+          36.3636% { transform: translate(-12px, 0); }
+          45.4545%, 54.5455% { transform: translate(0, 0); }
+          63.6364%, 72.7273% { transform: translate(-12px, 0); }
+          81.8182% { transform: translate(-24px, 0); }
+          90.9091% { transform: translate(-12px, 0); }
+          100% { transform: translate(0, 0); }
+        }
+      `}</style>
+      <circle className="loading-block" cx="13" cy="1" r="5" />
+      <circle className="loading-block" cx="13" cy="1" r="5" />
+      <circle className="loading-block" cx="25" cy="25" r="5" />
+      <circle className="loading-block" cx="13" cy="13" r="5" />
+      <circle className="loading-block" cx="13" cy="13" r="5" />
+      <circle className="loading-block" cx="25" cy="13" r="5" />
+      <circle className="loading-block" cx="1" cy="25" r="5" />
+      <circle className="loading-block" cx="13" cy="25" r="5" />
+      <circle className="loading-block" cx="25" cy="25" r="5" />
+    </svg>
   );
 }
