@@ -137,7 +137,6 @@ export function SecurityMonitorView() {
   const safeIds = useSecurityStore((s) => s.safeIds);
   const [tab, setTab] = useState<SecurityTab>("pending");
   const [pushModalOpen, setPushModalOpen] = useState(false);
-  const historyPanelRef = useRef<HTMLDivElement | null>(null);
   const sharedQuery = useSharedSettings();
   const autoScanEnabled = sharedQuery.data?.security_push_master_enabled === true;
 
@@ -457,32 +456,6 @@ export function SecurityMonitorView() {
           </button>
           <button
             type="button"
-            onClick={() => {
-              historyPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-            }}
-            className={topbarSecondaryAction}
-          >
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="shrink-0 text-orange"
-              aria-hidden="true"
-            >
-              <title>history</title>
-              <path d="M3 12a9 9 0 1 0 3-6.7" />
-              <path d="M3 3v6h6" />
-              <path d="M12 7v5l3 2" />
-            </svg>
-            <span>掃描紀錄</span>
-          </button>
-          <button
-            type="button"
             onClick={() => setPushModalOpen(true)}
             className={autoScanEnabled ? topbarActiveAction : topbarSecondaryAction}
           >
@@ -577,10 +550,7 @@ export function SecurityMonitorView() {
             </div>
           )}
         </div>
-        <div
-          ref={historyPanelRef}
-          className="min-h-[360px] shrink-0 scroll-mt-20 xl:h-[calc(100vh-57px)] xl:w-[340px]"
-        >
+        <div className="min-h-[360px] shrink-0 xl:h-[calc(100vh-57px)] xl:w-[340px]">
           <ScanHistoryPanel />
         </div>
       </div>
