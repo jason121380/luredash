@@ -27,10 +27,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "./Markdown";
 
 /** localStorage key + payload contract for "last successful run".
- *  Bumped to 4 → wipe on schema change so old truncated output
+ *  Bumped to 5 → wipe on schema change so old truncated output
  *  don't show up as half-rendered cards. */
 const LAST_RUN_STORAGE_KEY = "ai-staff-last-run";
-const LAST_RUN_VERSION = 4;
+const LAST_RUN_VERSION = 5;
 interface StoredLastRun {
   version: number;
   generatedAt: string;

@@ -10483,28 +10483,35 @@ class RunAgentsRequest(BaseModel):
 def _format_campaigns_for_prompt(campaigns: List[CampaignDigest]) -> str:
     """Render the campaigns as a markdown grouped by account so the
     agent can structure per-account analysis. Sort accounts by total
-    spend desc, campaigns within each account by spend desc. Cap at
-    120 rows total so larger agencies do not get an action plan based
-    on only the first screenful of activity."""
-    sorted_campaigns = sorted(campaigns, key=lambda c: c.spend, reverse=True)[:120]
-
-    # Group by account_name. dict preserves insertion order, so the
-    # account block order matches the spend ranking of the first
-    # campaign we saw under that account.
+    spend desc, campaigns within each account by spend desc. Cap per
+    account instead of globally so low-spend accounts still get a card."""
     by_account: dict = {}
-    for c in sorted_campaigns:
+    for c in campaigns:
         key = c.account_name or "(未命名帳號)"
         by_account.setdefault(key, []).append(c)
 
+    account_items = sorted(
+        by_account.items(),
+        key=lambda item: sum(row.spend for row in item[1]),
+        reverse=True,
+    )
+    max_rows_total = 160
+    max_rows_per_account = max(
+        4,
+        min(12, max_rows_total // max(1, len(account_items))),
+    )
+
     blocks: list = []
-    for acct_name, rows in by_account.items():
+    for acct_name, rows in account_items:
+        rows_sorted = sorted(rows, key=lambda c: c.spend, reverse=True)
+        shown_rows = rows_sorted[:max_rows_per_account]
         acct_spend = sum(r.spend for r in rows)
         acct_msgs = sum(r.msgs for r in rows)
         acct_imp = sum(r.impressions for r in rows)
         acct_avg_msg_cost = (acct_spend / acct_msgs) if acct_msgs > 0 else 0
         header = (
             f"### 帳號:{acct_name}\n"
-            f"- 該帳號活動數: {len(rows)}\n"
+            f"- 該帳號活動數: {len(rows)}  顯示活動: {len(shown_rows)} / {len(rows)}\n"
             f"- 總花費: ${acct_spend:,.0f}  總曝光: {int(acct_imp):,}  "
             f"總私訊: {acct_msgs}  平均私訊成本: "
             f"{f'${acct_avg_msg_cost:.0f}' if acct_msgs > 0 else '-'}\n"
@@ -10513,7 +10520,7 @@ def _format_campaigns_for_prompt(campaigns: List[CampaignDigest]) -> str:
             "| 活動 | 狀態 | 目標 | 花費 | CTR | CPC | 頻次 | 私訊 | 私訊成本 |",
             "|---|---|---|---|---|---|---|---|---|",
         ]
-        for c in rows:
+        for c in shown_rows:
             table_lines.append(
                 f"| {c.name} | {c.status or '-'} | {c.objective or '-'} "
                 f"| ${c.spend:,.0f} | {c.ctr:.2f}% | ${c.cpc:.2f} "
@@ -10554,7 +10561,8 @@ async def _call_one_agent(
         "- 花錢卻沒成效 → 暫停\n"
         "**表現好的活動完全不要寫**,例如:不要建議「加預算給某活動因為私訊成本低」、"
         "不要建議「複製某活動因為 ROAS 高」、不要鼓勵 scale up。\n"
-        "**沒有任何待辦的帳戶整個省略**,不要寫「此帳戶正常」。\n\n"
+        "**每個帳戶都要出現一個 ## 帳戶區塊**。沒有待辦的帳戶只寫 `### 無待辦` "
+        "和 `- 目前無需介入`,不要列好活動。\n\n"
         "# 輸出格式\n"
         "**只寫待辦,不寫分析、不寫診斷段落、不寫開場白、不寫總結。**\n"
         "固定使用「帳戶 → 嚴重程度 → 待辦」階層:\n\n"
@@ -10566,11 +10574,12 @@ async def _call_one_agent(
         "### 低\n"
         "觀察或微調即可的 to-do。\n\n"
         "規則:\n"
-        "- 每個帳戶只列有問題的嚴重程度;沒有項目就不要出現該小節。\n"
-        "- 每個帳戶最多 8 條 to-do,優先列嚴重。\n"
-        "- 全部帳戶合計最多 40 條 to-do。\n"
-        "- 帳戶依最嚴重問題排序:有嚴重者在前,再比問題活動花費。\n"
-        "- 若所有帳戶都沒有問題,只輸出: `目前無需介入,所有帳戶沒有需要處理的活動`。\n\n"
+        "- 必須為資料中的每個帳戶輸出一個 ## 帳戶名稱,不得省略帳戶。\n"
+        "- 有問題才列嚴重 / 中等 / 低;沒有項目的嚴重程度不要出現。\n"
+        "- 帳戶沒有任何待辦時,固定輸出 `### 無待辦` 與 `- 目前無需介入`。\n"
+        "- 每個帳戶最多 8 條 to-do(不含無待辦那條),優先列嚴重。\n"
+        "- 全部帳戶合計最多 60 條 to-do。\n"
+        "- 帳戶依資料順序輸出。\n\n"
         "每條格式必須是:\n"
         "```\n"
         "- [動作動詞] [活動名] — [依據數字]\n"
@@ -10582,19 +10591,22 @@ async def _call_one_agent(
         "- 換素材 上越Look·張浩榕 — 頻次 7.2 受眾疲勞\n"
         "### 中等\n"
         "- 縮受眾 AT17·KID — CTR 0.4% / 花費 $5k 沒回應\n\n"
+        "## !B 新城區\n"
+        "### 無待辦\n"
+        "- 目前無需介入\n\n"
         "# 嚴格禁止\n"
         "- 不要寫「根據資料」「整體來看」「總結」「值得注意」等開場 / 收尾\n"
         "- 不要對表現好的活動建議 scale up / 加預算 / 複製\n"
-        "- 不要列沒有待辦的帳戶\n"
-        "- 不要寫任何好的活動或好的帳戶\n"
+        "- 不要省略任何帳戶\n"
+        "- 無待辦帳戶不要解釋表現好在哪裡,只寫目前無需介入\n"
         "- 不要解釋長篇 WHY,只寫 WHAT(修什麼問題)+ 數字依據\n"
         "- 每條 ≤ 42 字,動作必須是明確操作動詞(暫停 / 換素材 / 縮受眾 / 調 bid / 換目標 / 擴受眾 / 檢查追蹤)"
     )
     user_prompt = (
         f"資料區間: {date_label}\n"
         f"進行中活動總數: {n_campaigns}\n"
-        f"請依下方 ad account 分群逐帳號判斷,只輸出需要處理的帳號與 to-do。\n"
-        f"(下方資料按帳號分群,只顯示花費 Top {min(120, n_campaigns)} 個活動)\n\n"
+        f"請依下方 ad account 分群逐帳號判斷,每個帳號都要輸出一張卡片。\n"
+        f"(下方資料按帳號分群,每個帳號顯示該帳號花費 Top 活動;不要因無待辦省略帳號)\n\n"
         f"{table}"
     )
     # maxOutputTokens raised from 800 -> 8192: 800 was being hit
