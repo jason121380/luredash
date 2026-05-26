@@ -1,5 +1,4 @@
 import { api } from "@/api/client";
-import { useFbAuth } from "@/auth/FbAuthProvider";
 import { cn } from "@/lib/cn";
 import type { DateConfig } from "@/lib/datePicker";
 import { fM, fN } from "@/lib/format";
@@ -35,7 +34,6 @@ export interface ComparisonTableProps {
 }
 
 export function ComparisonTable({ multiAcct, date, searchTerm }: ComparisonTableProps) {
-  const { status } = useFbAuth();
   const expandedCamps = useUiStore((s) => s.expandedCamps);
   const expandedAdsets = useUiStore((s) => s.expandedAdsets);
   const treeSort = useUiStore((s) => s.treeSort);
@@ -59,7 +57,10 @@ export function ComparisonTable({ multiAcct, date, searchTerm }: ComparisonTable
         const res = await api.campaigns.adsets(campId, date);
         return res.data ?? [];
       },
-      enabled: status === "auth",
+      // Read-only subscription to the cache. The tree row already fetches
+      // adsets when expanded; comparison mode must not fan out fresh FB
+      // calls for every expanded campaign.
+      enabled: false,
       staleTime: 5 * 60_000,
     })),
   });
@@ -101,7 +102,10 @@ export function ComparisonTable({ multiAcct, date, searchTerm }: ComparisonTable
         const res = await api.adsets.creatives(adsetId, date);
         return res.data ?? [];
       },
-      enabled: status === "auth",
+      // Read-only subscription to cached creative queries. If the user
+      // has not opened an adset yet, show the hint instead of auto-fetching
+      // every visible creative and burning FB quota.
+      enabled: false,
       staleTime: 5 * 60_000,
     })),
   });

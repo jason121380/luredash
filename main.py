@@ -123,6 +123,7 @@ _fb_semaphore: asyncio.Semaphore = asyncio.Semaphore(_FB_GLOBAL_CONCURRENCY)
 # owns them and they're rarely the burst culprit.
 _PER_ACCOUNT_CONCURRENCY = _env_int("FB_PER_ACCOUNT_CONCURRENCY", 2)
 _per_account_semaphores: dict[str, asyncio.Semaphore] = {}
+_OVERVIEW_ACCOUNT_CONCURRENCY = _env_int("OVERVIEW_ACCOUNT_CONCURRENCY", 4)
 
 # Security monitor background work is extra conservative because it is
 # not user-facing latency. It should never compete aggressively with
@@ -1952,8 +1953,9 @@ async def _fb_fetch_with_retry(
     get_timeout: float,
 ) -> dict:
     """Wrap :func:`_fb_fetch_and_cache` with a single retry on
-    transient upstream errors (429 / 5xx / network timeout / connect
-    reset). Dashboard fan-out endpoints routinely see 1-2% of calls
+    transient upstream errors (5xx / network timeout / connect reset).
+    Rate-limit 429 is a brake signal and is never retried. Dashboard
+    fan-out endpoints routinely see 1-2% of calls
     blip on the FB side; retrying after a 500ms backoff recovers
     almost all of them and turns the "sometimes works, sometimes
     doesn't" complaint into something that just works.
@@ -2097,19 +2099,23 @@ async def _fb_fetch_and_cache(
             # account back off, while unrelated accounts keep working.
             if isinstance(code, int) and 80000 <= code <= 80014:
                 _record_account_throttle(account_id, path, code)
+                http_status = 429
             elif isinstance(code, int) and code in {4, 17, 32, 613}:
                 _record_global_throttle(path, code)
+                http_status = 429
+            else:
+                http_status = 400
             _log_fb_call(
                 path=path,
                 account_id=account_id,
                 method=method,
                 ms=(time.monotonic() - started) * 1000,
-                status=400,
+                status=http_status,
                 cache_hit=False,
                 error_code=code if isinstance(code, int) else None,
                 retried=retried,
             )
-            raise HTTPException(status_code=400, detail=detail)
+            raise HTTPException(status_code=http_status, detail=detail)
         # Cache successful GET responses
         if cache_key is not None:
             _cache_put(cache_key, body)
@@ -3076,11 +3082,28 @@ async def clear_token(fb_user_id: Optional[str] = None):
 
 @app.get("/api/auth/me")
 async def get_me():
-    try:
-        me = await fb_get("me", {"fields": "id,name,picture.width(80)"})
-        return {"logged_in": True, **me}
-    except Exception:
+    """Return the current auth identity without touching FB Graph.
+
+    This endpoint is used by engineering health checks. Calling FB /me
+    from a health ping can lock out real login during code-4 rate-limit
+    incidents, so it only reads our local/PG verify cache.
+    """
+    token = get_token()
+    if not token:
         return {"logged_in": False}
+    token_hash = _auth_cache_key(token)
+    cached = _AUTH_VERIFY_CACHE.get(token_hash)
+    me = cached[1] if cached and time.time() - cached[0] < _AUTH_VERIFY_TTL_SECONDS else None
+    if me is None:
+        me = await _auth_verify_pg_lookup(token_hash)
+        if me is not None:
+            _AUTH_VERIFY_CACHE[token_hash] = (time.time(), me)
+    if me is None:
+        uid = _current_fb_user_id.get() or ""
+        if uid:
+            return {"logged_in": True, "id": uid, "name": "User"}
+        return {"logged_in": False}
+    return {"logged_in": True, **me}
 
 
 # ── Campaign Nicknames (PostgreSQL-backed) ────────────────────────────
@@ -5641,14 +5664,17 @@ async def get_overview(
             "error": "; ".join(error_parts) if error_parts else None,
         }
 
-    # Outer gather — N accounts concurrent. Each _fetch_one is wrapped
-    # in a 30-second timeout so one slow account (e.g. stuck in the
-    # 5-tier campaign fallback chain) can't hold up the entire batch.
-    # Timed-out accounts get an error entry; faster accounts still
-    # return data normally.
+    # Outer gather is bounded: a dashboard may have 80 accounts selected,
+    # and each account can need campaigns + insights. Creating 160 live FB
+    # attempts at once leaves all throttling to the low-level semaphore and
+    # still creates a burst. Keep account-level concurrency modest so the
+    # request is paced before it reaches Graph.
+    overview_sem = asyncio.Semaphore(_OVERVIEW_ACCOUNT_CONCURRENCY)
+
     async def _fetch_one_bounded(aid: str):
         try:
-            return await asyncio.wait_for(_fetch_one(aid), timeout=30.0)
+            async with overview_sem:
+                return await asyncio.wait_for(_fetch_one(aid), timeout=30.0)
         except asyncio.TimeoutError:
             return aid, {
                 "campaigns": [],
