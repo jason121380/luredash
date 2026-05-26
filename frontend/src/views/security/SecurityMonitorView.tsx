@@ -14,6 +14,7 @@ import { type DateConfig, toShortLabel } from "@/lib/datePicker";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
+import type { FbCampaign } from "@/types/fb";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SecurityCampaignRow } from "./SecurityCampaignRow";
@@ -23,6 +24,8 @@ import {
   effectiveDailyBudget,
   formatDayLabel,
   resolveBounds,
+  type SecurityAnomaly,
+  type SecurityDay,
 } from "./securityData";
 
 type SecurityTab = "pending" | "safe";
@@ -37,6 +40,66 @@ const topbarActiveAction = cn(
   topbarActionBase,
   "border-orange-border bg-orange-bg text-orange hover:border-orange hover:bg-orange-bg",
 );
+const SECURITY_ANOMALIES = new Set<SecurityAnomaly>([
+  "deep_night",
+  "weekend",
+  "burst",
+  "high_budget",
+  "abnormal_language",
+]);
+
+type ScanRecordMatch = {
+  campaign_id: string;
+  name?: string | null;
+  objective?: string | null;
+  status?: string | null;
+  created_time?: string | null;
+  daily_budget?: number | string | null;
+  lifetime_budget?: number | string | null;
+  account_id?: string | null;
+  account_name?: string | null;
+  anomalies?: string[];
+  spend?: string | null;
+  spend_range_label?: string | null;
+};
+
+function recordMatchToCampaign(m: ScanRecordMatch): FbCampaign {
+  return {
+    id: m.campaign_id,
+    name: m.name || "(未命名)",
+    status: m.status || "",
+    objective: m.objective || undefined,
+    created_time: m.created_time || undefined,
+    daily_budget: m.daily_budget != null ? String(m.daily_budget) : undefined,
+    lifetime_budget: m.lifetime_budget != null ? String(m.lifetime_budget) : undefined,
+    insights:
+      m.spend != null
+        ? {
+            data: [{ spend: String(m.spend) }],
+          }
+        : undefined,
+    _accountId: m.account_id || undefined,
+    _accountName: m.account_name || undefined,
+  };
+}
+
+function buildDaysFromScanRecord(matches: ScanRecordMatch[], date: DateConfig): SecurityDay[] {
+  const anomaliesById = new Map<string, SecurityAnomaly[]>();
+  const campaigns = matches.map((m) => {
+    const tags = (m.anomalies ?? []).filter((a): a is SecurityAnomaly =>
+      SECURITY_ANOMALIES.has(a as SecurityAnomaly),
+    );
+    if (tags.length > 0) anomaliesById.set(m.campaign_id, tags);
+    return recordMatchToCampaign(m);
+  });
+  return buildSecurityDays(campaigns, date).map((day) => ({
+    ...day,
+    rows: day.rows.map((row) => ({
+      ...row,
+      anomalies: anomaliesById.get(row.campaign.id) ?? row.anomalies,
+    })),
+  }));
+}
 
 function formatRelativeScanTime(d: Date): string {
   const sec = Math.floor((Date.now() - d.getTime()) / 1000);
@@ -89,21 +152,21 @@ export function SecurityMonitorView() {
   const [scanRequested, setScanRequested] = useState(false);
   const [scanStartAt, setScanStartAt] = useState<number | null>(null);
 
-  // 「上次掃描時間」改從 DB 拉。security_scan_records 最新一筆的
-  // scanned_at 就是答案。30s staleTime 足以讓 UI 看起來即時但不
-  // 每次 mount 都打 backend。
+  // 「上次掃描」改從 DB 拉完整紀錄。進頁面只還原
+  // security_scan_records.matches,不碰 FB；只有按「重新掃描」
+  // 才會觸發 useMultiAccountOverview。
   const lastScanQuery = useQuery({
     queryKey: ["security-scan-last", user?.id],
     queryFn: async () => {
       if (!user?.id) return null;
       const resp = await api.securityScan.listRecords(user.id, 1);
-      const row = resp.data?.[0];
-      return row?.scanned_at ?? null;
+      return resp.data?.[0] ?? null;
     },
     enabled: !!user?.id,
     staleTime: 30_000,
   });
-  const lastScanAt = lastScanQuery.data ? new Date(lastScanQuery.data) : null;
+  const lastScanRecord = lastScanQuery.data;
+  const lastScanAt = lastScanRecord?.scanned_at ? new Date(lastScanRecord.scanned_at) : null;
 
   const [date, setDate] = useState<DateConfig>({
     preset: "this_month",
@@ -165,10 +228,26 @@ export function SecurityMonitorView() {
     return map;
   }, [overview.campaigns]);
 
-  const allDays = useMemo(
+  const liveDays = useMemo(
     () => buildSecurityDays(overview.campaigns, date),
     [overview.campaigns, date],
   );
+  const recordDays = useMemo(
+    () => buildDaysFromScanRecord((lastScanRecord?.matches ?? []) as ScanRecordMatch[], date),
+    [lastScanRecord?.matches, date],
+  );
+  const showingStoredScan = !scanRequested;
+  const allDays = showingStoredScan ? recordDays : liveDays;
+  const displaySpendByCampaignId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const day of allDays) {
+      for (const row of day.rows) {
+        const spend = row.campaign.insights?.data?.[0]?.spend;
+        if (spend !== undefined) map.set(row.campaign.id, spend);
+      }
+    }
+    return map.size > 0 ? map : spendByCampaignId;
+  }, [allDays, spendByCampaignId]);
 
   // Per-tab counts (drive the tab labels) — computed once from `allDays`
   // so both numbers always sum to the unfiltered total.
@@ -191,7 +270,7 @@ export function SecurityMonitorView() {
       const uid = user?.id ?? "";
       if (uid) {
         const matches = visibleAll.length
-          ? allDays.flatMap((day) =>
+          ? liveDays.flatMap((day) =>
               day.rows
                 .filter((r) => !safeIds.has(r.campaign.id))
                 .map((r) => ({
@@ -237,7 +316,7 @@ export function SecurityMonitorView() {
     scanStartAt,
     user?.id,
     visibleAll,
-    allDays,
+    liveDays,
     safeIds,
   ]);
 
@@ -291,7 +370,7 @@ export function SecurityMonitorView() {
           name: c.name,
           created_time: c.created_time ?? r.createdAt.toISOString(),
           daily_budget: effectiveDailyBudget(c),
-          spend: spendByCampaignId.get(c.id) ?? null,
+          spend: displaySpendByCampaignId.get(c.id) ?? null,
           spend_range_label: spendRangeLabel,
           account_name: c._accountName ?? "",
           anomalies: r.anomalies,
@@ -300,7 +379,7 @@ export function SecurityMonitorView() {
       }
     }
     return out;
-  }, [allDays, safeIds, creatorByCampaignId, spendByCampaignId, spendRangeLabel]);
+  }, [allDays, safeIds, creatorByCampaignId, displaySpendByCampaignId, spendRangeLabel]);
 
   // Show the loading state whenever:
   //   1. Settings are still hydrating (no idea which accounts to show), or
@@ -310,9 +389,10 @@ export function SecurityMonitorView() {
   // The third condition catches the "I see empty state but it's actually
   // still loading" UX bug from the previous build.
   const showLoading =
-    !settingsReady ||
-    overview.isLoading ||
-    (overview.campaigns.length === 0 && overview.isFetching);
+    scanRequested &&
+    (!settingsReady ||
+      overview.isLoading ||
+      (overview.campaigns.length === 0 && overview.isFetching));
 
   return (
     <>
@@ -438,7 +518,9 @@ export function SecurityMonitorView() {
             (insights / 廣告組合 / 廣告) 請回儀表板。 */}
 
         <div className="min-w-0 flex-1 p-3 md:p-5">
-          {!scanRequested ? (
+          {!scanRequested && lastScanQuery.isLoading ? (
+            <LoadingState title="載入上次掃描結果..." subtitle="正在讀取掃描紀錄" />
+          ) : !scanRequested && !lastScanRecord ? (
             <EmptyState>
               <div className="flex flex-col items-center gap-2">
                 <div className="text-[15px] font-semibold text-ink">尚未掃描</div>
@@ -456,7 +538,7 @@ export function SecurityMonitorView() {
             // curve is more honest here since we don't have real
             // per-account progress to surface.
             <LoadingState title="掃描中..." subtitle="正在從 Facebook 拉取活動清單" />
-          ) : visibleAll.length === 0 ? (
+          ) : scanRequested && visibleAll.length === 0 ? (
             <EmptyState>請先在設定中啟用廣告帳戶</EmptyState>
           ) : (
             <div className="flex flex-col gap-3">
@@ -476,7 +558,7 @@ export function SecurityMonitorView() {
                 <SecurityDayList
                   days={visibleDays}
                   creatorByCampaignId={creatorByCampaignId}
-                  spendByCampaignId={spendByCampaignId}
+                  spendByCampaignId={displaySpendByCampaignId}
                   insightsPending={overview.insightsPending}
                   // Default collapsed for BOTH tabs — old default
                   // (待查看 auto-expanded) fired an /activities call
