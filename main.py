@@ -131,6 +131,7 @@ _OVERVIEW_ACCOUNT_CONCURRENCY = _env_int("OVERVIEW_ACCOUNT_CONCURRENCY", 4)
 _SECURITY_SCAN_CONCURRENCY = _env_int("SECURITY_SCAN_CONCURRENCY", 2)
 _SECURITY_PUSH_MAX_CONFIGS_PER_TICK = _env_int("SECURITY_PUSH_MAX_CONFIGS_PER_TICK", 3)
 _SECURITY_PUSH_ENRICH_CREATORS = os.getenv("SECURITY_PUSH_ENRICH_CREATORS", "0") == "1"
+_SECURITY_PUSH_SCAN_CACHE_TTL_SECONDS = _env_int("SECURITY_PUSH_SCAN_CACHE_TTL_SECONDS", 60 * 60)
 
 
 class _NullAsyncContext:
@@ -178,6 +179,13 @@ def _account_semaphore(account_id: str) -> asyncio.Semaphore:
 # 10 min are skipped (cold accounts don't get re-warmed; this keeps
 # background FB usage bounded by what's actually being looked at).
 _warm_targets: dict[tuple[str, str, str, Optional[str], str], float] = {}
+
+# Security push scan result cache. Multiple configs often belong to the
+# same owner and watch the same selected account set; without this each
+# config repeats the same FB campaign probes/fetches. Cache the raw
+# anomaly candidates for an hour, then each config applies its own
+# filters/groups locally.
+_security_push_scan_cache: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
 
 # Set whenever we observe an 80004 throttle response. The warm loop
 # checks this and backs off for 10 minutes — the absolute last thing
@@ -9561,6 +9569,165 @@ async def _persist_scan_record(
         )
 
 
+def _clone_security_match(m: dict) -> dict:
+    out = dict(m)
+    if isinstance(out.get("campaign"), dict):
+        out["campaign"] = dict(out["campaign"])
+    out["anomalies"] = list(out.get("anomalies") or [])
+    return out
+
+
+def _parse_fb_created_time(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        iso = str(value)
+        if len(iso) >= 5 and iso[-5] in ("+", "-") and iso[-3] != ":":
+            iso = iso[:-2] + ":" + iso[-2:]
+        dt = datetime.fromisoformat(iso)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _security_config_account_ids(cfg: dict, *, max_accounts: Optional[int] = None) -> list[str]:
+    owner_uid = cfg["owner_fb_user_id"]
+    account_ids = list(cfg.get("account_ids") or [])
+    if not account_ids:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value FROM user_settings WHERE fb_user_id = $1 AND key = 'selected_accounts'",
+                owner_uid,
+            )
+        if row and row["value"]:
+            account_ids = [str(x) for x in _jsonb_list(row["value"]) if x]
+    # Preserve first-seen order while removing duplicate account ids.
+    account_ids = list(dict.fromkeys(account_ids))
+    if max_accounts is not None and max_accounts > 0:
+        account_ids = account_ids[:max_accounts]
+    return account_ids
+
+
+def _filter_security_matches_for_config(
+    matches: list[dict],
+    cfg: dict,
+    since_dt: datetime,
+    *,
+    require_anomaly: bool,
+    limit: Optional[int],
+    safe_ids: set,
+) -> list[dict]:
+    filters = set(_security_anomaly_tags(cfg.get("anomaly_filters")))
+    if not filters:
+        filters = {"deep_night", "weekend", "high_budget"}
+
+    out: list[dict] = []
+    for raw in matches:
+        m = _clone_security_match(raw)
+        c = m.get("campaign") or {}
+        cid = c.get("id")
+        if cid and cid in safe_ids:
+            continue
+        created_dt = m.get("_created_dt")
+        if not isinstance(created_dt, datetime):
+            created_dt = _parse_fb_created_time(c.get("created_time"))
+            if not created_dt:
+                continue
+            m["_created_dt"] = created_dt
+        if created_dt <= since_dt:
+            continue
+        hit = [t for t in (m.get("anomalies") or []) if t in filters]
+        if require_anomaly and not hit:
+            continue
+        m["anomalies"] = hit
+        out.append(m)
+
+    out.sort(key=lambda x: x["_created_dt"], reverse=True)
+    if limit is not None:
+        out = out[:limit]
+    for m in out:
+        m.pop("_created_dt", None)
+    return out
+
+
+async def _collect_security_matches_cached(
+    cfg: dict,
+    since_dt: datetime,
+    *,
+    require_anomaly: bool = True,
+    limit: Optional[int] = None,
+    exclude_safe: bool = True,
+) -> list[dict]:
+    """Share one FB scan across configs with the same owner/account set.
+
+    Cache entries retain all anomaly candidates, then each config applies
+    its own anomaly filter and LINE destinations. A cached result is only
+    reused if it was scanned from an equal-or-earlier since_dt, so we
+    never miss older campaigns for a config whose last_run_at lags behind.
+    """
+    if _db_pool is None:
+        return []
+    owner_uid = cfg["owner_fb_user_id"]
+    account_ids = await _security_config_account_ids(cfg)
+    if not account_ids:
+        return []
+    key = (owner_uid, tuple(sorted(account_ids)))
+    now = time.monotonic()
+    for old_key, old_entry in list(_security_push_scan_cache.items()):
+        if now - float(old_entry.get("ts", 0)) > _SECURITY_PUSH_SCAN_CACHE_TTL_SECONDS:
+            _security_push_scan_cache.pop(old_key, None)
+    safe_ids = await _load_safe_campaign_ids() if exclude_safe else set()
+
+    entry = _security_push_scan_cache.get(key)
+    if entry:
+        age = now - float(entry.get("ts", 0))
+        cached_since = entry.get("since_dt")
+        if (
+            age <= _SECURITY_PUSH_SCAN_CACHE_TTL_SECONDS
+            and isinstance(cached_since, datetime)
+            and cached_since <= since_dt
+        ):
+            print(
+                f"[security-push] scan cache hit owner={owner_uid} accounts={len(account_ids)} age={int(age)}s",
+                flush=True,
+            )
+            return _filter_security_matches_for_config(
+                list(entry.get("matches") or []),
+                cfg,
+                since_dt,
+                require_anomaly=require_anomaly,
+                limit=limit,
+                safe_ids=safe_ids,
+            )
+
+    scan_cfg = {
+        **cfg,
+        "account_ids": account_ids,
+        "anomaly_filters": list(_SECURITY_ANOMALY_TAGS),
+    }
+    matches = await _collect_security_matches(
+        scan_cfg,
+        since_dt,
+        require_anomaly=True,
+        limit=None,
+        exclude_safe=False,
+        keep_created_dt=True,
+    )
+    _security_push_scan_cache[key] = {
+        "ts": now,
+        "since_dt": since_dt,
+        "matches": [_clone_security_match(m) for m in matches],
+    }
+    return _filter_security_matches_for_config(
+        matches,
+        cfg,
+        since_dt,
+        require_anomaly=require_anomaly,
+        limit=limit,
+        safe_ids=safe_ids,
+    )
+
+
 async def _collect_security_matches(
     cfg: dict,
     since_dt: datetime,
@@ -9569,6 +9736,7 @@ async def _collect_security_matches(
     limit: Optional[int] = None,
     max_accounts: Optional[int] = None,
     exclude_safe: bool = True,
+    keep_created_dt: bool = False,
 ) -> List[dict]:
     """Pull campaigns created since `since_dt` for the config's accounts
     and (optionally) filter to those whose anomalies intersect
@@ -9588,21 +9756,9 @@ async def _collect_security_matches(
     """
     if _db_pool is None:
         return []
-    owner_uid = cfg["owner_fb_user_id"]
-    account_ids = list(cfg.get("account_ids") or [])
-    if not account_ids:
-        async with _db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT value FROM user_settings WHERE fb_user_id = $1 AND key = 'selected_accounts'",
-                owner_uid,
-            )
-        if row and row["value"]:
-            account_ids = [str(x) for x in _jsonb_list(row["value"]) if x]
+    account_ids = await _security_config_account_ids(cfg, max_accounts=max_accounts)
     if not account_ids:
         return []
-
-    if max_accounts is not None and max_accounts > 0:
-        account_ids = account_ids[:max_accounts]
 
     filters = set(_security_anomaly_tags(cfg.get("anomaly_filters")))
     if not filters:
@@ -9733,7 +9889,8 @@ async def _collect_security_matches(
 
     if not _SECURITY_PUSH_ENRICH_CREATORS:
         for m in matches:
-            m.pop("_created_dt", None)
+            if not keep_created_dt:
+                m.pop("_created_dt", None)
         return matches
 
     since_epoch = int(since_dt.timestamp())
@@ -9797,8 +9954,9 @@ async def _collect_security_matches(
                     creator_by_cid[oid] = nm
     for m in matches:
         m["creator"] = creator_by_cid.get(m["campaign"].get("id"))
-        # Drop the internal sort key before returning.
-        m.pop("_created_dt", None)
+        if not keep_created_dt:
+            # Drop the internal sort key before returning.
+            m.pop("_created_dt", None)
 
     return matches
 
@@ -9837,7 +9995,7 @@ async def _security_push_run_one(cfg: dict) -> dict:
     # Pull campaigns under the owner's FB token context.
     ctx_token = _current_fb_user_id.set(owner_uid)
     try:
-        matches = await _collect_security_matches(
+        matches = await _collect_security_matches_cached(
             cfg, since_dt, require_anomaly=True, limit=None
         )
         if not matches:
