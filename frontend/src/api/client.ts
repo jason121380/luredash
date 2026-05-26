@@ -696,15 +696,22 @@ export const api = {
   },
 
   campaigns: {
-    get: (campaignId: string, date: DateConfig) =>
+    get: (campaignId: string, date: DateConfig, source = "report") =>
       request<{ data: FbCampaign }>("GET", `/api/campaigns/${campaignId}`, {
         query: dateParams(date),
-        source: "report",
+        source,
       }),
-    adsets: (campaignId: string, date: DateConfig) =>
+    adsets: (
+      campaignId: string,
+      date: DateConfig,
+      opts?: { source?: string; budgetOnly?: boolean },
+    ) =>
       request<{ data: FbAdset[] }>("GET", `/api/campaigns/${campaignId}/adsets`, {
-        query: dateParams(date),
-        source: "drill-adsets",
+        query: {
+          ...dateParams(date),
+          ...(opts?.budgetOnly ? { budget_only: "true" } : {}),
+        },
+        source: opts?.source ?? "drill-adsets",
       }),
     setStatus: (campaignId: string, status: string) =>
       request<FbBaseEntity>("POST", `/api/campaigns/${campaignId}/status`, {

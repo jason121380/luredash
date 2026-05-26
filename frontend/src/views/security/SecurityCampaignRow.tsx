@@ -1,9 +1,14 @@
+import { api } from "@/api/client";
+import { useAdsets } from "@/api/hooks/useAdsets";
 import { useAccountActivities } from "@/api/hooks/useAccountActivities";
 import { Badge } from "@/components/Badge";
 import { cn } from "@/lib/cn";
+import type { DateConfig } from "@/lib/datePicker";
 import { fM } from "@/lib/format";
+import { getIns } from "@/lib/insights";
 import { useSecurityStore } from "@/stores/securityStore";
-import type { FbActivity } from "@/types/fb";
+import type { FbActivity, FbAdset } from "@/types/fb";
+import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import {
   type SecurityAnomaly,
@@ -85,6 +90,8 @@ export interface SecurityCampaignRowProps {
   activitiesSince: number;
   /** Upper bound for the activities fetch (epoch seconds). */
   activitiesUntil: number;
+  /** Fixed fetch range for row-level lazy details. */
+  detailDate: DateConfig;
 }
 
 export function SecurityCampaignRow({
@@ -95,12 +102,15 @@ export function SecurityCampaignRow({
   defaultExpanded,
   activitiesSince,
   activitiesUntil,
+  detailDate,
 }: SecurityCampaignRowProps) {
   const [expanded, setExpanded] = useState(defaultExpanded ?? false);
   const campaign = row.campaign;
   const accountId = campaign._accountId ?? null;
   const isSafe = useSecurityStore((s) => s.safeIds.has(campaign.id));
   const toggleSafe = useSecurityStore((s) => s.toggleSafe);
+  const campaignBudgetRaw = Number(campaign.daily_budget);
+  const hasCampaignDailyBudget = Number.isFinite(campaignBudgetRaw) && campaignBudgetRaw > 0;
 
   // Activity log fetch — shares its React Query cache key with the
   // view-level multi-account fetch, so by the time this row mounts
@@ -112,6 +122,23 @@ export function SecurityCampaignRow({
     expanded,
   );
 
+  const campaignDetailQuery = useQuery({
+    queryKey: ["security-campaign-detail", campaign.id, detailDate],
+    queryFn: async () => {
+      const resp = await api.campaigns.get(campaign.id, detailDate, "security-drill-campaign");
+      return resp.data;
+    },
+    enabled: expanded && spend === undefined,
+    staleTime: 5 * 60_000,
+  });
+
+  const adsetsQuery = useAdsets(
+    campaign.id,
+    detailDate,
+    expanded && !hasCampaignDailyBudget,
+    { source: "security-drill-adsets", budgetOnly: true },
+  );
+
   const objLabel = campaign.objective
     ? (OBJECTIVE_LABELS[campaign.objective] ?? campaign.objective)
     : "—";
@@ -120,15 +147,22 @@ export function SecurityCampaignRow({
   // active-adset budgets (ABO). Returns raw FB value, same scale
   // dashboard renders directly.
   const dailyBudget = effectiveDailyBudget(campaign);
-  const dailyBudgetIsAggregate = dailyBudget !== null && !campaign.daily_budget;
+  const lazyAdsetBudget = useMemo(() => sumAdsetDailyBudget(adsetsQuery.data), [adsetsQuery.data]);
+  const displayDailyBudget = dailyBudget ?? lazyAdsetBudget;
+  const dailyBudgetIsAggregate =
+    displayDailyBudget !== null &&
+    !hasCampaignDailyBudget &&
+    ((campaign.adsets?.data?.length ?? 0) > 0 || (adsetsQuery.data?.length ?? 0) > 0);
 
   // Spend is optional; security scan runs in metadata-only mode to
   // avoid extra FB insights calls. Three-state display:
   //   - insightsPending → "—" (full-phase still loading)
   //   - finite number → "$X"
   //   - undefined / NaN after settle → "—" (not fetched for this view)
-  const spendDollars = spend !== undefined ? Number(spend) : Number.NaN;
-  const spendLabel = insightsPending
+  const detailSpend = campaignDetailQuery.data ? getIns(campaignDetailQuery.data).spend : undefined;
+  const spendDollars =
+    spend !== undefined ? Number(spend) : detailSpend !== undefined ? Number(detailSpend) : Number.NaN;
+  const spendLabel = insightsPending || campaignDetailQuery.isLoading
     ? "—"
     : Number.isFinite(spendDollars)
       ? `$${fM(spendDollars)}`
@@ -144,6 +178,23 @@ export function SecurityCampaignRow({
         return tb - ta;
       });
   }, [activitiesQuery.data, campaign.id]);
+
+  const activityCreator = useMemo(() => {
+    const createEvent =
+      matchedActivities.find((a) =>
+        [a.event_type, a.translated_event_type].some((v) =>
+          /create.*campaign|建立.*活動|建立.*行銷活動/i.test(v ?? ""),
+        ),
+      ) ?? matchedActivities.find((a) => a.actor_name);
+    return createEvent?.actor_name ?? null;
+  }, [matchedActivities]);
+
+  const creatorLabel = creator || activityCreator || "—";
+  const budgetSuffix = dailyBudgetIsAggregate
+    ? "(廣告組合加總)"
+    : expanded && !hasCampaignDailyBudget && adsetsQuery.isLoading
+      ? "(查詢中)"
+      : null;
 
   return (
     <div className="rounded-lg border border-border bg-white">
@@ -178,12 +229,12 @@ export function SecurityCampaignRow({
               最初已建立行銷活動
             </span>
             <span>
-              建立者 <span className="font-semibold text-ink">{creator || "—"}</span>
+              建立者 <span className="font-semibold text-ink">{creatorLabel}</span>
             </span>
             <span>
-              日預算 {fmtBudget(dailyBudget)}
-              {dailyBudgetIsAggregate && (
-                <span className="ml-1 text-[10px] text-gray-300">(廣告組合加總)</span>
+              日預算 {fmtBudget(displayDailyBudget)}
+              {budgetSuffix && (
+                <span className="ml-1 text-[10px] text-gray-300">{budgetSuffix}</span>
               )}
             </span>
             <span>
@@ -237,6 +288,21 @@ export function SecurityCampaignRow({
       )}
     </div>
   );
+}
+
+function sumAdsetDailyBudget(adsets: FbAdset[] | undefined): number | null {
+  if (!adsets?.length) return null;
+  let sum = 0;
+  let any = false;
+  for (const adset of adsets) {
+    if (adset.status === "ARCHIVED" || adset.status === "DELETED") continue;
+    const v = Number(adset.daily_budget);
+    if (Number.isFinite(v) && v > 0) {
+      sum += v;
+      any = true;
+    }
+  }
+  return any ? sum : null;
 }
 
 /** Render the actual FB / network error in plain Chinese instead of

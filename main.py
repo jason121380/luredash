@@ -5268,7 +5268,18 @@ async def update_campaign_budget(campaign_id: str, daily_budget: int = Query(Non
 # ── 廣告組合 ─────────────────────────────────────────────────────────
 
 @app.get("/api/campaigns/{campaign_id}/adsets")
-async def get_adsets(campaign_id: str, date_preset: str = "last_30d", time_range: Optional[str] = None):
+async def get_adsets(
+    campaign_id: str,
+    date_preset: str = "last_30d",
+    time_range: Optional[str] = None,
+    budget_only: bool = Query(False),
+):
+    if budget_only:
+        return await fb_get(f"{campaign_id}/adsets", {
+            "fields": "id,name,status,daily_budget,lifetime_budget",
+            "limit": "500"
+        })
+
     ins = _insights_clause(
         "spend,impressions,clicks,ctr,cpc,cpm,frequency,actions,"
         "inline_link_clicks,cost_per_inline_link_click,"

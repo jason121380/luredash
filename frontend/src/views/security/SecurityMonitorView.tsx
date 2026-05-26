@@ -486,6 +486,7 @@ export function SecurityMonitorView() {
                   defaultExpanded={false}
                   activitiesSince={activitiesBounds.since}
                   activitiesUntil={activitiesBounds.until}
+                  detailDate={fetchDate}
                 />
               )}
             </div>
@@ -566,6 +567,7 @@ interface SecurityDayListProps {
   defaultExpanded: boolean;
   activitiesSince: number;
   activitiesUntil: number;
+  detailDate: DateConfig;
 }
 
 function SecurityDayList({
@@ -576,6 +578,7 @@ function SecurityDayList({
   defaultExpanded,
   activitiesSince,
   activitiesUntil,
+  detailDate,
 }: SecurityDayListProps) {
   return (
     <div className="flex flex-col gap-4">
@@ -596,6 +599,7 @@ function SecurityDayList({
                 defaultExpanded={defaultExpanded}
                 activitiesSince={activitiesSince}
                 activitiesUntil={activitiesUntil}
+                detailDate={detailDate}
               />
             ))}
           </div>
