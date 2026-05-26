@@ -142,7 +142,7 @@ export function DashboardView() {
   return (
     <>
       <Topbar title="儀表板" titleAction={<AcctSidebarToggle />}>
-        <div className="flex items-center gap-1.5 md:gap-2">
+        <div className="flex items-center gap-1 md:gap-1.5">
           <MobileAccountPicker
             accounts={visibleAccounts}
             selectedId={activeAccountId}

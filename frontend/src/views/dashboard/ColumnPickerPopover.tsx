@@ -5,7 +5,7 @@ import { useState } from "react";
 import { EXTRA_TREE_COLS, type TreeColKey } from "./treeCols";
 
 /**
- * Gear-icon trigger that opens a popover for toggling the optional
+ * Columns-icon trigger that opens a popover for toggling the optional
  * e-commerce KPI columns (連結點擊 / 加入購物車 / 購買數 / ROAS …).
  *
  * Persisted via uiStore.extraTreeCols → localStorage. Default empty
@@ -50,12 +50,9 @@ export function ColumnPickerPopover() {
             strokeLinejoin="round"
             aria-hidden="true"
           >
-            <line x1="4" y1="6" x2="20" y2="6" />
-            <line x1="4" y1="12" x2="20" y2="12" />
-            <line x1="4" y1="18" x2="20" y2="18" />
-            <circle cx="9" cy="6" r="2" fill="currentColor" />
-            <circle cx="15" cy="12" r="2" fill="currentColor" />
-            <circle cx="7" cy="18" r="2" fill="currentColor" />
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <line x1="9" y1="4" x2="9" y2="20" />
+            <line x1="15" y1="4" x2="15" y2="20" />
           </svg>
           {extras.length > 0 && (
             <span className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-orange px-1 text-[10px] font-bold text-white">
