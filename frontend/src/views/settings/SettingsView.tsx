@@ -162,9 +162,7 @@ export function SettingsView() {
       </Topbar>
       <UpgradeModal state={upgradeState} onClose={() => setUpgradeState(null)} />
 
-      <div className="px-3 pt-3 md:px-5 md:pt-4">
-        <GraceBanner usage={usageQuery.data} resource="ad_accounts" />
-      </div>
+      <GraceBanner usage={usageQuery.data} resource="ad_accounts" className="mx-3 mt-3 md:mx-5 md:mt-4" />
 
       <div className="flex flex-1 flex-col overflow-hidden md:flex-row">
         {/* Left: BM panel — full-width horizontal scroll on mobile,
