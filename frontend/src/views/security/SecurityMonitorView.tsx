@@ -1,4 +1,4 @@
-import { api } from "@/api/client";
+import { api, type SecurityPushTestCard } from "@/api/client";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { queryClient } from "@/lib/queryClient";
 import { ScanHistoryPanel } from "./ScanHistoryPanel";
@@ -7,9 +7,10 @@ import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
 import { DatePicker } from "@/components/DatePicker";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadingState } from "@/components/LoadingState";
+import { useSharedSettings } from "@/api/hooks/useSettings";
 import { Topbar, TopbarSeparator } from "@/layout/Topbar";
 import { cn } from "@/lib/cn";
-import type { DateConfig } from "@/lib/datePicker";
+import { type DateConfig, toShortLabel } from "@/lib/datePicker";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -17,6 +18,7 @@ import type { FbCampaign } from "@/types/fb";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SecurityCampaignRow } from "./SecurityCampaignRow";
+import { SecurityPushSettingsModal } from "./SecurityPushSettingsModal";
 import {
   buildSecurityDays,
   effectiveDailyBudget,
@@ -31,6 +33,14 @@ type SecurityTab = "pending" | "safe";
 
 const topbarActionBase =
   "inline-flex h-10 shrink-0 select-none items-center justify-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 text-[13px] font-medium font-sans leading-none transition-all duration-150 cursor-pointer active:scale-95 md:h-9";
+const topbarSecondaryAction = cn(
+  topbarActionBase,
+  "border-border bg-white text-ink hover:border-orange-border hover:bg-orange-bg",
+);
+const topbarActiveAction = cn(
+  topbarActionBase,
+  "border-orange-border bg-orange-bg text-orange hover:border-orange hover:bg-orange-bg",
+);
 const SECURITY_ANOMALIES = new Set<SecurityAnomaly>([
   "deep_night",
   "weekend",
@@ -145,6 +155,9 @@ export function SecurityMonitorView() {
 
   const safeIds = useSecurityStore((s) => s.safeIds);
   const [tab, setTab] = useState<SecurityTab>("pending");
+  const [pushModalOpen, setPushModalOpen] = useState(false);
+  const sharedQuery = useSharedSettings();
+  const autoScanEnabled = sharedQuery.data?.security_push_master_enabled === true;
 
   // 「立即掃描」 gate — flipping this to true triggers the
   // useMultiAccountOverview query below. Default false so just
@@ -381,6 +394,33 @@ export function SecurityMonitorView() {
   // that ONE account and surfaces the creator on demand.
   const creatorByCampaignId = useMemo(() => new Map<string, string>(), []);
 
+  // Snapshot of the 待查看 cards — passed into the push-settings modal
+  // so the「測試」button can echo exactly what the user sees on screen
+  // without backend re-scanning FB. Spend + range label travel along
+  // so the LINE card shows「已花費 $X(本月)」exactly like the table.
+  const spendRangeLabel = useMemo(() => toShortLabel(fetchDate), [fetchDate]);
+  const pendingCardsSnapshot = useMemo<SecurityPushTestCard[]>(() => {
+    const out: SecurityPushTestCard[] = [];
+    for (const day of allDays) {
+      for (const r of day.rows) {
+        if (safeIds.has(r.campaign.id)) continue;
+        const c = r.campaign;
+        out.push({
+          id: c.id,
+          name: c.name,
+          created_time: c.created_time ?? r.createdAt.toISOString(),
+          daily_budget: effectiveDailyBudget(c),
+          spend: displaySpendByCampaignId.get(c.id) ?? null,
+          spend_range_label: spendRangeLabel,
+          account_name: c._accountName ?? "",
+          anomalies: r.anomalies,
+          creator: creatorByCampaignId.get(c.id) ?? null,
+        });
+      }
+    }
+    return out;
+  }, [allDays, safeIds, creatorByCampaignId, displaySpendByCampaignId, spendRangeLabel]);
+
   // Show the loading state whenever:
   //   1. Settings are still hydrating (no idea which accounts to show), or
   //   2. The hook is in the loading phase, or
@@ -441,6 +481,29 @@ export function SecurityMonitorView() {
             </svg>
             <span>{isScanning ? "掃描中…" : lastScanAt ? "重新掃描" : "立即掃描"}</span>
           </button>
+          <button
+            type="button"
+            onClick={() => setPushModalOpen(true)}
+            className={autoScanEnabled ? topbarActiveAction : topbarSecondaryAction}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="shrink-0 text-orange"
+              aria-hidden="true"
+            >
+              <title>bell</title>
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+              <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+            </svg>
+            <span>{autoScanEnabled ? "已開啟自動掃描" : "推播設定"}</span>
+          </button>
           <TopbarSeparator />
           {/* 安全監控限定到「上個月」為止 — 立即掃描 fetch 固定
               last_90d,選 last_90d 或更久的自訂區間會看不到資料。
@@ -452,6 +515,11 @@ export function SecurityMonitorView() {
           />
         </div>
       </Topbar>
+      <SecurityPushSettingsModal
+        open={pushModalOpen}
+        onOpenChange={setPushModalOpen}
+        pendingCards={pendingCardsSnapshot}
+      />
 
       <div className="flex min-w-0 flex-col items-stretch xl:flex-row">
         {/* 帳戶清單面板已移除 — 安全監控是 review 用,只關心
