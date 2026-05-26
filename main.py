@@ -753,6 +753,54 @@ async def lifespan(app: FastAPI):
                     ON security_push_logs (config_id, run_at DESC)
                     """
                 )
+                # `security_scan_records`: full snapshot of WHAT was found
+                # in each scan (specific campaigns + anomalies + budget /
+                # spend), not just the count. Lets the team go back later
+                # and ask「上週吸引力 LURE 被偵測為深夜創建的活動有哪些」.
+                #
+                # Two trigger types:
+                #   - 'auto'   : scheduler tick (config_id set)
+                #   - 'manual' : user 按「立即掃描」(fb_user_id set,
+                #                config_id null)
+                #
+                # `matches` JSONB stores the full per-campaign payload so
+                # we don't need to re-fetch FB to reconstruct the timeline.
+                # Each match: {campaign_id, name, account_id, account_name,
+                # anomalies[], created_time, daily_budget, spend, creator}.
+                #
+                # Volume estimate:
+                #   - 1 user × 1 config × 24 auto/day × 30d = 720 rows / month
+                #   - + manual scans
+                # Rows are small (~1-5KB JSONB depending on match count).
+                # Recommend pruning rows older than 90 days if storage
+                # ever becomes a concern.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS security_scan_records (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        config_id UUID REFERENCES security_push_configs(id) ON DELETE SET NULL,
+                        fb_user_id TEXT,
+                        trigger_type TEXT NOT NULL,
+                        scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        account_ids TEXT[] NOT NULL DEFAULT '{}',
+                        matches JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        matches_count INT NOT NULL DEFAULT 0,
+                        duration_ms INT NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_sec_scan_records_user_time
+                    ON security_scan_records (fb_user_id, scanned_at DESC)
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_sec_scan_records_config_time
+                    ON security_scan_records (config_id, scanned_at DESC)
+                    """
+                )
                 # ── Per-user FB tokens (Phase A — multi-tenant) ───
                 # Each FB user's long-lived token is persisted here so a
                 # server restart doesn't blow away every user's session.
@@ -7967,6 +8015,118 @@ async def list_security_push_logs(
     }
 
 
+# ── Scan records (full match snapshots, browseable) ──────────────
+class _ScanRecordMatch(BaseModel):
+    """Loose schema — frontend sends whatever it has. We don't
+    validate the inner shape because it'll be persisted verbatim
+    as JSONB; consumers parse defensively. Only `campaign_id` is
+    structurally required so we can de-dupe / reference later."""
+    campaign_id: str
+    name: Optional[str] = None
+    objective: Optional[str] = None
+    status: Optional[str] = None
+    created_time: Optional[str] = None
+    daily_budget: Optional[int] = None
+    lifetime_budget: Optional[int] = None
+    account_id: Optional[str] = None
+    account_name: Optional[str] = None
+    anomalies: List[str] = []
+    creator: Optional[str] = None
+
+
+class _ScanRecordPayload(BaseModel):
+    account_ids: List[str] = []
+    matches: List[_ScanRecordMatch] = []
+    duration_ms: int = 0
+
+
+@app.post("/api/security-scan/records")
+async def post_security_scan_record(
+    payload: _ScanRecordPayload,
+    fb_user_id: str = Query(...),
+):
+    """Persist a manual 立即掃描 result into security_scan_records.
+
+    Auto-scan records are written by `_security_push_tick` directly.
+    Manual scans are user-triggered in the browser and bypass the
+    scheduler entirely, so the frontend POSTs the matches here right
+    after 立即掃描 completes.
+
+    Best-effort: returns 200 even when storage is unavailable — the
+    primary user-facing scan UX has already rendered by the time this
+    fires; we don't want a DB hiccup to surface as a scan failure.
+    """
+    _assert_known_user(fb_user_id)
+    if _db_pool is None:
+        return {"ok": False, "reason": "db unavailable"}
+    try:
+        await _persist_scan_record(
+            config_id=None,
+            fb_user_id=fb_user_id,
+            trigger_type="manual",
+            scanned_at=datetime.now(timezone.utc),
+            account_ids=payload.account_ids,
+            matches=[m.dict() for m in payload.matches],
+            duration_ms=payload.duration_ms,
+        )
+        return {"ok": True, "matches_count": len(payload.matches)}
+    except Exception as e:
+        print(f"[security-scan] manual record insert failed: {e}", flush=True)
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/security-scan/records")
+async def list_security_scan_records(
+    fb_user_id: str = Query(...),
+    limit: int = Query(20, ge=1, le=100),
+    trigger: Optional[str] = Query(None, description="auto / manual / null=all"),
+):
+    """Browse recent scan records. `trigger=auto` filters to scheduler
+    ticks, `manual` to user-initiated 立即掃描, null returns both."""
+    _assert_known_user(fb_user_id)
+    pool = _require_db()
+    where = ["fb_user_id = $1"]
+    params: list = [fb_user_id]
+    if trigger in ("auto", "manual"):
+        where.append(f"trigger_type = ${len(params) + 1}")
+        params.append(trigger)
+    params.append(limit)
+    q = f"""
+        SELECT id, config_id, trigger_type, scanned_at,
+               account_ids, matches, matches_count, duration_ms
+        FROM security_scan_records
+        WHERE {' AND '.join(where)}
+        ORDER BY scanned_at DESC
+        LIMIT ${len(params)}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(q, *params)
+    out = []
+    for r in rows:
+        # asyncpg returns jsonb as a JSON-encoded string (same quirk
+        # as everywhere else — see _security_push_enabled comment).
+        # Decode once before sending to the frontend.
+        raw_matches = r["matches"]
+        if isinstance(raw_matches, str):
+            try:
+                matches = json.loads(raw_matches)
+            except ValueError:
+                matches = []
+        else:
+            matches = raw_matches or []
+        out.append({
+            "id": str(r["id"]),
+            "config_id": str(r["config_id"]) if r["config_id"] else None,
+            "trigger_type": r["trigger_type"],
+            "scanned_at": r["scanned_at"].isoformat() if r["scanned_at"] else None,
+            "account_ids": list(r["account_ids"] or []),
+            "matches": matches,
+            "matches_count": r["matches_count"],
+            "duration_ms": r["duration_ms"],
+        })
+    return {"data": out}
+
+
 class _TestCardPayload(BaseModel):
     id: str
     name: str
@@ -8636,6 +8796,65 @@ async def _has_new_campaigns_since(account_id: str, since_dt: datetime) -> bool:
     return len(data) > 0
 
 
+def _serialize_match_for_record(m: dict) -> dict:
+    """Trim a `_collect_security_matches` row down to a stable, JSON-safe
+    payload for persistence in `security_scan_records.matches` JSONB.
+
+    Drops internal sort keys + ensures all values are JSON-compatible
+    primitives (numbers / strings / lists / None). Keeps the fields
+    the UI / future timeline browser would actually want.
+    """
+    c = m.get("campaign") or {}
+    return {
+        "campaign_id": c.get("id"),
+        "name": c.get("name"),
+        "objective": c.get("objective"),
+        "status": c.get("status"),
+        "created_time": c.get("created_time"),
+        "daily_budget": c.get("daily_budget"),
+        "lifetime_budget": c.get("lifetime_budget"),
+        "account_id": m.get("account_id"),
+        "account_name": m.get("account_name"),
+        "anomalies": list(m.get("anomalies") or []),
+        "creator": m.get("creator"),
+    }
+
+
+async def _persist_scan_record(
+    *,
+    config_id: Optional[str],
+    fb_user_id: Optional[str],
+    trigger_type: str,
+    scanned_at: datetime,
+    account_ids: List[str],
+    matches: List[dict],
+    duration_ms: int,
+) -> None:
+    """Insert one row into `security_scan_records`. Best-effort —
+    a logging failure must NEVER cause the actual scan to be reported
+    as failed."""
+    if _db_pool is None:
+        return
+    payload = [_serialize_match_for_record(m) for m in matches]
+    async with _db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO security_scan_records
+                (config_id, fb_user_id, trigger_type, scanned_at,
+                 account_ids, matches, matches_count, duration_ms)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+            """,
+            config_id,
+            fb_user_id,
+            trigger_type,
+            scanned_at,
+            list(account_ids or []),
+            json.dumps(payload),
+            len(payload),
+            int(duration_ms),
+        )
+
+
 async def _collect_security_matches(
     cfg: dict,
     since_dt: datetime,
@@ -8871,11 +9090,10 @@ async def _security_push_run_one(cfg: dict) -> dict:
     """Process a single security_push_configs row: fetch campaigns
     created since last_run_at, flag matches, push LINE message.
 
-    Returns a dict ``{matches_count, pushed_groups}`` so the caller
-    can persist a row into ``security_push_logs`` for audit / debug
-    of「過去 24 hours 跑了幾次,各偵測到幾個異常」. Pure no-op runs
-    (no matches → no push) still return matches_count=0 so the log
-    shows the tick actually executed.
+    Returns ``{matches_count, pushed_groups, matches}``. The caller
+    persists the count + summary into ``security_push_logs`` AND
+    the full matches list into ``security_scan_records`` so the team
+    can browse「上週這個 config 偵測過什麼」without re-hitting FB.
     """
     owner_uid = cfg["owner_fb_user_id"]
     if not owner_uid:
@@ -8883,7 +9101,7 @@ async def _security_push_run_one(cfg: dict) -> dict:
 
     # Resolve channel access_token
     if _db_pool is None:
-        return {"matches_count": 0, "pushed_groups": 0}
+        return {"matches_count": 0, "pushed_groups": 0, "matches": []}
     async with _db_pool.acquire() as conn:
         ch_row = await conn.fetchrow(
             "SELECT access_token FROM line_channels WHERE id = $1 AND enabled",
@@ -8906,7 +9124,7 @@ async def _security_push_run_one(cfg: dict) -> dict:
             cfg, since_dt, require_anomaly=True, limit=None
         )
         if not matches:
-            return {"matches_count": 0, "pushed_groups": 0}
+            return {"matches_count": 0, "pushed_groups": 0, "matches": []}
 
         # Flex card carousel — one bubble per campaign. Matches the
         # shape the test endpoint sends so the production push looks
@@ -8923,7 +9141,11 @@ async def _security_push_run_one(cfg: dict) -> dict:
                 pushed_groups += 1
             except line_client.LinePushError as e:
                 print(f"[security-push] push group={gid} failed: {e}", flush=True)
-        return {"matches_count": len(matches), "pushed_groups": pushed_groups}
+        return {
+            "matches_count": len(matches),
+            "pushed_groups": pushed_groups,
+            "matches": matches,
+        }
     finally:
         _current_fb_user_id.reset(ctx_token)
 
@@ -8991,8 +9213,8 @@ async def _security_push_tick() -> None:
         # UI timeline shows ticks that fired but found nothing,
         # ticks that pushed, and ticks that errored. Best-effort insert
         # so a logging hiccup never escalates to disabling the config.
+        duration_ms = int((time.monotonic() - start_mono) * 1000)
         try:
-            duration_ms = int((time.monotonic() - start_mono) * 1000)
             async with _db_pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -9009,6 +9231,22 @@ async def _security_push_tick() -> None:
                 )
         except Exception as e:
             print(f"[security-push] config={cid} log insert failed: {e}", flush=True)
+        # Snapshot the full match list for browseable history (separate
+        # table because security_push_logs is high-frequency counters).
+        try:
+            matches = run_result.get("matches") or []
+            account_ids = list(cfg.get("account_ids") or [])
+            await _persist_scan_record(
+                config_id=cid,
+                fb_user_id=cfg.get("owner_fb_user_id"),
+                trigger_type="auto",
+                scanned_at=now,
+                account_ids=account_ids,
+                matches=matches,
+                duration_ms=duration_ms,
+            )
+        except Exception as e:
+            print(f"[security-push] config={cid} scan record insert failed: {e}", flush=True)
 
 
 # ── Cache warm-refresh loop ───────────────────────────────────
@@ -9340,24 +9578,34 @@ async def _call_one_agent(
         f"{persona}\n\n"
         "---\n\n"
         "# 任務\n"
-        "審視多個 FB 廣告帳號,**只輸出可執行的具體任務清單**。"
+        "審視多個 FB 廣告帳號,**只輸出有問題、需要修的活動的具體任務**。\n"
         "全程繁中(術語 / 活動代號 / 數字保留原文)。\n\n"
-        "# 輸出格式(必須遵守)\n"
-        "**只寫待辦事項,不寫分析、不寫診斷段落、不寫開場白、不寫總結。**\n\n"
-        "每個帳號開 `### [帳號名]` 標題,底下列 1-4 條任務:\n"
+        "# 嚴格範圍\n"
+        "**只針對表現不好、有問題、需要介入的活動寫建議**。範例:\n"
+        "- CPC 過高 / 私訊成本太貴 → 暫停 / 換素材 / 縮受眾\n"
+        "- 頻次過高(受眾疲勞)→ 換素材 / 擴受眾\n"
+        "- CTR 過低 → 換素材 / 換目標\n"
+        "- 花錢卻沒成效 → 暫停\n"
+        "**表現好的活動完全不要寫**,例如:不要建議「加預算給某活動因為私訊成本低」、"
+        "不要建議「複製某活動因為 ROAS 高」、不要鼓勵 scale up。\n\n"
+        "# 輸出格式\n"
+        "**只寫待辦,不寫分析、不寫診斷段落、不寫開場白、不寫總結。**\n\n"
+        "每個有問題活動的帳號開 `### [帳號名]` 標題,底下列任務:\n"
         "```\n"
         "- [動作動詞] [活動名] — [依據數字]\n"
         "```\n"
         "例如:\n"
         "- 暫停 PS40·簡紹倫 廣告組合 A — CPC $12 是帳號均值 3 倍\n"
-        "- 加預算到 AT3·Bobo — 私訊成本 $45,低於 $80 門檻\n"
-        "- 換素材:上越Look·張浩榕 — 頻次 7.2,觀眾疲勞\n\n"
-        "結尾用 `## 今天先做` + 1-3 條跨帳號最優先任務,格式同上。\n\n"
+        "- 換素材 上越Look·張浩榕 — 頻次 7.2 受眾疲勞\n"
+        "- 縮受眾 AT17·KID — CTR 0.4% / 花費 $5k 沒回應\n\n"
+        "**如果某個帳號所有活動都表現正常,該帳號就完全不要出現在輸出中。**\n\n"
+        "結尾用 `## 今天先做` + 1-3 條跨帳號最優先處理的問題活動,格式同上。\n"
+        "如果整批活動都沒問題,直接寫「目前無需介入,所有活動表現正常」即可。\n\n"
         "# 嚴格禁止\n"
-        "- 不要寫「根據資料」「整體來看」「總結」等開場 / 收尾\n"
-        "- 不要解釋 WHY,只寫 WHAT(動作)+ 依據(數字)\n"
-        "- 不要分群描述、不要鋪陳邏輯、不要說「值得注意」\n"
-        "- 每條 ≤ 30 字,動作必須是動詞開頭(暫停 / 加預算 / 換素材 / 縮受眾 / 調 bid 等)"
+        "- 不要寫「根據資料」「整體來看」「總結」「值得注意」等開場 / 收尾\n"
+        "- 不要對表現好的活動建議 scale up / 加預算 / 複製\n"
+        "- 不要解釋 WHY,只寫 WHAT(修什麼問題)+ 數字依據\n"
+        "- 每條 ≤ 30 字,動作必須是負面修正動詞(暫停 / 換素材 / 縮受眾 / 調 bid / 換目標 / 擴受眾)"
     )
     user_prompt = (
         f"資料區間: {date_label}\n"
