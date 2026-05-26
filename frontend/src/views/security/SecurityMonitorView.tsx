@@ -26,6 +26,13 @@ import {
 
 type SecurityTab = "pending" | "safe";
 
+const topbarActionBase =
+  "inline-flex h-9 select-none items-center justify-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 text-[13px] font-medium font-sans leading-none transition-all duration-150 cursor-pointer active:scale-95";
+const topbarSecondaryAction = cn(
+  topbarActionBase,
+  "border-border bg-white text-ink hover:border-orange-border hover:bg-orange-bg",
+);
+
 function formatRelativeScanTime(d: Date): string {
   const sec = Math.floor((Date.now() - d.getTime()) / 1000);
   if (sec < 60) return "剛剛";
@@ -62,6 +69,7 @@ export function SecurityMonitorView() {
   const safeIds = useSecurityStore((s) => s.safeIds);
   const [tab, setTab] = useState<SecurityTab>("pending");
   const [pushModalOpen, setPushModalOpen] = useState(false);
+  const historyPanelRef = useRef<HTMLDivElement | null>(null);
 
   // 「立即掃描」 gate — flipping this to true triggers the
   // useMultiAccountOverview query below. Default false so just
@@ -333,9 +341,7 @@ export function SecurityMonitorView() {
             }}
             disabled={isScanning}
             className={cn(
-              "flex h-10 select-none items-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 md:h-9",
-              "text-[13px] font-medium font-sans",
-              "transition-all duration-150 cursor-pointer active:scale-95",
+              topbarActionBase,
               isScanning
                 ? "border-border bg-bg text-gray-400 cursor-wait"
                 : "border-orange bg-orange text-white hover:bg-orange-600 hover:border-orange-600",
@@ -364,13 +370,34 @@ export function SecurityMonitorView() {
           </button>
           <button
             type="button"
+            onClick={() => {
+              historyPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            }}
+            className={topbarSecondaryAction}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="shrink-0 text-orange"
+              aria-hidden="true"
+            >
+              <title>history</title>
+              <path d="M3 12a9 9 0 1 0 3-6.7" />
+              <path d="M3 3v6h6" />
+              <path d="M12 7v5l3 2" />
+            </svg>
+            <span>掃描紀錄</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setPushModalOpen(true)}
-            className={cn(
-              "flex h-10 select-none items-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 md:h-9",
-              "text-[13px] font-medium text-ink font-sans",
-              "transition-all duration-150 cursor-pointer active:scale-95",
-              "border-border bg-white hover:border-orange-border hover:bg-orange-bg",
-            )}
+            className={topbarSecondaryAction}
           >
             <svg
               width="15"
@@ -461,7 +488,10 @@ export function SecurityMonitorView() {
             </div>
           )}
         </div>
-        <div className="min-h-[360px] shrink-0 xl:h-[calc(100vh-57px)] xl:w-[340px]">
+        <div
+          ref={historyPanelRef}
+          className="min-h-[360px] shrink-0 scroll-mt-20 xl:h-[calc(100vh-57px)] xl:w-[340px]"
+        >
           <ScanHistoryPanel />
         </div>
       </div>
