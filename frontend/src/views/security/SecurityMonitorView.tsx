@@ -23,6 +23,7 @@ import {
   buildSecurityDays,
   effectiveDailyBudget,
   formatDayLabel,
+  parseFbTime,
   resolveBounds,
   type SecurityAnomaly,
   type SecurityDay,
@@ -83,22 +84,48 @@ function recordMatchToCampaign(m: ScanRecordMatch): FbCampaign {
   };
 }
 
-function buildDaysFromScanRecord(matches: ScanRecordMatch[], date: DateConfig): SecurityDay[] {
-  const anomaliesById = new Map<string, SecurityAnomaly[]>();
-  const campaigns = matches.map((m) => {
+function storedDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function hasDisplayableScanMatch(matches: ScanRecordMatch[] | undefined): boolean {
+  return (matches ?? []).some((m) => Boolean(m.campaign_id && m.created_time));
+}
+
+function buildDaysFromScanRecord(matches: ScanRecordMatch[]): SecurityDay[] {
+  const rows = matches.flatMap((m) => {
+    if (!m.campaign_id) return [];
+    const createdAt = parseFbTime(m.created_time);
+    if (!createdAt) return [];
     const tags = (m.anomalies ?? []).filter((a): a is SecurityAnomaly =>
       SECURITY_ANOMALIES.has(a as SecurityAnomaly),
     );
-    if (tags.length > 0) anomaliesById.set(m.campaign_id, tags);
-    return recordMatchToCampaign(m);
+    return [{ campaign: recordMatchToCampaign(m), createdAt, anomalies: tags }];
   });
-  return buildSecurityDays(campaigns, date).map((day) => ({
-    ...day,
-    rows: day.rows.map((row) => ({
-      ...row,
-      anomalies: anomaliesById.get(row.campaign.id) ?? row.anomalies,
-    })),
-  }));
+
+  const groups = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const key = storedDateKey(row.createdAt);
+    const list = groups.get(key);
+    if (list) list.push(row);
+    else groups.set(key, [row]);
+  }
+
+  const days: SecurityDay[] = [];
+  for (const [key, list] of groups) {
+    list.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const [y, m, d] = key.split("-").map(Number);
+    days.push({
+      dateKey: key,
+      epoch: new Date(y ?? 1970, (m ?? 1) - 1, d ?? 1).getTime(),
+      rows: list,
+    });
+  }
+  days.sort((a, b) => b.epoch - a.epoch);
+  return days;
 }
 
 function formatRelativeScanTime(d: Date): string {
@@ -158,8 +185,14 @@ export function SecurityMonitorView() {
     queryKey: ["security-scan-last", user?.id],
     queryFn: async () => {
       if (!user?.id) return null;
-      const resp = await api.securityScan.listRecords(user.id, 1);
-      return resp.data?.[0] ?? null;
+      const resp = await api.securityScan.listRecords(user.id, 20);
+      return (
+        resp.data?.find((row) =>
+          hasDisplayableScanMatch((row.matches ?? []) as ScanRecordMatch[]),
+        ) ??
+        resp.data?.[0] ??
+        null
+      );
     },
     enabled: !!user?.id,
     staleTime: 30_000,
@@ -232,8 +265,8 @@ export function SecurityMonitorView() {
     [overview.campaigns, date],
   );
   const recordDays = useMemo(
-    () => buildDaysFromScanRecord((lastScanRecord?.matches ?? []) as ScanRecordMatch[], date),
-    [lastScanRecord?.matches, date],
+    () => buildDaysFromScanRecord((lastScanRecord?.matches ?? []) as ScanRecordMatch[]),
+    [lastScanRecord?.matches],
   );
   const showingStoredScan = !scanRequested;
   const allDays = showingStoredScan ? recordDays : liveDays;

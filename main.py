@@ -9614,6 +9614,22 @@ def _serialize_match_for_record(m: dict) -> dict:
     the UI / future timeline browser would actually want.
     """
     c = m.get("campaign") or {}
+    if not c and (m.get("campaign_id") or m.get("id")):
+        return {
+            "campaign_id": m.get("campaign_id") or m.get("id"),
+            "name": m.get("name") or m.get("campaign_name"),
+            "objective": m.get("objective"),
+            "status": m.get("status"),
+            "created_time": m.get("created_time"),
+            "daily_budget": m.get("daily_budget"),
+            "lifetime_budget": m.get("lifetime_budget"),
+            "account_id": m.get("account_id"),
+            "account_name": m.get("account_name"),
+            "anomalies": list(m.get("anomalies") or []),
+            "creator": m.get("creator"),
+            "spend": m.get("spend"),
+            "spend_range_label": m.get("spend_range_label"),
+        }
     return {
         "campaign_id": c.get("id"),
         "name": c.get("name"),
