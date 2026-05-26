@@ -121,25 +121,23 @@ export function LoadingState({
     >
       <div className="text-[16px] font-bold text-ink">{title}</div>
       {effectiveSubtitle && <div className="text-[12px] text-gray-500">{effectiveSubtitle}</div>}
-      <progress value={pct} max={100} className="sr-only" aria-label="載入進度">
-        {pct}%
-      </progress>
-      <div
-        className="relative h-5 w-[min(78vw,360px)] overflow-hidden rounded-full bg-orange-bg"
-        aria-hidden="true"
-      >
+      <div className="flex w-[min(78vw,360px)] flex-col items-center gap-2">
+        <div className="text-[13px] font-semibold tabular-nums text-orange">{pct}%</div>
+        <progress value={pct} max={100} className="sr-only" aria-label="載入進度">
+          {pct}%
+        </progress>
         <div
-          className="h-full rounded-full transition-[width] duration-300 ease-out animate-progress-shimmer"
-          style={{
-            width: `${pct}%`,
-            background: "linear-gradient(90deg, #FFB388 0%, #FF7A45 45%, #FF5A1F 100%)",
-            backgroundSize: "200% 100%",
-          }}
-        />
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <span className="text-[11px] font-bold tabular-nums text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.28)]">
-            {pct}%
-          </span>
+          className="h-2.5 w-full overflow-hidden rounded-full bg-orange-bg"
+          aria-hidden="true"
+        >
+          <div
+            className="h-full rounded-full transition-[width] duration-300 ease-out animate-progress-shimmer"
+            style={{
+              width: `${pct}%`,
+              background: "linear-gradient(90deg, #FFB388 0%, #FF7A45 45%, #FF5A1F 100%)",
+              backgroundSize: "200% 100%",
+            }}
+          />
         </div>
       </div>
       {hint && (
