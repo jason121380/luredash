@@ -44,7 +44,11 @@ export function AlertsView() {
   // Fetching once for the full set and filtering CLIENT-SIDE below
   // makes per-account switching instant.
   const overview = useMultiAccountOverview(visibleAll, date, {
-    includeArchived: true,
+    // 警示列表只需要當前可處理的活動。includeArchived=true 會讓
+    // 後端對 /campaigns 加上 archived/deleted effective_status,
+    // 很多帳戶會被 FB 回 code=100 Invalid parameter;雖然後端會
+    // fallback,但會在工程模式留下大量「參數錯」並浪費 BUCU。
+    includeArchived: false,
     source: "alerts",
   });
 
