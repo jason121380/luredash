@@ -864,7 +864,63 @@ function FbCallsPanel() {
             {recent.length === 0 ? (
               <div className="text-[12px] text-gray-400">尚無呼叫紀錄</div>
             ) : (
-              <div className="overflow-x-auto rounded-lg border border-border">
+              <>
+                {/* Mobile (<md): 卡片列,避免 6 欄擠在窄畫面變不可讀 */}
+                <div className="flex flex-col gap-1.5 md:hidden">
+                  {recent.map((e, idx) => {
+                    const nm = nameFor(e.account_id);
+                    return (
+                      <div
+                        key={`${e.ts}-${idx}-m`}
+                        className="rounded-lg border border-border bg-bg p-2 text-[11px]"
+                      >
+                        <div className="mb-1 flex flex-wrap items-center gap-1.5">
+                          <span className="font-mono text-[10px] text-gray-500">
+                            {formatTs(e.ts)}
+                          </span>
+                          {formatStatusBadge(e)}
+                          {formatSourceBadge(e.source)}
+                          <span className="ml-auto font-mono text-[10px] text-gray-500">
+                            {e.ms}ms · BUCU {e.bucu_peak_pct}%
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-baseline gap-1">
+                          {e.method !== "GET" && (
+                            <span className="rounded bg-orange-bg px-1 text-[9px] text-orange">
+                              {e.method}
+                            </span>
+                          )}
+                          {nm ? (
+                            <span className="text-ink">{nm}</span>
+                          ) : null}
+                          <span
+                            className={cn(
+                              "font-mono break-all",
+                              nm ? "text-[10px] text-gray-400" : "text-ink",
+                            )}
+                          >
+                            {e.path}
+                          </span>
+                          {e.error_code !== null && !e.cache_hit && (
+                            <span
+                              className="rounded bg-amber-100 px-1 font-mono text-[9px] text-amber-700"
+                              title={`FB error code ${e.error_code}`}
+                            >
+                              fb={e.error_code}
+                            </span>
+                          )}
+                          {e.retried && (
+                            <span className="rounded bg-amber-100 px-1 text-[9px] text-amber-700">
+                              retry
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Desktop (≥md): 寬表格 */}
+                <div className="hidden overflow-x-auto rounded-lg border border-border md:block">
                 <table className="w-full text-[11px]">
                   <thead className="bg-bg text-left text-gray-500">
                     <tr>
@@ -947,7 +1003,8 @@ function FbCallsPanel() {
                     })}
                   </tbody>
                 </table>
-              </div>
+                </div>
+              </>
             )}
           </div>
         </>

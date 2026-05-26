@@ -71,7 +71,11 @@ export function Modal({
           className={cn(
             // Mobile default: bottom sheet
             "modal-sheet fixed inset-x-0 bottom-0 z-[901] w-full",
-            "max-h-[85vh] overflow-y-auto rounded-t-2xl bg-white p-0 shadow-md",
+            // overflow-x-hidden prevents wide children (e.g. data
+            // tables) from stretching the modal beyond viewport
+            // width on mobile. They should scroll within their own
+            // overflow-x-auto wrappers, not push the modal sideways.
+            "max-h-[85vh] overflow-y-auto overflow-x-hidden rounded-t-2xl bg-white p-0 shadow-md",
             "focus:outline-none",
             "animate-[slideUp_0.3s_cubic-bezier(0.32,0.72,0,1)]",
             // Desktop override: centered card with constrained size
