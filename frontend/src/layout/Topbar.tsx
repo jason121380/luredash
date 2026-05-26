@@ -83,8 +83,5 @@ export function Topbar({ title, titleAction, children, className }: TopbarProps)
 }
 
 export function TopbarSeparator() {
-  // Hidden on mobile (< 768px) — the Topbar there uses the account
-  // picker's `mr-auto` to split left vs right, so the middle vertical
-  // rule is redundant visual noise.
-  return <div className="hidden h-5 w-px bg-border md:block" />;
+  return null;
 }
