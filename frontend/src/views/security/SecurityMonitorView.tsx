@@ -65,10 +65,53 @@ export function SecurityMonitorView() {
   // navigating into the view costs ZERO FB calls (the auto-fetch
   // on mount was burning BUCU even when the user didn't actually
   // want to look at anything). User clicks 立即掃描 → scan fires.
-  const [scanRequested, setScanRequested] = useState(false);
-  const [lastScanAt, setLastScanAt] = useState<Date | null>(null);
+  //
+  // Persistence: scanRequested → sessionStorage(survives tab navigation
+  // but not tab close); lastScanAt → localStorage(survives across tabs
+  // / browser sessions for the「上次掃描:N 分鐘前」label).
+  //
+  // 重新進入安全監控時:若 sessionStorage 仍有 scanRequested=1 → 直接
+  // 啟用 queries。React Query 的 staleTime 5min + useMultiAccountOverview
+  // 的 localStorage placeholderData 接住了快取顯示,5min 內**不會打 FB**
+  // (cache hit),5min 外才會背景 refetch。這就是「上次掃描結果 cache」
+  // 的體感。
+  const [scanRequested, setScanRequested] = useState(() => {
+    try {
+      return sessionStorage.getItem("security_scan_requested") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [lastScanAt, setLastScanAt] = useState<Date | null>(() => {
+    try {
+      const raw = localStorage.getItem("security_last_scan_at");
+      if (!raw) return null;
+      const ts = Number(raw);
+      if (!Number.isFinite(ts)) return null;
+      return new Date(ts);
+    } catch {
+      return null;
+    }
+  });
   const [scanStartAt, setScanStartAt] = useState<number | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+
+  // Persist state on change so navigating away / coming back restores.
+  useEffect(() => {
+    try {
+      if (scanRequested) sessionStorage.setItem("security_scan_requested", "1");
+      else sessionStorage.removeItem("security_scan_requested");
+    } catch {
+      /* private mode / quota — ignore */
+    }
+  }, [scanRequested]);
+  useEffect(() => {
+    try {
+      if (lastScanAt) localStorage.setItem("security_last_scan_at", String(lastScanAt.getTime()));
+    } catch {
+      /* private mode / quota — ignore */
+    }
+  }, [lastScanAt]);
 
   const [date, setDate] = useState<DateConfig>({
     preset: "this_month",
@@ -101,6 +144,13 @@ export function SecurityMonitorView() {
     includeArchived: true,
     includeAdsets: true,
     source: "security-scan",
+    // Cached results stay visible across mounts / hours of inactivity
+    // until user clicks 重新掃描(which invalidates → forces refetch).
+    // Without Infinity gcTime, React Query would GC after 30 min and
+    // the next mount would silently re-fetch, violating the「user 按
+    // 才打」principle.
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
   });
 
   // SECOND overview query at the user's chosen date — only used to
@@ -111,6 +161,8 @@ export function SecurityMonitorView() {
   const spendOverview = useMultiAccountOverview(scanAccounts, date, {
     includeArchived: true,
     source: "security-scan",
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
   });
 
   // Track when the most-recent scan finishes so we can show

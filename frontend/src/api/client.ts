@@ -460,23 +460,17 @@ export const api = {
   },
 
   accounts: {
-    list: () => request<{ data: FbAccount[] }>("GET", "/api/accounts"),
+    list: () => request<{ data: FbAccount[] }>("GET", "/api/accounts", { source: "accounts-list" }),
     insights: (accountId: string, date: DateConfig) =>
       request<{ data: FbInsights[] }>("GET", `/api/accounts/${accountId}/insights`, {
         query: dateParams(date),
+        source: "account-insights",
       }),
     campaigns: (accountId: string, date: DateConfig, includeArchived = false) =>
       request<{ data: FbCampaign[] }>("GET", `/api/accounts/${accountId}/campaigns`, {
         query: { ...dateParams(date), include_archived: includeArchived ? "true" : undefined },
+        source: "campaigns-list",
       }),
-    /** FB Activity Log proxy — used by 安全監控 to display per-campaign
-     * edit history (status / budget / name / pacing changes). `since`
-     * and `until` are unix seconds. ``eventTypes`` (comma-separated) is
-     * forwarded as the FB-side ``filtering`` param: pass
-     * "create_campaign_group" for the creator-name prefetch so the
-     * backend stops walking pages full of create_ad / update_budget
-     * events. Omit for the full activity log used by the per-row
-     * expand. */
     activities: (
       accountId: string,
       since: number,
@@ -491,7 +485,7 @@ export const api = {
       return request<{ data: FbActivity[] }>(
         "GET",
         `/api/accounts/${accountId}/activities`,
-        { query },
+        { query, source: "activities" },
       );
     },
   },
@@ -526,24 +520,25 @@ export const api = {
   },
 
   campaigns: {
-    /** Single campaign + insights — used by the report / share page so
-     * we don't have to pull the whole account just to find one row.
-     * Backend: GET /api/campaigns/{id}?date_preset=X → 1 cheap FB call. */
     get: (campaignId: string, date: DateConfig) =>
       request<{ data: FbCampaign }>("GET", `/api/campaigns/${campaignId}`, {
         query: dateParams(date),
+        source: "report",
       }),
     adsets: (campaignId: string, date: DateConfig) =>
       request<{ data: FbAdset[] }>("GET", `/api/campaigns/${campaignId}/adsets`, {
         query: dateParams(date),
+        source: "drill-adsets",
       }),
     setStatus: (campaignId: string, status: string) =>
       request<FbBaseEntity>("POST", `/api/campaigns/${campaignId}/status`, {
         query: { status },
+        source: "mutation",
       }),
     setBudget: (campaignId: string, dailyBudget: number) =>
       request<FbBaseEntity>("POST", `/api/campaigns/${campaignId}/budget`, {
         query: { daily_budget: String(dailyBudget) },
+        source: "mutation",
       }),
   },
 
@@ -551,14 +546,17 @@ export const api = {
     creatives: (adsetId: string, date: DateConfig) =>
       request<{ data: FbCreativeEntity[] }>("GET", `/api/adsets/${adsetId}/ads`, {
         query: dateParams(date),
+        source: "drill-ads",
       }),
     setStatus: (adsetId: string, status: string) =>
       request<FbBaseEntity>("POST", `/api/adsets/${adsetId}/status`, {
         query: { status },
+        source: "mutation",
       }),
     setBudget: (adsetId: string, dailyBudget: number) =>
       request<FbBaseEntity>("POST", `/api/adsets/${adsetId}/budget`, {
         query: { daily_budget: String(dailyBudget) },
+        source: "mutation",
       }),
   },
 
@@ -566,16 +564,13 @@ export const api = {
     setStatus: (creativeId: string, status: string) =>
       request<FbBaseEntity>("POST", `/api/ads/${creativeId}/status`, {
         query: { status },
+        source: "mutation",
       }),
-    /** Request a larger-dimension server-rendered thumbnail for a
-     * single AdCreative. Used as a graceful fallback for the preview
-     * modal when the post-media path fails (typically due to missing
-     * pages_read_engagement on the user token). Typical size: 600px. */
     hiresThumbnail: (creativeId: string, size = 600) =>
       request<{ thumbnail_url: string | null; error: string | null }>(
         "GET",
         `/api/creatives/${creativeId}/hires-thumbnail`,
-        { query: { size: String(size) } },
+        { query: { size: String(size) }, source: "media" },
       ),
   },
 
@@ -603,6 +598,7 @@ export const api = {
         dim: string;
       }>("GET", "/api/breakdown", {
         query: { level, id, dim, ...dateParams(date) },
+        source: "breakdown",
       }),
   },
 
