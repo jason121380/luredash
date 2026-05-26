@@ -1347,7 +1347,7 @@ function ReactQueryPanel() {
         </Button>
       }
     >
-      <div className="grid grid-cols-3 gap-2 md:grid-cols-6">
+      <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-6 md:gap-2">
         <Stat label="總數" value={stats.total} />
         <Stat
           label="載入中"
@@ -1399,11 +1399,13 @@ function Stat({
           ? "text-emerald-600"
           : "text-ink";
   return (
-    <div className="rounded-lg border border-border bg-bg p-2.5">
-      <div className="text-[10px] font-semibold uppercase tracking-[0.6px] text-gray-400">
+    <div className="rounded-lg border border-border bg-bg px-2 py-2 md:p-2.5">
+      <div className="text-[10px] font-semibold leading-tight text-gray-400 md:uppercase md:tracking-[0.6px]">
         {label}
       </div>
-      <div className={cn("mt-1 font-mono text-lg font-bold", toneClass)}>{value}</div>
+      <div className={cn("mt-1 font-mono text-[17px] font-bold leading-none md:text-lg", toneClass)}>
+        {value}
+      </div>
     </div>
   );
 }
