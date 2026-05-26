@@ -372,9 +372,9 @@ function AccountMultiPicker({
       <Popover.Trigger asChild>
         <button
           type="button"
-          className="flex h-10 items-center gap-1 rounded-lg border-[1.5px] border-border bg-white px-3 text-[13px] outline-none hover:border-orange focus:border-orange md:h-[30px] md:px-2.5"
+          className="flex h-10 items-center gap-1 rounded-lg border-[1.5px] border-border bg-white px-3 text-[13px] leading-none outline-none hover:border-orange focus:border-orange md:h-[30px] md:px-2.5"
         >
-          <span className="max-w-[140px] truncate">{triggerLabel}</span>
+          <span className="inline-flex max-w-[140px] items-center truncate">{triggerLabel}</span>
           <span className="text-gray-300">▾</span>
         </button>
       </Popover.Trigger>

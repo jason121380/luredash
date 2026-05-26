@@ -12,7 +12,7 @@ import { type ButtonHTMLAttributes, forwardRef } from "react";
  */
 const buttonVariants = cva(
   [
-    "inline-flex items-center justify-center gap-1.5 font-semibold font-sans",
+    "inline-flex items-center justify-center gap-1.5 font-semibold font-sans leading-none",
     "rounded-pill border-[1.5px] transition-[all] duration-150",
     "cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange/40",

@@ -92,9 +92,9 @@ export function MobileAccountPicker({
         onClick={() => setOpen(true)}
         aria-label={`選擇廣告帳戶,目前:${currentName}`}
         aria-haspopup="dialog"
-        className="flex h-10 min-w-0 max-w-[200px] items-center justify-between gap-2.5 rounded-pill border-[1.5px] border-border bg-white px-4 text-left text-[13px] font-medium text-ink active:scale-[0.98] active:bg-orange-bg sm:h-9 md:max-w-[280px]"
+        className="flex h-10 min-w-0 max-w-[200px] items-center justify-between gap-2.5 rounded-pill border-[1.5px] border-border bg-white px-4 text-left text-[13px] font-medium leading-none text-ink active:scale-[0.98] active:bg-orange-bg sm:h-9 md:max-w-[280px]"
       >
-        <span className="min-w-0 truncate">{currentName}</span>
+        <span className="inline-flex min-w-0 items-center truncate">{currentName}</span>
         <span aria-hidden="true" className="text-[10px] text-gray-300">
           ▼
         </span>

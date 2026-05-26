@@ -125,7 +125,7 @@ export function DatePicker({ value, onChange, allowedPresets }: DatePickerProps)
         <button
           type="button"
           className={cn(
-            "flex h-10 select-none items-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 md:h-9",
+            "flex h-10 select-none items-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 leading-none md:h-9",
             "text-[13px] font-medium text-ink font-sans",
             "transition-all duration-150 cursor-pointer active:scale-95",
             open
@@ -152,7 +152,7 @@ export function DatePicker({ value, onChange, allowedPresets }: DatePickerProps)
             <line x1="8" y1="2" x2="8" y2="6" />
             <line x1="3" y1="10" x2="21" y2="10" />
           </svg>
-          <span>{label}</span>
+          <span className="inline-flex items-center">{label}</span>
         </button>
       </Popover.Trigger>
       <Popover.Portal>

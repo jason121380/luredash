@@ -44,6 +44,7 @@ export function Topbar({ title, titleAction, children, className }: TopbarProps)
         // button + page title sit on the left; per-view controls scroll
         // on the right with overflow-x-auto if they're too wide.
         "sticky top-0 z-[50] flex min-h-[64px] shrink-0 items-center gap-2 border-b border-border bg-white px-3 py-2",
+        "[&_button]:leading-none [&_button_svg]:block",
         "md:min-h-[60px] md:gap-3 md:px-6 md:py-0",
         className,
       )}
