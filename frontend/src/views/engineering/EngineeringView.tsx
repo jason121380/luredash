@@ -119,22 +119,83 @@ function Card({
   subtitle,
   action,
   children,
+  collapsible = false,
+  defaultOpen = true,
 }: {
   title: string;
   subtitle?: string;
   action?: React.ReactNode;
   children: React.ReactNode;
+  /** When true, the header becomes a toggle and content can be hidden.
+   * Used by the two heavy panels (FB API 節流狀態 / 最近 FB 呼叫)
+   * which the operator usually doesn't need open by default. */
+  collapsible?: boolean;
+  /** Initial open state when ``collapsible``. Ignored otherwise. */
+  defaultOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const headerClass = "mb-3 flex items-start justify-between gap-3";
   return (
     <section className="rounded-2xl border border-border bg-white p-4 md:p-5">
-      <header className="mb-3 flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <h2 className="text-[15px] font-bold text-ink">{title}</h2>
-          {subtitle ? <p className="mt-0.5 text-xs text-gray-400">{subtitle}</p> : null}
-        </div>
-        {action ? <div className="shrink-0">{action}</div> : null}
-      </header>
-      {children}
+      {collapsible ? (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className={cn(
+            headerClass,
+            "-m-1 w-[calc(100%+0.5rem)] cursor-pointer rounded-lg p-1 text-left hover:bg-bg/60",
+            open ? "" : "mb-0",
+          )}
+          aria-expanded={open}
+        >
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={cn(
+                  "shrink-0 text-gray-400 transition-transform",
+                  open ? "rotate-90" : "rotate-0",
+                )}
+                aria-hidden="true"
+              >
+                <title>{open ? "收合" : "展開"}</title>
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+              <h2 className="text-[15px] font-bold text-ink">{title}</h2>
+            </div>
+            {open && subtitle ? (
+              <p className="mt-0.5 pl-[18px] text-xs text-gray-400">{subtitle}</p>
+            ) : null}
+          </div>
+          {action && open ? (
+            // Stop propagation so clicking the action button doesn't
+            // also toggle the section open/close.
+            <div
+              className="shrink-0"
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+            >
+              {action}
+            </div>
+          ) : null}
+        </button>
+      ) : (
+        <header className={headerClass}>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-[15px] font-bold text-ink">{title}</h2>
+            {subtitle ? <p className="mt-0.5 text-xs text-gray-400">{subtitle}</p> : null}
+          </div>
+          {action ? <div className="shrink-0">{action}</div> : null}
+        </header>
+      )}
+      {(!collapsible || open) && children}
     </section>
   );
 }
@@ -274,6 +335,8 @@ function FbUsagePanel() {
     <Card
       title="FB API 節流狀態"
       subtitle="X-Business-Use-Case-Usage 即時快照,每 10 秒更新。每一列是 FB 個別追蹤 rate limit 的對象(通常是廣告帳戶,少數情況是 Business Manager)。冷卻時間由 Facebook 估算,僅供參考。"
+      collapsible
+      defaultOpen={false}
       action={
         <Button
           size="sm"
@@ -683,6 +746,8 @@ function FbCallsPanel() {
     <Card
       title="最近 FB 呼叫 / 節流事件"
       subtitle="後端 ring buffer:每一次 FB Graph API 呼叫(含 cache hit 與 gated)都在這裡。用來追「80004 發生前我們在打誰」。"
+      collapsible
+      defaultOpen={false}
       action={
         <Button
           size="sm"
