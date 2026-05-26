@@ -479,7 +479,7 @@ export function SecurityMonitorView() {
               <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
               <path d="M7 12h10" />
             </svg>
-            <span>{isScanning ? "掃描中…" : lastScanAt ? "重新掃描" : "立即掃描"}</span>
+            <span>{isScanning ? "掃描中…" : lastScanAt ? "掃描" : "立即掃描"}</span>
           </button>
           <button
             type="button"
@@ -502,7 +502,7 @@ export function SecurityMonitorView() {
               <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
               <path d="M13.73 21a2 2 0 0 1-3.46 0" />
             </svg>
-            <span>{autoScanEnabled ? "已開啟自動掃描" : "推播設定"}</span>
+            <span>{autoScanEnabled ? "已開啟" : "推播設定"}</span>
           </button>
           <TopbarSeparator />
           {/* 安全監控限定到「上個月」為止 — 立即掃描 fetch 固定
