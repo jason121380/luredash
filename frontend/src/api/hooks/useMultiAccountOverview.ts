@@ -104,7 +104,13 @@ export interface MultiAccountOverviewResult {
 export function useMultiAccountOverview(
   accounts: FbAccount[],
   date: DateConfig,
-  opts: { includeArchived?: boolean; includeAdsets?: boolean } = {},
+  opts: {
+    includeArchived?: boolean;
+    includeAdsets?: boolean;
+    /** Tags the resulting FB calls in the engineering panel's 來源 column.
+     * e.g. "security-scan" when fired by 立即掃描. */
+    source?: string;
+  } = {},
 ): MultiAccountOverviewResult {
   const { status } = useFbAuth();
 

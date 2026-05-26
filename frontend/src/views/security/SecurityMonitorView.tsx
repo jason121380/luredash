@@ -100,6 +100,7 @@ export function SecurityMonitorView() {
   const overview = useMultiAccountOverview(scanAccounts, fetchDate, {
     includeArchived: true,
     includeAdsets: true,
+    source: "security-scan",
   });
 
   // SECOND overview query at the user's chosen date — only used to
@@ -109,6 +110,7 @@ export function SecurityMonitorView() {
   // "—" when missing.
   const spendOverview = useMultiAccountOverview(scanAccounts, date, {
     includeArchived: true,
+    source: "security-scan",
   });
 
   // Track when the most-recent scan finishes so we can show

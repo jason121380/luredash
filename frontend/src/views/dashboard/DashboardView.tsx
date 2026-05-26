@@ -109,6 +109,7 @@ export function DashboardView() {
   // Server data — single batched overview request
   const overview = useMultiAccountOverview(activeAccounts, date, {
     includeArchived: true,
+    source: "dashboard",
   });
 
   // Local UI state

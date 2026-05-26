@@ -63,7 +63,10 @@ export function FinanceView() {
   // Single batch request replaces useMultiAccountCampaigns +
   // useMultiAccountInsights. include_archived: true because the
   // Finance table wants every status (matches legacy behavior).
-  const overview = useMultiAccountOverview(visible, date, { includeArchived: true });
+  const overview = useMultiAccountOverview(visible, date, {
+    includeArchived: true,
+    source: "finance",
+  });
 
   const selectedId = finSelectedAcctIds.length === 1 ? (finSelectedAcctIds[0] ?? null) : null;
 

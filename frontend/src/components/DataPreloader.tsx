@@ -134,7 +134,10 @@ export function DataPreloader({ onComplete }: { onComplete: () => void }) {
     const processBatch = async (batch: typeof accounts) => {
       const ids = batch.map((a) => a.id);
       try {
-        const result = await api.overview.batch(ids, date, { includeArchived: true });
+        const result = await api.overview.batch(ids, date, {
+          includeArchived: true,
+          source: "preload",
+        });
         const data = result.data ?? {};
 
         for (const acc of batch) {

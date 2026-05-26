@@ -43,7 +43,10 @@ export function AlertsView() {
   // for every account was already in the "all accounts" cache entry.
   // Fetching once for the full set and filtering CLIENT-SIDE below
   // makes per-account switching instant.
-  const overview = useMultiAccountOverview(visibleAll, date, { includeArchived: true });
+  const overview = useMultiAccountOverview(visibleAll, date, {
+    includeArchived: true,
+    source: "alerts",
+  });
 
   const scopedCampaigns = useMemo(() => {
     if (selectedAcctId === null) return overview.campaigns;

@@ -1087,7 +1087,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "x-fb-user-id"],
+    allow_headers=["Content-Type", "Authorization", "x-fb-user-id", "x-fb-source"],
 )
 print(f"[startup] CORS origins: {_CORS_ORIGINS}", flush=True)
 
@@ -1151,13 +1151,25 @@ async def _user_context_middleware(request: Request, call_next):
         or request.headers.get("x-fb-user-id")
         or ""
     ).strip()
+    # Frontend tags requests with X-Fb-Source so the engineering panel
+    # can attribute「這個 FB call 是因為我做了什麼事」(立即掃描 vs
+    # dashboard 載入 vs DataPreloader vs ...) rather than lumping all
+    # user-facing requests under "其他".
+    source = request.headers.get("x-fb-source", "").strip()
+    source_token = _fb_call_source.set(source) if source else None
     if not uid:
-        return await call_next(request)
+        try:
+            return await call_next(request)
+        finally:
+            if source_token is not None:
+                _fb_call_source.reset(source_token)
     reset_token = _current_fb_user_id.set(uid)
     try:
         return await call_next(request)
     finally:
         _current_fb_user_id.reset(reset_token)
+        if source_token is not None:
+            _fb_call_source.reset(source_token)
 
 
 # Gzip EVERY response >500 bytes for clients that send Accept-Encoding:
