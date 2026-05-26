@@ -523,14 +523,7 @@ interface AgentAdviceCardProps {
 function AgentAdviceCard({ agent, state, isLoading }: AgentAdviceCardProps) {
   return (
     <section className="flex min-w-0 flex-col rounded-lg border border-border bg-white p-4 md:p-5">
-      <header className="mb-3 flex items-start gap-3">
-        <div
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[18px] font-bold shadow-sm"
-          style={{ backgroundColor: `${agent.color}1a`, color: agent.color }}
-          aria-hidden="true"
-        >
-          {agent.emoji}
-        </div>
+      <header className="mb-3 flex items-start">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-[15px] font-bold text-ink">{agent.name_zh}</h2>
           <div className="truncate text-[11px] text-gray-400">{agent.role_zh}</div>
