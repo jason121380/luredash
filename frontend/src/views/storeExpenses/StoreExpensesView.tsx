@@ -215,7 +215,7 @@ export function StoreExpensesView() {
                 此區間沒有任何已設定店家暱稱的行銷活動,請先到費用中心或儀表板編輯活動暱稱
               </EmptyState>
             ) : (
-              <table className="w-full min-w-[640px] border-collapse text-[12px] md:text-[13px]">
+              <table className="w-full min-w-[760px] border-collapse text-[12px] md:text-[13px]">
                 <thead>
                   <tr className="bg-bg">
                     <SortHeader
@@ -233,10 +233,10 @@ export function StoreExpensesView() {
                       dir={sort.dir}
                       onSort={onSort}
                     />
-                    <th className="sticky top-0 z-[1] border-b border-border bg-bg px-1.5 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.5px] text-gray-300 md:px-3.5 md:py-2.5">
+                    <th className="sticky top-0 z-[1] min-w-[86px] whitespace-nowrap border-b border-border bg-bg px-1.5 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.5px] text-gray-300 md:px-3.5 md:py-2.5">
                       科目
                     </th>
-                    <th className="sticky top-0 z-[1] border-b border-border bg-bg px-1.5 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.5px] text-gray-300 md:px-3.5 md:py-2.5">
+                    <th className="sticky top-0 z-[1] min-w-[86px] whitespace-nowrap border-b border-border bg-bg px-1.5 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.5px] text-gray-300 md:px-3.5 md:py-2.5">
                       子科目
                     </th>
                     <th className="sticky top-0 z-[1] border-b border-border bg-bg px-1.5 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.5px] text-gray-300 md:px-3.5 md:py-2.5">
@@ -267,8 +267,8 @@ export function StoreExpensesView() {
                             </span>
                           </div>
                         </td>
-                        <td className="px-1.5 py-2 text-gray-500 md:px-3.5 md:py-2.5">{SUBJECT}</td>
-                        <td className="px-1.5 py-2 text-gray-500 md:px-3.5 md:py-2.5">
+                        <td className="whitespace-nowrap px-1.5 py-2 text-gray-500 md:px-3.5 md:py-2.5">{SUBJECT}</td>
+                        <td className="whitespace-nowrap px-1.5 py-2 text-gray-500 md:px-3.5 md:py-2.5">
                           {SUB_SUBJECT}
                         </td>
                         <td className="px-1.5 py-2 text-gray-500 md:px-3.5 md:py-2.5">
