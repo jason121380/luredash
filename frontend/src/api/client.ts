@@ -555,6 +555,45 @@ export const api = {
           source: "security-scan-record",
         },
       ),
+    /** Browse stored scan records for cross-device history. Returns
+     * both auto-scan (scheduler-triggered) and manual (user-triggered)
+     * entries unless `trigger` narrows it down. */
+    listRecords: (
+      fbUserId: string,
+      limit = 30,
+      trigger?: "auto" | "manual",
+    ) =>
+      request<{
+        data: Array<{
+          id: string;
+          config_id: string | null;
+          trigger_type: "auto" | "manual";
+          scanned_at: string;
+          account_ids: string[];
+          matches: Array<{
+            campaign_id: string;
+            name?: string | null;
+            objective?: string | null;
+            status?: string | null;
+            created_time?: string | null;
+            daily_budget?: number | null;
+            lifetime_budget?: number | null;
+            account_id?: string | null;
+            account_name?: string | null;
+            anomalies?: string[];
+            creator?: string | null;
+          }>;
+          matches_count: number;
+          duration_ms: number;
+        }>;
+      }>("GET", "/api/security-scan/records", {
+        query: {
+          fb_user_id: fbUserId,
+          limit: String(limit),
+          trigger,
+        },
+        source: "security-scan-record",
+      }),
   },
 
   campaigns: {

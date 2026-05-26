@@ -1,7 +1,7 @@
 import { api, type SecurityPushTestCard } from "@/api/client";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { queryClient } from "@/lib/queryClient";
-import { ScanHistoryModal, appendScanHistory } from "./ScanHistoryModal";
+import { ScanHistoryModal } from "./ScanHistoryModal";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
 import { DatePicker } from "@/components/DatePicker";
@@ -13,6 +13,7 @@ import { type DateConfig, toShortLabel } from "@/lib/datePicker";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SecurityCampaignRow } from "./SecurityCampaignRow";
 import { SecurityPushSettingsModal } from "./SecurityPushSettingsModal";
@@ -64,19 +65,12 @@ export function SecurityMonitorView() {
 
   // 「立即掃描」 gate — flipping this to true triggers the two
   // useMultiAccountOverview queries below. Default false so just
-  // navigating into the view costs ZERO FB calls (the auto-fetch
-  // on mount was burning BUCU even when the user didn't actually
-  // want to look at anything). User clicks 立即掃描 → scan fires.
+  // navigating into the view costs ZERO FB calls.
   //
-  // Persistence: scanRequested → sessionStorage(survives tab navigation
-  // but not tab close); lastScanAt → localStorage(survives across tabs
-  // / browser sessions for the「上次掃描:N 分鐘前」label).
-  //
-  // 重新進入安全監控時:若 sessionStorage 仍有 scanRequested=1 → 直接
-  // 啟用 queries。React Query 的 staleTime 5min + useMultiAccountOverview
-  // 的 localStorage placeholderData 接住了快取顯示,5min 內**不會打 FB**
-  // (cache hit),5min 外才會背景 refetch。這就是「上次掃描結果 cache」
-  // 的體感。
+  // scanRequested is the only piece of UI state still kept in
+  // sessionStorage(per-tab,代表「我這 tab 已經請求過至少一次掃描」)。
+  // lastScanAt 改成從 DB 算出來(用 security_scan_records 最新一筆),
+  // 跨裝置同步;掃描完成後 invalidate query 取最新值。
   const [scanRequested, setScanRequested] = useState(() => {
     try {
       return sessionStorage.getItem("security_scan_requested") === "1";
@@ -84,21 +78,11 @@ export function SecurityMonitorView() {
       return false;
     }
   });
-  const [lastScanAt, setLastScanAt] = useState<Date | null>(() => {
-    try {
-      const raw = localStorage.getItem("security_last_scan_at");
-      if (!raw) return null;
-      const ts = Number(raw);
-      if (!Number.isFinite(ts)) return null;
-      return new Date(ts);
-    } catch {
-      return null;
-    }
-  });
   const [scanStartAt, setScanStartAt] = useState<number | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  // Persist state on change so navigating away / coming back restores.
+  // Persist scanRequested per-tab so navigating away / coming back
+  // restores the「已掃過」狀態(controls 重新掃描 vs 立即掃描 label).
   useEffect(() => {
     try {
       if (scanRequested) sessionStorage.setItem("security_scan_requested", "1");
@@ -107,13 +91,22 @@ export function SecurityMonitorView() {
       /* private mode / quota — ignore */
     }
   }, [scanRequested]);
-  useEffect(() => {
-    try {
-      if (lastScanAt) localStorage.setItem("security_last_scan_at", String(lastScanAt.getTime()));
-    } catch {
-      /* private mode / quota — ignore */
-    }
-  }, [lastScanAt]);
+
+  // 「上次掃描時間」改從 DB 拉。security_scan_records 最新一筆的
+  // scanned_at 就是答案。30s staleTime 足以讓 UI 看起來即時但不
+  // 每次 mount 都打 backend。
+  const lastScanQuery = useQuery({
+    queryKey: ["security-scan-last", user?.id],
+    queryFn: async () => {
+      if (!user?.id) return null;
+      const resp = await api.securityScan.listRecords(user.id, 1);
+      const row = resp.data?.[0];
+      return row?.scanned_at ?? null;
+    },
+    enabled: !!user?.id,
+    staleTime: 30_000,
+  });
+  const lastScanAt = lastScanQuery.data ? new Date(lastScanQuery.data) : null;
 
   const [date, setDate] = useState<DateConfig>({
     preset: "this_month",
@@ -167,15 +160,11 @@ export function SecurityMonitorView() {
     gcTime: Number.POSITIVE_INFINITY,
   });
 
-  // Track when the most-recent scan finishes so we can show
-  // 「上次掃描:N 分鐘前」 next to the rescan button.
+  // 「上次掃描:N 分鐘前」 label 來自 lastScanQuery,scan 結束後在
+  // POST record 那一段 invalidate 就會自動更新。這裡只需要追 isScanning
+  // 用來 disable 按鈕 + edge-detect 完成的 transition。
   const isScanning =
     scanRequested && (overview.isFetching || spendOverview.isFetching);
-  useEffect(() => {
-    if (scanRequested && !isScanning) {
-      setLastScanAt(new Date());
-    }
-  }, [scanRequested, isScanning]);
 
   // Edge-detect the "scanning → done" transition. Without the ref,
   // the history append runs on every render where !isScanning (even
@@ -208,23 +197,13 @@ export function SecurityMonitorView() {
     [allDays, safeIds],
   );
 
-  // 「立即掃描」完成時把這筆掃描 append 進本地歷史(localStorage).
-  // 一個 scan 一筆紀錄,包含耗時 + 掃到 / 待查看 / 是否錯誤. 用 ref
-  // 偵測「scanning → done」transition 確保每個 scan 只記一次.
+  // 「立即掃描」完成時:POST 一筆到 backend security_scan_records
+  // (跨裝置同步)+ invalidate「上次掃描時間」query 讓 label 立即
+  // 反映剛剛這次。用 ref 偵測「scanning → done」transition 確保每
+  // 個 scan 只記一次。
   useEffect(() => {
     if (wasScanning.current && !isScanning && scanStartAt !== null) {
       const durationMs = Date.now() - scanStartAt;
-      appendScanHistory({
-        ts: Date.now(),
-        durationMs,
-        totalCampaigns: overview.campaigns.length,
-        pendingCount,
-        hasError: Object.keys(overview.errors).length > 0,
-      });
-      // 也送一份到 backend security_scan_records,讓 team-wide 有
-      // browseable scan history (auto + manual 兩條路徑共表)。
-      // 只送目前「待查看」tab 看得到的(過濾掉已標記安全的),這
-      // 是 user 實際關心的 anomaly 清單。
       const uid = user?.id ?? "";
       if (uid) {
         const matches = visibleAll.length
@@ -257,8 +236,12 @@ export function SecurityMonitorView() {
             duration_ms: durationMs,
             matches,
           })
+          .then(() => {
+            // 拉新的「上次掃描時間」+ 掃描紀錄,讓 UI 即時反映
+            void queryClient.invalidateQueries({ queryKey: ["security-scan-last"] });
+            void queryClient.invalidateQueries({ queryKey: ["security-scan-records"] });
+          })
           .catch((e) => {
-            // Non-fatal — local history (localStorage) still has it
             console.warn("[security-scan] post record failed:", e);
           });
       }
@@ -268,9 +251,6 @@ export function SecurityMonitorView() {
   }, [
     isScanning,
     scanStartAt,
-    overview.campaigns.length,
-    overview.errors,
-    pendingCount,
     user?.id,
     visibleAll,
     allDays,
