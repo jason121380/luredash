@@ -220,14 +220,16 @@ export function SecurityCampaignRow({
               </span>
             ))}
           </div>
-          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-500">
-            <span>編號 {campaign.id}</span>
-            {campaign._accountName && <span>{campaign._accountName}</span>}
-            <span>{objLabel}</span>
-            <span>
+          <div className="mt-1 flex flex-col gap-0.5 text-[11px] text-gray-500">
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+              <span>廣告編號 {campaign.id}</span>
+              {campaign._accountName && <span>{campaign._accountName}</span>}
+              <span>{objLabel}</span>
+            </div>
+            <div>
               <span className="font-bold text-orange">{fmtCreatedAt(row.createdAt)}</span>{" "}
               最初已建立行銷活動
-            </span>
+            </div>
             {creatorLabel !== "—" && (
               <span>
                 建立者 <span className="font-semibold text-ink">{creatorLabel}</span>
