@@ -76,7 +76,7 @@ function formatExact(iso: string): string {
   });
 }
 
-function formatNextPushTime(iso: string): string {
+function formatNextScanTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("en-US", {
     hour: "numeric",
     minute: "2-digit",
@@ -92,7 +92,7 @@ export function ScanHistoryPanel() {
   const sharedQuery = useSharedSettings();
   const masterEnabled = sharedQuery.data?.security_push_master_enabled === true;
   const configsQuery = useSecurityPushConfigs();
-  const nextPushAt = useMemo(() => {
+  const nextScanAt = useMemo(() => {
     if (!masterEnabled) return null;
     const times = (configsQuery.data ?? [])
       .filter((cfg) => cfg.enabled && cfg.next_run_at)
@@ -155,9 +155,9 @@ export function ScanHistoryPanel() {
           <h2 className="text-[14px] font-bold text-ink">掃描紀錄</h2>
           <p className="mt-0.5 text-[11px] text-gray-400">
             跨裝置同步 · 最近 20 筆
-            {nextPushAt ? (
+            {nextScanAt ? (
               <>
-                {" · "}下次推播 {formatNextPushTime(nextPushAt)}
+                {" · "}下次安全掃描 {formatNextScanTime(nextScanAt)}
               </>
             ) : null}
           </p>

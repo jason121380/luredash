@@ -125,7 +125,7 @@ export function LoadingState({
         {pct}%
       </progress>
       <div
-        className="relative h-5 w-[min(78vw,360px)] overflow-hidden rounded-full bg-border"
+        className="relative h-5 w-[min(78vw,360px)] overflow-hidden rounded-full bg-orange-bg"
         aria-hidden="true"
       >
         <div
