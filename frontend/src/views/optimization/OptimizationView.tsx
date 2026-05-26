@@ -7,7 +7,6 @@ import { Button } from "@/components/Button";
 import { DatePicker } from "@/components/DatePicker";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadingState } from "@/components/LoadingState";
-import { Modal } from "@/components/Modal";
 import { Spinner } from "@/components/Spinner";
 import { toast } from "@/components/Toast";
 import {
@@ -21,7 +20,7 @@ import { getIns, getMsgCount } from "@/lib/insights";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useFiltersStore } from "@/stores/filtersStore";
 import { useUiStore } from "@/stores/uiStore";
-import type { FbAccount, FbCampaign } from "@/types/fb";
+import type { FbCampaign } from "@/types/fb";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "./Markdown";
@@ -49,9 +48,8 @@ interface StoredLastRun {
  * Polish stack on top of the basic board:
  *   - generated-at relative timestamp on the action bar (ticks
  *     every 30s)
- *   - per-page account filter modal so the user can narrow the
- *     analysis to a subset of their globally-selected accounts
- *     without changing the dashboard's selection
+ *   - always analyzes all enabled accounts so the per-account to-do
+ *     list cannot accidentally be generated from a partial scope
  *   - localStorage snapshot of the last successful run so a
  *     refresh / tab close doesn't wipe the cards the user just
  *     paid for (restore-on-mount, no Gemini re-call)
@@ -79,35 +77,9 @@ export function OptimizationView() {
   });
   const agents = agentsQuery.data?.data ?? [];
 
-  // Per-page account filter — defaults to "all visible". Stored as
-  // a Set of account ids; null = no filter (use everything).
-  const [accountFilter, setAccountFilter] = useState<Set<string> | null>(null);
-  const [filterModalOpen, setFilterModalOpen] = useState(false);
-
-  // Reset the filter if the global visibleAll list changes (e.g.
-  // user toggled accounts in Settings) so we don't carry stale ids.
-  const visibleIds = useMemo(() => visibleAll.map((a) => a.id).join("|"), [visibleAll]);
-  useEffect(() => {
-    setAccountFilter(null);
-  }, [visibleIds]);
-
-  const filteredAccounts = useMemo(() => {
-    if (!accountFilter) return visibleAll;
-    return visibleAll.filter((a) => accountFilter.has(a.id));
-  }, [visibleAll, accountFilter]);
-  const filteredAccountIds = useMemo(
-    () => new Set(filteredAccounts.map((a) => a.id)),
-    [filteredAccounts],
-  );
-
   const digests = useMemo(() => {
-    const all = buildDigests(overview.campaigns, allAccounts);
-    if (!accountFilter) return all;
-    // Filter campaigns by their account_id (digest carries the
-    // account_name only, so re-look up the id from the campaign list).
-    const allowedNames = new Set(filteredAccounts.map((a) => a.name));
-    return all.filter((d) => allowedNames.has(d.account_name ?? ""));
-  }, [overview.campaigns, allAccounts, accountFilter, filteredAccounts]);
+    return buildDigests(overview.campaigns, allAccounts);
+  }, [overview.campaigns, allAccounts]);
   const dateLabel = toLabel(date);
 
   // Per-card state, plus a top-level "isStreaming" flag separate
@@ -318,17 +290,6 @@ export function OptimizationView() {
           reach `cards`, `dateLabel`, `generatedAt`, etc. without
           prop-drilling through ActionBar. */}
       {/* (no-op JSX — actual function below) */}
-      <AccountFilterModal
-        open={filterModalOpen}
-        accounts={visibleAll}
-        selectedIds={filteredAccountIds}
-        onApply={(ids) => {
-          // null = "match the visibleAll" (no actual filter).
-          setAccountFilter(ids.size === visibleAll.length ? null : ids);
-          setFilterModalOpen(false);
-        }}
-        onClose={() => setFilterModalOpen(false)}
-      />
 
       <div className="min-w-0 flex-1 p-3 md:p-5">
         {!settingsReady ? (
@@ -368,12 +329,9 @@ export function OptimizationView() {
               isUnlimited={isUnlimited}
               isLifetime={isLifetime}
               campaignsCount={digests.length}
-              accountsCount={filteredAccounts.length}
-              filterActive={accountFilter !== null}
               generatedAt={generatedAt}
               isOverviewLoading={overview.isLoading || overview.insightsPending}
               onGenerate={runStream}
-              onOpenFilter={() => setFilterModalOpen(true)}
             />
 
             <div className="grid grid-cols-1 gap-3 md:gap-4">
@@ -408,8 +366,6 @@ interface ActionBarProps {
   isUnlimited: boolean;
   isLifetime: boolean;
   campaignsCount: number;
-  accountsCount: number;
-  filterActive: boolean;
   generatedAt: Date | null;
   /** True while useMultiAccountOverview is still pulling live FB
    *  campaign data. Cached cards render immediately, but the
@@ -417,7 +373,6 @@ interface ActionBarProps {
    *  digest to Gemini. */
   isOverviewLoading: boolean;
   onGenerate: () => void;
-  onOpenFilter: () => void;
 }
 
 function ActionBar({
@@ -433,12 +388,9 @@ function ActionBar({
   isUnlimited,
   isLifetime,
   campaignsCount,
-  accountsCount,
-  filterActive,
   generatedAt,
   isOverviewLoading,
   onGenerate,
-  onOpenFilter,
 }: ActionBarProps) {
   const quotaLabel = isUnlimited
     ? "無限次"
@@ -464,15 +416,7 @@ function ActionBar({
           )}
         </div>
         <div className="text-[12px] text-gray-500">
-          將整理{" "}
-          <button
-            type="button"
-            onClick={onOpenFilter}
-            className="cursor-pointer font-semibold text-orange underline-offset-2 hover:underline"
-          >
-            {accountsCount} 個帳戶{filterActive ? " (已篩選)" : ""}
-          </button>{" "}
-          下的 {campaignsCount} 個進行中活動,依帳戶輸出嚴重程度分級 to-do。
+          將整理全部啟用帳戶下的 {campaignsCount} 個進行中活動,依帳戶輸出嚴重程度分級 to-do。
           {!blockedByTier && (
             <span className="ml-1 text-gray-400">每次點擊扣 1 次配額。</span>
           )}
@@ -556,121 +500,6 @@ function AgentAdviceCard({ agent, state, isLoading }: AgentAdviceCardProps) {
         ) : null}
       </div>
     </section>
-  );
-}
-
-// ── Account filter modal ─────────────────────────────────────
-
-interface AccountFilterModalProps {
-  open: boolean;
-  accounts: FbAccount[];
-  selectedIds: Set<string>;
-  onApply: (ids: Set<string>) => void;
-  onClose: () => void;
-}
-
-function AccountFilterModal({
-  open,
-  accounts,
-  selectedIds,
-  onApply,
-  onClose,
-}: AccountFilterModalProps) {
-  const [pending, setPending] = useState<Set<string>>(selectedIds);
-  const [search, setSearch] = useState("");
-
-  // Sync pending state every time the modal opens — without this
-  // the set persists across opens and shows stale checkmarks.
-  useEffect(() => {
-    if (open) {
-      setPending(new Set(selectedIds));
-      setSearch("");
-    }
-  }, [open, selectedIds]);
-
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return accounts;
-    return accounts.filter((a) => a.name.toLowerCase().includes(q));
-  }, [accounts, search]);
-
-  const toggle = (id: string) => {
-    setPending((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  return (
-    <Modal
-      open={open}
-      onOpenChange={(next) => !next && onClose()}
-      title="選擇要分析的帳戶"
-      subtitle={`已選 ${pending.size} / ${accounts.length} 個`}
-      width={460}
-    >
-      <div className="flex flex-col gap-3">
-        <input
-          type="search"
-          value={search}
-          onChange={(e) => setSearch(e.currentTarget.value)}
-          placeholder="搜尋帳戶..."
-          className="h-9 w-full rounded-lg border border-border bg-white px-3 text-[13px] focus:border-orange focus:outline-none"
-        />
-        <div className="flex items-center gap-2 text-[12px]">
-          <button
-            type="button"
-            onClick={() => setPending(new Set(accounts.map((a) => a.id)))}
-            className="text-orange hover:underline"
-          >
-            全選
-          </button>
-          <span className="text-gray-300">·</span>
-          <button
-            type="button"
-            onClick={() => setPending(new Set())}
-            className="text-gray-500 hover:underline"
-          >
-            清除
-          </button>
-        </div>
-        <ul className="max-h-[40vh] overflow-y-auto divide-y divide-border rounded-lg border border-border">
-          {filtered.map((a) => (
-            <li key={a.id}>
-              <label className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-bg">
-                <input
-                  type="checkbox"
-                  className="custom-cb"
-                  checked={pending.has(a.id)}
-                  onChange={() => toggle(a.id)}
-                />
-                <span className="text-[13px] text-ink">{a.name}</span>
-              </label>
-            </li>
-          ))}
-          {filtered.length === 0 && (
-            <li className="px-3 py-4 text-center text-[12px] text-gray-400">
-              沒有符合的帳戶
-            </li>
-          )}
-        </ul>
-        <div className="flex items-center justify-end gap-2">
-          <Button variant="ghost" size="sm" onClick={onClose}>
-            取消
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={pending.size === 0}
-            onClick={() => onApply(pending)}
-          >
-            套用
-          </Button>
-        </div>
-      </div>
-    </Modal>
   );
 }
 
