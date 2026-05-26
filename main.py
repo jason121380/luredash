@@ -10597,15 +10597,16 @@ async def _call_one_agent(
         f"(下方資料按帳號分群,只顯示花費 Top {min(120, n_campaigns)} 個活動)\n\n"
         f"{table}"
     )
-    # maxOutputTokens raised from 800 -> 4096: 800 was being hit
+    # maxOutputTokens raised from 800 -> 8192: 800 was being hit
     # mid-sentence (CJK uses ~2-3 tokens per character; 800 tokens
-    # ≈ 250-400 zh chars max). 4096 gives enough room for a compact
-    # prioritized action plan with concrete activity names + numbers,
-    # without bloating into novel-length advice nobody reads.
+    # ≈ 250-400 zh chars max). The per-account output can include many
+    # account headings + concrete activity names, so keep enough room
+    # for the model to finish cleanly instead of cutting off the last
+    # account card.
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 4096},
+        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 8192},
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     try:

@@ -27,10 +27,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "./Markdown";
 
 /** localStorage key + payload contract for "last successful run".
- *  Bumped to 3 → wipe on schema change so old global-priority output
+ *  Bumped to 4 → wipe on schema change so old truncated output
  *  don't show up as half-rendered cards. */
 const LAST_RUN_STORAGE_KEY = "ai-staff-last-run";
-const LAST_RUN_VERSION = 3;
+const LAST_RUN_VERSION = 4;
 interface StoredLastRun {
   version: number;
   generatedAt: string;
@@ -330,7 +330,7 @@ export function OptimizationView() {
         onClose={() => setFilterModalOpen(false)}
       />
 
-      <div className="min-w-0 flex-1 p-3 md:p-5">
+      <div className="min-w-0 flex-1 p-3 pb-8 md:p-5 md:pb-10">
         {!settingsReady ? (
           <LoadingState
             title="載入優化資料中..."
