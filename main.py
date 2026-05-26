@@ -3432,17 +3432,27 @@ async def get_shared_settings():
 async def upsert_shared_setting(key: str, payload: SettingsValuePayload):
     pool = _require_db()
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO shared_settings (key, value, updated_at)
-            VALUES ($1, $2::jsonb, NOW())
-            ON CONFLICT (key) DO UPDATE
-            SET value = EXCLUDED.value,
-                updated_at = NOW()
-            """,
-            key,
-            json.dumps(payload.value),
-        )
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO shared_settings (key, value, updated_at)
+                VALUES ($1, $2::jsonb, NOW())
+                ON CONFLICT (key) DO UPDATE
+                SET value = EXCLUDED.value,
+                    updated_at = NOW()
+                """,
+                key,
+                json.dumps(payload.value),
+            )
+            if key == "security_push_master_enabled" and payload.value is True:
+                await conn.execute(
+                    """
+                    UPDATE security_push_configs
+                    SET next_run_at = LEAST(next_run_at, NOW()),
+                        updated_at = NOW()
+                    WHERE enabled
+                    """
+                )
     print(f"[settings] shared POST key={key!r}", flush=True)
     return {"ok": True}
 
@@ -10475,9 +10485,9 @@ def _format_campaigns_for_prompt(campaigns: List[CampaignDigest]) -> str:
     """Render the campaigns as a markdown grouped by account so the
     agent can structure per-account analysis. Sort accounts by total
     spend desc, campaigns within each account by spend desc. Cap at
-    60 rows total so the prompt stays under ~6KB while still
-    covering the long-tail."""
-    sorted_campaigns = sorted(campaigns, key=lambda c: c.spend, reverse=True)[:60]
+    120 rows total so larger agencies do not get an action plan based
+    on only the first screenful of activity."""
+    sorted_campaigns = sorted(campaigns, key=lambda c: c.spend, reverse=True)[:120]
 
     # Group by account_name. dict preserves insertion order, so the
     # account block order matches the spend ranking of the first
@@ -10549,11 +10559,11 @@ async def _call_one_agent(
         "**只寫待辦,不寫分析、不寫診斷段落、不寫開場白、不寫總結。**\n"
         "固定使用以下三個標題,順序不可變:\n\n"
         "## 優先\n"
-        "最需要今天先處理、正在燒錢或明顯異常的 action。最多 5 條。\n\n"
+        "最需要今天先處理、正在燒錢或明顯異常的 action。最多 10 條;若異常活動足夠,至少列 6 條。\n\n"
         "## 次要\n"
-        "需要排進本週處理,但風險低於優先項目的 action。最多 6 條。\n\n"
+        "需要排進本週處理,但風險低於優先項目的 action。最多 12 條;不要因為優先已列滿就省略。\n\n"
         "## 一般\n"
-        "低風險、觀察或微調項目。最多 6 條。\n\n"
+        "低風險、觀察或微調項目。最多 12 條;用來放仍值得處理但不緊急的活動。\n\n"
         "每條格式:\n"
         "```\n"
         "- [動作動詞] [帳號名] / [活動名] — [依據數字]\n"
@@ -10564,6 +10574,7 @@ async def _call_one_agent(
         "- 縮受眾 !C 代操 / AT17·KID — CTR 0.4% / 花費 $5k 沒回應\n\n"
         "如果某段沒有 action,寫 `- 無`。\n"
         "如果整批活動都沒問題,直接寫「目前無需介入,所有活動表現正常」即可。\n\n"
+        "資料量很大時也不要只輸出單一段落;只要有足夠異常,三段都要盡量填滿。\n\n"
         "# 嚴格禁止\n"
         "- 不要寫「根據資料」「整體來看」「總結」「值得注意」等開場 / 收尾\n"
         "- 不要對表現好的活動建議 scale up / 加預算 / 複製\n"
@@ -10573,7 +10584,7 @@ async def _call_one_agent(
     user_prompt = (
         f"資料區間: {date_label}\n"
         f"進行中活動總數: {n_campaigns}\n"
-        f"(下方資料按帳號分群,只顯示花費 Top {min(60, n_campaigns)} 個活動)\n\n"
+        f"(下方資料按帳號分群,只顯示花費 Top {min(120, n_campaigns)} 個活動)\n\n"
         f"{table}"
     )
     # maxOutputTokens raised from 800 -> 4096: 800 was being hit

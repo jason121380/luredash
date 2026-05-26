@@ -23,7 +23,11 @@ import { Fragment } from "react";
  */
 export function Markdown({ children }: { children: string }) {
   const blocks = parseBlocks(children);
-  return <div className="flex flex-col gap-2 text-[13px] leading-[1.7] text-ink">{renderGrouped(blocks)}</div>;
+  return (
+    <div className="min-w-0 break-words text-[13px] leading-[1.7] text-ink [overflow-wrap:anywhere]">
+      <div className="flex min-w-0 flex-col gap-2">{renderGrouped(blocks)}</div>
+    </div>
+  );
 }
 
 type Block =
@@ -144,7 +148,7 @@ function renderGrouped(blocks: Block[]): React.ReactNode[] {
       out.push(
         <div
           key={`callout-${i}`}
-          className="mt-1 rounded-xl border-l-4 border-orange bg-[#FFF5F0] p-3 shadow-sm"
+          className="mt-1 min-w-0 overflow-visible rounded-xl border-l-4 border-orange bg-[#FFF5F0] p-3 shadow-sm"
         >
           <div className="mb-1 flex items-center gap-1.5 text-[12px] font-bold uppercase tracking-wide text-orange">
             <span>優先</span>
@@ -183,12 +187,14 @@ function BlockNode({ block, inCallout = false }: { block: Block; inCallout?: boo
       <ul
         className={
           inCallout
-            ? "m-0 flex list-disc flex-col gap-1 pl-5 text-ink marker:text-orange"
-            : "m-0 flex list-disc flex-col gap-1 pl-5"
+            ? "m-0 flex min-w-0 list-disc flex-col gap-1 pl-5 text-ink marker:text-orange"
+            : "m-0 flex min-w-0 list-disc flex-col gap-1 pl-5"
         }
       >
         {block.items.map((it, j) => (
-          <li key={j}>{renderInline(it)}</li>
+          <li key={j} className="min-w-0 break-words [overflow-wrap:anywhere]">
+            {renderInline(it)}
+          </li>
         ))}
       </ul>
     );
@@ -198,18 +204,20 @@ function BlockNode({ block, inCallout = false }: { block: Block; inCallout?: boo
       <ol
         className={
           inCallout
-            ? "m-0 flex list-decimal flex-col gap-1 pl-5 font-medium text-ink marker:font-bold marker:text-orange"
-            : "m-0 flex list-decimal flex-col gap-1 pl-5"
+            ? "m-0 flex min-w-0 list-decimal flex-col gap-1 pl-5 font-medium text-ink marker:font-bold marker:text-orange"
+            : "m-0 flex min-w-0 list-decimal flex-col gap-1 pl-5"
         }
       >
         {block.items.map((it, j) => (
-          <li key={j}>{renderInline(it)}</li>
+          <li key={j} className="min-w-0 break-words [overflow-wrap:anywhere]">
+            {renderInline(it)}
+          </li>
         ))}
       </ol>
     );
   }
   if (block.type === "p") {
-    return <p className="m-0">{renderInline(block.text)}</p>;
+    return <p className="m-0 min-w-0 break-words [overflow-wrap:anywhere]">{renderInline(block.text)}</p>;
   }
   return null;
 }

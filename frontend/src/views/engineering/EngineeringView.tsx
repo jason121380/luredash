@@ -176,6 +176,7 @@ function Card({
   children,
   collapsible = false,
   defaultOpen = true,
+  frameless = false,
 }: {
   title: string;
   subtitle?: string;
@@ -187,11 +188,17 @@ function Card({
   collapsible?: boolean;
   /** Initial open state when ``collapsible``. Ignored otherwise. */
   defaultOpen?: boolean;
+  /** Remove the outer card chrome while keeping the title/action layout. */
+  frameless?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const headerClass = "mb-3 flex items-start justify-between gap-3";
   return (
-    <section className="rounded-2xl border border-border bg-white p-4 md:p-5">
+    <section
+      className={cn(
+        frameless ? "bg-transparent p-0" : "rounded-2xl border border-border bg-white p-4 md:p-5",
+      )}
+    >
       {collapsible ? (
         <button
           type="button"
@@ -769,7 +776,7 @@ function FbCallsPanel() {
       preload: { label: "登入預載", cls: "bg-cyan-50 text-cyan-700" },
       auth: { label: "登入驗證", cls: "bg-cyan-50 text-cyan-700" },
       "store-expenses": { label: "店家花費", cls: "bg-emerald-50 text-emerald-700" },
-      "ai-staff": { label: "AI 幕僚", cls: "bg-emerald-50 text-emerald-700" },
+      "ai-staff": { label: "優化中心", cls: "bg-emerald-50 text-emerald-700" },
       view: { label: "瀏覽畫面", cls: "bg-gray-100 text-gray-700" },
       report: { label: "報告頁", cls: "bg-gray-100 text-gray-700" },
       // ── 各種 drill-down / 單次 fetch — 共用灰色 ──
@@ -812,7 +819,7 @@ function FbCallsPanel() {
       preload: "登入後預載",
       auth: "登入驗證",
       "store-expenses": "店家花費查詢",
-      "ai-staff": "AI 幕僚查詢",
+      "ai-staff": "優化中心查詢",
       view: "一般畫面載入",
       report: "報告頁載入",
       "accounts-list": "帳戶清單查詢",
@@ -835,6 +842,7 @@ function FbCallsPanel() {
     <Card
       title="FB Rate Limit 戰情室"
       subtitle="只看真正 matter 的訊號:誰觸發、為什麼打、狀態如何、是否被我們擋下。此頁本身不打 FB。"
+      frameless
       action={
         <Button
           size="sm"

@@ -48,7 +48,6 @@ const SECURITY_ANOMALIES = new Set<SecurityAnomaly>([
   "high_budget",
   "abnormal_language",
 ]);
-const HIDDEN_CAMPAIGNS_STORAGE_KEY = "security_hidden_campaign_ids";
 
 type ScanRecordMatch = {
   campaign_id: string;
@@ -137,26 +136,6 @@ function formatRelativeScanTime(d: Date): string {
   return d.toLocaleDateString("zh-TW");
 }
 
-function hiddenStorageKey(uid: string): string {
-  return `${HIDDEN_CAMPAIGNS_STORAGE_KEY}:${uid || "anon"}`;
-}
-
-function readHiddenCampaignIds(uid: string): Set<string> {
-  if (typeof window === "undefined") return new Set();
-  try {
-    const raw = window.localStorage.getItem(hiddenStorageKey(uid));
-    const ids = raw ? JSON.parse(raw) : [];
-    return new Set(Array.isArray(ids) ? ids.filter((id) => typeof id === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function writeHiddenCampaignIds(uid: string, ids: Set<string>): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(hiddenStorageKey(uid), JSON.stringify([...ids]));
-}
-
 /**
  * 安全監控 — surfaces newly-created campaigns grouped by day so the
  * operator can scan for unusual creations (deep-night / weekend /
@@ -185,22 +164,8 @@ export function SecurityMonitorView() {
   const safeIds = useSecurityStore((s) => s.safeIds);
   const [tab, setTab] = useState<SecurityTab>("pending");
   const [pushModalOpen, setPushModalOpen] = useState(false);
-  const [hiddenCampaignIds, setHiddenCampaignIds] = useState<Set<string>>(() => new Set());
   const sharedQuery = useSharedSettings();
   const autoScanEnabled = sharedQuery.data?.security_push_master_enabled === true;
-
-  useEffect(() => {
-    setHiddenCampaignIds(readHiddenCampaignIds(user?.id ?? ""));
-  }, [user?.id]);
-
-  const hideCampaign = (campaignId: string) => {
-    setHiddenCampaignIds((prev) => {
-      const next = new Set(prev);
-      next.add(campaignId);
-      writeHiddenCampaignIds(user?.id ?? "", next);
-      return next;
-    });
-  };
 
   // 「立即掃描」 gate — flipping this to true triggers the
   // useMultiAccountOverview query below. Default false so just
@@ -324,11 +289,11 @@ export function SecurityMonitorView() {
         (n, d) =>
           n +
           d.rows.filter(
-            (r) => !hiddenCampaignIds.has(r.campaign.id) && !safeIds.has(r.campaign.id),
+            (r) => !safeIds.has(r.campaign.id),
           ).length,
         0,
       ),
-    [allDays, hiddenCampaignIds, safeIds],
+    [allDays, safeIds],
   );
   const safeCount = useMemo(
     () =>
@@ -336,11 +301,11 @@ export function SecurityMonitorView() {
         (n, d) =>
           n +
           d.rows.filter(
-            (r) => !hiddenCampaignIds.has(r.campaign.id) && safeIds.has(r.campaign.id),
+            (r) => safeIds.has(r.campaign.id),
           ).length,
         0,
       ),
-    [allDays, hiddenCampaignIds, safeIds],
+    [allDays, safeIds],
   );
 
   // 「立即掃描」完成時:POST 一筆到 backend security_scan_records
@@ -410,12 +375,11 @@ export function SecurityMonitorView() {
       .map((d) => ({
         ...d,
         rows: d.rows.filter((r) =>
-          !hiddenCampaignIds.has(r.campaign.id) &&
           (tab === "safe" ? safeIds.has(r.campaign.id) : !safeIds.has(r.campaign.id)),
         ),
       }))
       .filter((d) => d.rows.length > 0);
-  }, [allDays, hiddenCampaignIds, tab, safeIds]);
+  }, [allDays, tab, safeIds]);
 
   // Activities use the SAME fixed wide window as the campaign fetch
   // (last_90d), NOT the user-selected `date`. Reason: tying activities
@@ -630,7 +594,6 @@ export function SecurityMonitorView() {
                   activitiesSince={activitiesBounds.since}
                   activitiesUntil={activitiesBounds.until}
                   detailDate={fetchDate}
-                  onHide={hideCampaign}
                 />
               )}
             </div>
@@ -715,7 +678,6 @@ interface SecurityDayListProps {
   activitiesSince: number;
   activitiesUntil: number;
   detailDate: DateConfig;
-  onHide: (campaignId: string) => void;
 }
 
 function SecurityDayList({
@@ -727,7 +689,6 @@ function SecurityDayList({
   activitiesSince,
   activitiesUntil,
   detailDate,
-  onHide,
 }: SecurityDayListProps) {
   return (
     <div className="flex flex-col gap-4">
@@ -749,7 +710,6 @@ function SecurityDayList({
                 activitiesSince={activitiesSince}
                 activitiesUntil={activitiesUntil}
                 detailDate={detailDate}
-                onHide={onHide}
               />
             ))}
           </div>

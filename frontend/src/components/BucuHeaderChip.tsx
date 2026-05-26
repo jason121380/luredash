@@ -1,4 +1,5 @@
 import { api } from "@/api/client";
+import { useSetUserSetting, useUserSettings } from "@/api/hooks/useSettings";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { cn } from "@/lib/cn";
 import { useQuery } from "@tanstack/react-query";
@@ -22,28 +23,61 @@ import { useEffect, useState } from "react";
  */
 
 const STORAGE_KEY = "show_bucu_in_header";
+const SETTING_KEY = "show_bucu_in_header";
 
-/** Read the toggle. Subscribers re-render via `storage` event. */
+/** Read the toggle. PostgreSQL is the source of truth once the FB user
+ *  is known; localStorage is kept as the instant fallback and migration
+ *  path for older browsers that already had the box checked. */
 export function useShowBucuInHeader(): [boolean, (next: boolean) => void] {
-  const [enabled, setEnabledState] = useState(() => {
+  const { user } = useFbAuth();
+  const settingsQuery = useUserSettings(user?.id);
+  const setUserSetting = useSetUserSetting();
+  const [localEnabled, setLocalEnabled] = useState(() => {
     try {
       return localStorage.getItem(STORAGE_KEY) === "1";
     } catch {
       return false;
     }
   });
+  const rawStored = settingsQuery.data?.[SETTING_KEY];
+  const hasStoredSetting =
+    settingsQuery.data != null && Object.prototype.hasOwnProperty.call(settingsQuery.data, SETTING_KEY);
+  const enabled = hasStoredSetting
+    ? rawStored === true || rawStored === "1"
+    : localEnabled;
+
   useEffect(() => {
     const sync = (e: StorageEvent) => {
       if (e.key && e.key !== STORAGE_KEY) return;
       try {
-        setEnabledState(localStorage.getItem(STORAGE_KEY) === "1");
+        setLocalEnabled(localStorage.getItem(STORAGE_KEY) === "1");
       } catch {
-        setEnabledState(false);
+        setLocalEnabled(false);
       }
     };
     window.addEventListener("storage", sync);
     return () => window.removeEventListener("storage", sync);
   }, []);
+
+  useEffect(() => {
+    if (!hasStoredSetting) return;
+    try {
+      if (enabled) localStorage.setItem(STORAGE_KEY, "1");
+      else localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      /* private mode / quota — DB still has the value */
+    }
+  }, [enabled, hasStoredSetting]);
+
+  useEffect(() => {
+    if (!user?.id || !settingsQuery.isSuccess || hasStoredSetting || !localEnabled) return;
+    setUserSetting.mutate({
+      fbUserId: user.id,
+      key: SETTING_KEY,
+      value: true,
+    });
+  }, [hasStoredSetting, localEnabled, settingsQuery.isSuccess, setUserSetting, user?.id]);
+
   const setEnabled = (next: boolean) => {
     try {
       if (next) localStorage.setItem(STORAGE_KEY, "1");
@@ -54,7 +88,14 @@ export function useShowBucuInHeader(): [boolean, (next: boolean) => void] {
     } catch {
       /* private mode / quota — silently ignore */
     }
-    setEnabledState(next);
+    setLocalEnabled(next);
+    if (user?.id) {
+      setUserSetting.mutate({
+        fbUserId: user.id,
+        key: SETTING_KEY,
+        value: next,
+      });
+    }
   };
   return [enabled, setEnabled];
 }

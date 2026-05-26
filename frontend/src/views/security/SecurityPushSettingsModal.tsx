@@ -88,6 +88,7 @@ export function SecurityPushSettingsModal({
   const setShared = useSetSharedSetting();
   const masterEnabledRaw = sharedQuery.data?.security_push_master_enabled;
   const masterEnabled = masterEnabledRaw === true;
+  const enabledConfigsCount = configs.filter((cfg) => cfg.enabled).length;
 
   return (
     <Modal
@@ -139,6 +140,12 @@ export function SecurityPushSettingsModal({
               </div>
             </div>
           </label>
+          {masterEnabled && enabledConfigsCount === 0 && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-800">
+              已開啟總開關,但目前沒有啟用中的推播設定,所以排程不會自動掃描。
+              請新增推播或把既有設定改為啟用。
+            </div>
+          )}
           <ConfigList
             configs={configs}
             loading={configsQuery.isLoading}

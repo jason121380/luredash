@@ -2,7 +2,7 @@ import { api } from "@/api/client";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { cn } from "@/lib/cn";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 // `readScanHistory` / `appendScanHistory` (the previous localStorage
 // API) were removed once we cut over to backend-stored
@@ -31,6 +31,29 @@ const ANOMALY_LABEL: Record<string, string> = {
   abnormal_language: "異常語言",
 };
 
+function hiddenRecordsKey(uid: string): string {
+  return `security_hidden_scan_records:${uid || "anon"}`;
+}
+
+function readHiddenRecordIds(uid: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(hiddenRecordsKey(uid));
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr.map(String) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeHiddenRecordIds(uid: string, ids: Set<string>): void {
+  try {
+    localStorage.setItem(hiddenRecordsKey(uid), JSON.stringify([...ids]));
+  } catch {
+    /* localStorage unavailable — ignore */
+  }
+}
+
 function formatRelative(iso: string): string {
   const ts = new Date(iso).getTime();
   const sec = Math.floor((Date.now() - ts) / 1000);
@@ -55,6 +78,11 @@ export function ScanHistoryPanel() {
   const { user } = useFbAuth();
   const uid = user?.id ?? "";
   const [filter, setFilter] = useState<"all" | "auto" | "manual">("all");
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => readHiddenRecordIds(uid));
+
+  useEffect(() => {
+    setHiddenIds(readHiddenRecordIds(uid));
+  }, [uid]);
 
   const query = useQuery({
     queryKey: ["security-scan-records", uid, filter],
@@ -79,8 +107,24 @@ export function ScanHistoryPanel() {
       else next.add(id);
       return next;
     });
+  const hideRecord = (id: string) => {
+    setHiddenIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      writeHiddenRecordIds(uid, next);
+      return next;
+    });
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  };
 
-  const records = useMemo(() => query.data ?? [], [query.data]);
+  const records = useMemo(
+    () => (query.data ?? []).filter((r) => !hiddenIds.has(r.id)),
+    [query.data, hiddenIds],
+  );
 
   return (
     <aside className="flex h-full min-h-0 flex-col border-l border-border bg-white">
@@ -133,52 +177,77 @@ export function ScanHistoryPanel() {
                   key={r.id}
                   className="rounded-lg border border-border bg-bg text-[12px]"
                 >
-                  <button
-                    type="button"
-                    onClick={() => toggle(r.id)}
-                    className="flex w-full flex-col gap-1 px-3 py-2 text-left hover:bg-orange-bg/30"
-                  >
-                    <span className="flex items-center gap-1.5">
-                      <span
-                        className={cn(
-                          "rounded-full px-1.5 py-[1px] text-[10px] font-semibold",
-                          r.trigger_type === "manual"
-                            ? "bg-orange-bg text-orange"
-                            : "bg-cyan-50 text-cyan-700",
-                        )}
-                      >
-                        {r.trigger_type === "manual" ? "手動" : "自動"}
+                  <div className="flex items-start gap-1 px-3 py-2 hover:bg-orange-bg/30">
+                    <button
+                      type="button"
+                      onClick={() => toggle(r.id)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <span
+                          className={cn(
+                            "rounded-full px-1.5 py-[1px] text-[10px] font-semibold",
+                            r.trigger_type === "manual"
+                              ? "bg-orange-bg text-orange"
+                              : "bg-cyan-50 text-cyan-700",
+                          )}
+                        >
+                          {r.trigger_type === "manual" ? "手動" : "自動"}
+                        </span>
+                        <span className="font-semibold text-ink" title={formatExact(r.scanned_at)}>
+                          {formatRelative(r.scanned_at)}
+                        </span>
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className={cn(
+                            "ml-auto shrink-0 text-gray-400 transition-transform",
+                            isOpen ? "rotate-90" : "rotate-0",
+                          )}
+                          aria-hidden="true"
+                        >
+                          <title>{isOpen ? "收合" : "展開"}</title>
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
                       </span>
-                      <span className="font-semibold text-ink" title={formatExact(r.scanned_at)}>
-                        {formatRelative(r.scanned_at)}
+                      <span className="mt-1 block font-mono text-[10px] text-gray-400">
+                        {formatExact(r.scanned_at)}
                       </span>
+                      <span className="mt-1 block text-[11px] text-gray-500">
+                        {r.account_ids.length} 帳戶 · {r.matches_count} 異常 ·{" "}
+                        {(r.duration_ms / 1000).toFixed(1)}s
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => hideRecord(r.id)}
+                      title="從畫面隱藏(不刪除資料庫)"
+                      aria-label="隱藏掃描紀錄"
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-gray-300 hover:bg-red-50 hover:text-red-600"
+                    >
                       <svg
                         width="12"
                         height="12"
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
-                        strokeWidth="2.5"
+                        strokeWidth="2.4"
                         strokeLinecap="round"
                         strokeLinejoin="round"
-                        className={cn(
-                          "ml-auto shrink-0 text-gray-400 transition-transform",
-                          isOpen ? "rotate-90" : "rotate-0",
-                        )}
                         aria-hidden="true"
                       >
-                        <title>{isOpen ? "收合" : "展開"}</title>
-                        <polyline points="9 18 15 12 9 6" />
+                        <title>hide</title>
+                        <path d="M18 6 6 18" />
+                        <path d="m6 6 12 12" />
                       </svg>
-                    </span>
-                    <span className="font-mono text-[10px] text-gray-400">
-                      {formatExact(r.scanned_at)}
-                    </span>
-                    <span className="text-[11px] text-gray-500">
-                      {r.account_ids.length} 帳戶 · {r.matches_count} 異常 ·{" "}
-                      {(r.duration_ms / 1000).toFixed(1)}s
-                    </span>
-                  </button>
+                    </button>
+                  </div>
                   {isOpen && (
                     <div className="border-t border-border px-3 py-2">
                       {r.matches.length === 0 ? (

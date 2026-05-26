@@ -522,7 +522,7 @@ interface AgentAdviceCardProps {
 
 function AgentAdviceCard({ agent, state, isLoading }: AgentAdviceCardProps) {
   return (
-    <section className="flex flex-col rounded-lg border border-border bg-white p-4 md:p-5">
+    <section className="flex min-w-0 flex-col rounded-lg border border-border bg-white p-4 md:p-5">
       <header className="mb-3 flex items-start gap-3">
         <div
           className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[18px] font-bold shadow-sm"
@@ -537,7 +537,7 @@ function AgentAdviceCard({ agent, state, isLoading }: AgentAdviceCardProps) {
         </div>
       </header>
 
-      <div className="min-h-[220px] flex-1">
+      <div className="min-w-0 flex-1 overflow-visible">
         {isLoading ? (
           <div className="flex h-[220px] items-center justify-center">
             <div className="flex flex-col items-center gap-2 text-[12px] text-gray-400">
