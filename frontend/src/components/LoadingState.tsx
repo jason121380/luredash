@@ -1,4 +1,3 @@
-import { ProgressBar } from "@/components/ProgressBar";
 import { cn } from "@/lib/cn";
 import { type ReactNode, useEffect, useState } from "react";
 
@@ -118,33 +117,30 @@ export function LoadingState({
 
   return (
     <div
-      className={cn(
-        "flex min-h-[180px] flex-col items-center justify-center gap-3 px-6 py-12",
-        className,
-      )}
+      className={cn("flex min-h-[220px] flex-col items-center justify-center gap-4 px-6 py-14", className)}
     >
-      <div className="flex items-end gap-1.5" aria-hidden="true">
-        <span
-          className="h-2.5 w-2.5 rounded-full bg-orange animate-bounce-dot"
-          style={{ animationDelay: "0s" }}
-        />
-        <span
-          className="h-2.5 w-2.5 rounded-full bg-orange animate-bounce-dot"
-          style={{ animationDelay: "0.16s" }}
-        />
-        <span
-          className="h-2.5 w-2.5 rounded-full bg-orange animate-bounce-dot"
-          style={{ animationDelay: "0.32s" }}
-        />
-      </div>
-      <div className="text-[14px] font-semibold text-ink">{title}</div>
+      <div className="text-[16px] font-bold text-ink">{title}</div>
       {effectiveSubtitle && <div className="text-[12px] text-gray-500">{effectiveSubtitle}</div>}
       <progress value={pct} max={100} className="sr-only" aria-label="載入進度">
         {pct}%
       </progress>
-      <div className="flex w-[240px] flex-col items-center gap-1.5" aria-hidden="true">
-        <div className="text-[11px] font-semibold tabular-nums text-orange">{pct}%</div>
-        <ProgressBar value={pct} size="md" ariaLabel="載入進度" />
+      <div
+        className="relative h-5 w-[min(78vw,360px)] overflow-hidden rounded-full bg-border"
+        aria-hidden="true"
+      >
+        <div
+          className="h-full rounded-full transition-[width] duration-300 ease-out animate-progress-shimmer"
+          style={{
+            width: `${pct}%`,
+            background: "linear-gradient(90deg, #FFB388 0%, #FF7A45 45%, #FF5A1F 100%)",
+            backgroundSize: "200% 100%",
+          }}
+        />
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <span className="text-[11px] font-bold tabular-nums text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.28)]">
+            {pct}%
+          </span>
+        </div>
       </div>
       {hint && (
         <div className="mt-1 max-w-[280px] text-center text-[11px] leading-relaxed text-gray-300">
