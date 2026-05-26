@@ -13,8 +13,8 @@ import { useEffect, useMemo, useState } from "react";
  * narrow viewports so the alert/dashboard/finance pages don't waste
  * vertical space on a horizontal-scrolling chip strip.
  *
- * Visibility is controlled by Tailwind utility classes on the parent:
- *   <div className="md:hidden"><MobileAccountPicker .../></div>
+ * Hidden automatically on desktop; desktop views use the account
+ * sidebar instead.
  *
  * Pass `selectedId={null}` and an empty selected label to represent
  * the "全部帳戶" (all-accounts) option, which is supported by
@@ -83,7 +83,7 @@ export function MobileAccountPicker({
     // mr-auto on mobile pushes this picker to the LEFT of the topbar,
     // leaving the DatePicker and other controls right-aligned. Reset
     // on desktop so the normal `justify-end` flow still works.
-    <div className={cn("flex shrink-0 items-center gap-2 mr-auto md:mr-0", className)}>
+    <div className={cn("mr-auto flex shrink-0 items-center gap-2 md:hidden", className)}>
       <span className="hidden whitespace-nowrap text-[11px] font-bold uppercase tracking-[0.5px] text-gray-300 sm:inline">
         {label}
       </span>
