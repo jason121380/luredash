@@ -76,7 +76,7 @@ _current_fb_user_id: contextvars.ContextVar[Optional[str]] = contextvars.Context
 #   warm                                                     — cache warm loop
 #   line-push                                                — campaign LINE 推播 scheduler
 #   security-push                                            — 安全監控自動掃 scheduler
-#   security-probe                                           — 安全監控的「有沒有新東西?」cheap probe
+#   security-probe                                           — legacy 安全監控 cheap probe 紀錄
 #   security-test                                            — 推播設定 modal 的「測試」按鈕
 #   unknown                                                  — fallback (some helper that didn't tag)
 _fb_call_source: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -220,7 +220,7 @@ def _register_warm_target(
 
 # Security push scan result cache. Multiple configs often belong to the
 # same owner and watch the same selected account set; without this each
-# config repeats the same FB campaign probes/fetches inside one scheduler
+# config repeats the same FB campaign fetches inside one scheduler
 # tick. Keep it short-lived only: a one-hour cache can make the next
 # hourly scan reuse the previous scan window and miss campaigns created
 # after that run.
@@ -8596,6 +8596,18 @@ def _next_security_push_run_at(after: Optional[datetime] = None) -> datetime:
     return base.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
 
+def _security_auto_scan_since_dt(now: Optional[datetime] = None) -> datetime:
+    """Match the manual security scan's default window.
+
+    Manual scan fetches a wide campaign list, then the UI filters by
+    the default "this month" range. Auto-scan should be the same kind
+    of full snapshot, not a delta from the previous hourly tick.
+    """
+    local_now = (now or datetime.now(timezone.utc)).astimezone(_scheduler_tz())
+    month_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return month_start.astimezone(timezone.utc)
+
+
 def _validate_security_push_payload(p: SecurityPushConfigPayload) -> None:
     if not p.name or not p.name.strip():
         raise HTTPException(status_code=400, detail="name 不可為空")
@@ -9649,45 +9661,6 @@ async def _load_safe_campaign_ids() -> set:
         return set()
 
 
-async def _has_new_campaigns_since(account_id: str, since_dt: datetime) -> bool:
-    """Cheap probe — does this account have any campaign created since
-    ``since_dt``? Returns True/False without fetching the full
-    campaign list.
-
-    Cost: ~0.5 BUCU 處理時間 (single tiny FB call returning at most
-    1 row with just the `id` field), vs ~5-10 BUCU for the full
-    metadata fetch on heavy accounts like !B 新城區.
-
-    Strategy:
-      - Request only `fields=id`, `limit=1`
-      - Filter on `created_time > since_dt` via the `filtering` param
-      - If FB returns any row → True (new campaign exists → caller
-        should do the full fetch + anomaly evaluation)
-      - If empty → False (no new campaigns → skip the entire heavy
-        path)
-
-    Cached via the same per-key TTL as other reads, keyed on the
-    epoch second so consecutive calls within 1s share the result.
-    """
-    since_epoch = int(since_dt.timestamp())
-    params: dict = {
-        "fields": "id",
-        "limit": "1",
-        "filtering": _json.dumps(
-            [
-                {
-                    "field": "created_time",
-                    "operator": "GREATER_THAN",
-                    "value": since_epoch,
-                }
-            ]
-        ),
-    }
-    result = await fb_get(f"{account_id}/campaigns", params)
-    data = result.get("data") or []
-    return len(data) > 0
-
-
 def _serialize_match_for_record(m: dict) -> dict:
     """Trim a `_collect_security_matches` row down to a stable, JSON-safe
     payload for persistence in `security_scan_records.matches` JSONB.
@@ -9855,9 +9828,9 @@ async def _collect_security_matches_cached(
     """Share one FB scan across configs with the same owner/account set.
 
     Cache entries retain all anomaly candidates, then each config applies
-    its own anomaly filter and LINE destinations. A cached result is only
-    reused if it was scanned from an equal-or-earlier since_dt, so we
-    never miss older campaigns for a config whose last_run_at lags behind.
+    its own anomaly filter and LINE destinations. Auto-scan uses the same
+    month-to-date snapshot window as manual scan, so configs due in the
+    same scheduler tick can share the expensive FB fetch.
     """
     if _db_pool is None:
         return []
@@ -9971,47 +9944,17 @@ async def _collect_security_matches(
 
     async def _scan_one_inner(aid: str) -> list:
         out: list = []
-        # Cheap "has anything new?" probe before the expensive
-        # metadata fetch. 90% of accounts haven't created a campaign
-        # in the last hour; for those, the probe (~0.5 BUCU on FB
-        # processing-time) is enough to skip the full fan-out
-        # (~5-10 BUCU on heavy accounts). This is what cut the
-        # 處理時間 climb on accounts like !B 新城區 — most ticks no
-        # longer touch them at all.
-        probe_token = _fb_call_source.set("security-probe")
         try:
-            if not await _has_new_campaigns_since(aid, since_dt):
-                return out
-        except HTTPException as e:
-            # Probe failed (e.g. account doesn't support created_time
-            # filtering). Fall through to the full fetch — better to
-            # spend BUCU than silently miss a real new-campaign alert.
-            if _is_rate_limit_exception(e):
-                print(
-                    f"[security-probe] {aid} rate-limited, skipping full fetch: "
-                    f"{e.detail}",
-                    flush=True,
-                )
-                return out
-            print(
-                f"[security-probe] {aid} probe failed, falling through to full fetch: "
-                f"{e.detail}",
-                flush=True,
-            )
-        finally:
-            _fb_call_source.reset(probe_token)
-        try:
-            # include_adsets=True because _effective_daily_budget below
-            # reads `c["adsets"]["data"]` to aggregate ABO campaign
-            # budgets. Without the nested fetch we'd report None for
-            # every ABO campaign in the LINE security alert.
+            # Keep this aligned with the manual security scan:
+            # fetch a wide metadata-only campaign list, then filter by
+            # created_time locally. No pre-scan, no last-hour delta.
             camps = await _fetch_campaigns_for_account(
                 aid,
-                date_preset="last_7d",
+                date_preset="last_90d",
                 time_range=None,
                 include_archived=True,
                 lite=True,
-                include_adsets=True,
+                include_adsets=False,
             )
         except HTTPException as e:
             print(f"[security-push] fetch {aid} failed: {e.detail}", flush=True)
@@ -10180,20 +10123,25 @@ async def _security_push_run_one(cfg: dict) -> dict:
         raise RuntimeError("channel disabled or missing access_token")
     access_token = ch_row["access_token"]
 
-    since_dt = cfg.get("last_run_at") or (datetime.now(timezone.utc) - timedelta(hours=24))
-    if since_dt.tzinfo is None:
-        since_dt = since_dt.replace(tzinfo=timezone.utc)
+    since_dt = _security_auto_scan_since_dt()
+    account_ids = await _security_config_account_ids(cfg)
 
     pushed_groups = 0
 
     # Pull campaigns under the owner's FB token context.
     ctx_token = _current_fb_user_id.set(owner_uid)
     try:
+        scan_cfg = {**cfg, "account_ids": account_ids}
         matches = await _collect_security_matches_cached(
-            cfg, since_dt, require_anomaly=True, limit=None
+            scan_cfg, since_dt, require_anomaly=True, limit=None
         )
         if not matches:
-            return {"matches_count": 0, "pushed_groups": 0, "matches": []}
+            return {
+                "matches_count": 0,
+                "pushed_groups": 0,
+                "matches": [],
+                "account_ids": account_ids,
+            }
 
         # Flex card carousel — one bubble per campaign. Matches the
         # shape the test endpoint sends so the production push looks
@@ -10218,6 +10166,7 @@ async def _security_push_run_one(cfg: dict) -> dict:
             "matches_count": len(matches),
             "pushed_groups": pushed_groups,
             "matches": matches,
+            "account_ids": account_ids,
         }
     finally:
         _current_fb_user_id.reset(ctx_token)
@@ -10319,7 +10268,7 @@ async def _security_push_tick() -> None:
         # table because security_push_logs is high-frequency counters).
         try:
             matches = run_result.get("matches") or []
-            account_ids = list(cfg.get("account_ids") or [])
+            account_ids = list(run_result.get("account_ids") or cfg.get("account_ids") or [])
             await _persist_scan_record(
                 config_id=cid,
                 fb_user_id=cfg.get("owner_fb_user_id"),
