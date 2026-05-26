@@ -7,6 +7,7 @@ import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
 import { DatePicker } from "@/components/DatePicker";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadingState } from "@/components/LoadingState";
+import { useSharedSettings } from "@/api/hooks/useSettings";
 import { Topbar, TopbarSeparator } from "@/layout/Topbar";
 import { cn } from "@/lib/cn";
 import { type DateConfig, toShortLabel } from "@/lib/datePicker";
@@ -31,6 +32,10 @@ const topbarActionBase =
 const topbarSecondaryAction = cn(
   topbarActionBase,
   "border-border bg-white text-ink hover:border-orange-border hover:bg-orange-bg",
+);
+const topbarActiveAction = cn(
+  topbarActionBase,
+  "border-orange-border bg-orange-bg text-orange hover:border-orange hover:bg-orange-bg",
 );
 
 function formatRelativeScanTime(d: Date): string {
@@ -70,6 +75,8 @@ export function SecurityMonitorView() {
   const [tab, setTab] = useState<SecurityTab>("pending");
   const [pushModalOpen, setPushModalOpen] = useState(false);
   const historyPanelRef = useRef<HTMLDivElement | null>(null);
+  const sharedQuery = useSharedSettings();
+  const autoScanEnabled = sharedQuery.data?.security_push_master_enabled === true;
 
   // 「立即掃描」 gate — flipping this to true triggers the
   // useMultiAccountOverview query below. Default false so just
@@ -397,7 +404,7 @@ export function SecurityMonitorView() {
           <button
             type="button"
             onClick={() => setPushModalOpen(true)}
-            className={topbarSecondaryAction}
+            className={autoScanEnabled ? topbarActiveAction : topbarSecondaryAction}
           >
             <svg
               width="15"
@@ -415,7 +422,7 @@ export function SecurityMonitorView() {
               <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
               <path d="M13.73 21a2 2 0 0 1-3.46 0" />
             </svg>
-            <span>推播設定</span>
+            <span>{autoScanEnabled ? "已開啟自動掃描" : "推播設定"}</span>
           </button>
         </div>
       </Topbar>
