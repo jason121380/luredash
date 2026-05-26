@@ -113,13 +113,13 @@ export function SecurityMonitorView() {
   // scan-record endpoints, never by auto-replaying a FB scan.
   const scanAccounts = scanRequested ? visibleAll : [];
 
-  // includeAdsets:true here only — `effectiveDailyBudget` reads
-  // `campaign.adsets.data` to aggregate ABO budgets. Dashboard / Alerts /
-  // Finance never read that nested field so they opt out (default false,
-  // ~20-30% lighter FB BUCU per call).
+  // Keep manual scans metadata-only. The adsets nesting used for ABO
+  // budget aggregation is the most common source of FB `code=100`
+  // invalid-parameter errors and costs extra BUCU; campaign-level budget
+  // is enough for the default safety pass.
   const overview = useMultiAccountOverview(scanAccounts, fetchDate, {
     includeArchived: true,
-    includeAdsets: true,
+    includeAdsets: false,
     source: "security-scan",
     liteOnly: true,
     // Cached results stay visible across mounts / hours of inactivity
