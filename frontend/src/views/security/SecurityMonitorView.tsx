@@ -438,15 +438,6 @@ export function SecurityMonitorView() {
     <>
       <Topbar title="安全防護">
         <div className="flex min-w-0 items-center gap-2 overflow-x-auto md:gap-3 md:overflow-visible">
-          {/* 安全監控限定到「上個月」為止 — 立即掃描 fetch 固定
-              last_90d,選 last_90d 或更久的自訂區間會看不到資料。
-              拿掉 custom 日曆,只留 6 個 preset。 */}
-          <DatePicker
-            value={date}
-            onChange={setDate}
-            allowedPresets={["today", "yesterday", "last_7d", "last_30d", "this_month", "last_month"]}
-          />
-          <TopbarSeparator />
           <button
             type="button"
             onClick={() => {
@@ -513,6 +504,15 @@ export function SecurityMonitorView() {
             </svg>
             <span>{autoScanEnabled ? "已開啟自動掃描" : "推播設定"}</span>
           </button>
+          <TopbarSeparator />
+          {/* 安全監控限定到「上個月」為止 — 立即掃描 fetch 固定
+              last_90d,選 last_90d 或更久的自訂區間會看不到資料。
+              拿掉 custom 日曆,只留 6 個 preset。 */}
+          <DatePicker
+            value={date}
+            onChange={setDate}
+            allowedPresets={["today", "yesterday", "last_7d", "last_30d", "this_month", "last_month"]}
+          />
         </div>
       </Topbar>
       <SecurityPushSettingsModal

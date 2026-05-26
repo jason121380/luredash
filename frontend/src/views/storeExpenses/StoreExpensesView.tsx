@@ -152,7 +152,6 @@ export function StoreExpensesView() {
             selectedIds={storeSelectedAcctIds}
             onChange={setStoreSelectedAcctIds}
           />
-          <DatePicker value={date} onChange={(cfg) => setDate("shared", cfg)} />
           <Button
             variant="ghost"
             size="sm"
@@ -178,6 +177,7 @@ export function StoreExpensesView() {
               <line x1="12" y1="15" x2="12" y2="3" />
             </svg>
           </Button>
+          <DatePicker value={date} onChange={(cfg) => setDate("shared", cfg)} />
         </div>
       </Topbar>
 

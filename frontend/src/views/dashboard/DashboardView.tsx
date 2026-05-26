@@ -155,7 +155,6 @@ export function DashboardView() {
             className="bg-transparent px-0 py-0"
           />
           <TopbarSeparator />
-          <DatePicker value={date} onChange={(cfg) => setDate("shared", cfg)} />
           <button
             type="button"
             onClick={toggleStatsCollapsed}
@@ -207,6 +206,10 @@ export function DashboardView() {
             <TopbarSeparator />
           </span>
           <ColumnPickerPopover />
+          <span className="hidden md:inline">
+            <TopbarSeparator />
+          </span>
+          <DatePicker value={date} onChange={(cfg) => setDate("shared", cfg)} />
         </div>
       </Topbar>
 

@@ -124,7 +124,6 @@ export function FinanceView() {
             className="bg-transparent px-0 py-0"
           />
           <TopbarSeparator />
-          <DatePicker value={date} onChange={(cfg) => setDate("shared", cfg)} />
           <Button
             variant="ghost"
             size="sm"
@@ -175,6 +174,7 @@ export function FinanceView() {
               <line x1="6" y1="15" x2="10" y2="15" />
             </svg>
           </Button>
+          <DatePicker value={date} onChange={(cfg) => setDate("shared", cfg)} />
         </div>
       </Topbar>
 
