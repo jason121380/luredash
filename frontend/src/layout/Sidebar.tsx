@@ -4,7 +4,7 @@ import { TierBadge } from "@/components/TierBadge";
 import { cn } from "@/lib/cn";
 import { prefetchView } from "@/router";
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink } from "react-router-dom";
 
 const importEngineeringModal = () => import("@/views/engineering/EngineeringView");
 const EngineeringModal = lazy(() =>
@@ -29,221 +29,115 @@ interface NavItem {
   label: string;
 }
 
-// 一般 — high-frequency「進來看數字」類的 view。儀表板給跨帳戶的
-// 即時 KPI;數據圖表(原「數據分析」)給切片趨勢圖。其餘 view 分
-// 別放在 NAV_ITEMS(主選單)/ TOOL_ITEMS(工具)下方。
-const GENERAL_ITEMS: NavItem[] = [
-  {
-    to: "/dashboard",
-    label: "儀表板",
-    icon: (
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <rect x="3" y="3" width="7" height="7" />
-        <rect x="14" y="3" width="7" height="7" />
-        <rect x="3" y="14" width="7" height="7" />
-        <rect x="14" y="14" width="7" height="7" />
-      </svg>
-    ),
-  },
-  {
-    to: "/analytics",
-    label: "數據圖表",
-    icon: (
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-      </svg>
-    ),
-  },
-];
+// ── Icons(reused across groups so we don't duplicate SVG markup) ──
+const ICON_DASHBOARD = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="3" y="3" width="7" height="7" />
+    <rect x="14" y="3" width="7" height="7" />
+    <rect x="3" y="14" width="7" height="7" />
+    <rect x="14" y="14" width="7" height="7" />
+  </svg>
+);
+const ICON_CHART = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+  </svg>
+);
+const ICON_SHIELD = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z" />
+    <polyline points="9 12 11 14 15 10" />
+  </svg>
+);
+const ICON_ALERT = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+    <line x1="12" y1="9" x2="12" y2="13" />
+    <line x1="12" y1="17" x2="12.01" y2="17" />
+  </svg>
+);
+const ICON_TARGET = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="9" />
+    <circle cx="12" cy="12" r="5" />
+    <circle cx="12" cy="12" r="1.5" />
+  </svg>
+);
+const ICON_DOLLAR = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <line x1="12" y1="1" x2="12" y2="23" />
+    <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+  </svg>
+);
+const ICON_STORE = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    <polyline points="9 22 9 12 15 12 15 22" />
+  </svg>
+);
+const ICON_HISTORY = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M3 3v18h18" />
+    <path d="M7 14l4-4 4 4 5-6" />
+  </svg>
+);
+const ICON_SETTINGS = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+  </svg>
+);
+const ICON_LINE = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+  </svg>
+);
+const ICON_CARD = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="2" y="5" width="20" height="14" rx="2" />
+    <line x1="2" y1="10" x2="22" y2="10" />
+  </svg>
+);
 
-const NAV_ITEMS: NavItem[] = [
-  {
-    to: "/alerts",
-    label: "警示列表",
-    icon: (
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-        <line x1="12" y1="9" x2="12" y2="13" />
-        <line x1="12" y1="17" x2="12.01" y2="17" />
-      </svg>
-    ),
-  },
-  {
-    to: "/security",
-    label: "安全監控",
-    icon: (
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z" />
-        <polyline points="9 12 11 14 15 10" />
-      </svg>
-    ),
-  },
-  {
-    to: "/optimization",
-    label: "AI 幕僚",
-    icon: (
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <circle cx="12" cy="12" r="9" />
-        <circle cx="12" cy="12" r="5" />
-        <circle cx="12" cy="12" r="1.5" />
-      </svg>
-    ),
-  },
-  {
-    to: "/finance",
-    label: "費用中心",
-    icon: (
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <line x1="12" y1="1" x2="12" y2="23" />
-        <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
-      </svg>
-    ),
-  },
-  {
-    to: "/history",
-    label: "歷史花費",
-    icon: (
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M3 3v18h18" />
-        <path d="M7 14l4-4 4 4 5-6" />
-      </svg>
-    ),
-  },
-  {
-    to: "/store-expenses",
-    label: "店家花費",
-    icon: (
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-        <polyline points="9 22 9 12 15 12 15 22" />
-      </svg>
-    ),
-  },
-];
+// ── Nav groups ─────────────────────────────────────────────────
+// Each group corresponds to a labeled section in the sidebar
+// (一般 / 成效 / 花費 / 設定). Top-down ordering matches user spec.
+interface NavGroup {
+  label: string;
+  items: NavItem[];
+}
 
-// 快速上架 hidden from the sidebar nav (route still exists for
-// direct URL access). Settings is split into two tools:
-//   - 廣告帳號設定 → /settings (account selection + reorder)
-//   - LINE 推播設定 → /line-push (LINE group label management)
-const TOOL_ITEMS: NavItem[] = [
+const NAV_GROUPS: NavGroup[] = [
   {
-    to: "/settings",
-    label: "廣告帳號設定",
-    icon: (
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <circle cx="12" cy="12" r="3" />
-        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-      </svg>
-    ),
+    label: "一般",
+    items: [
+      { to: "/dashboard", label: "儀表板", icon: ICON_DASHBOARD },
+      { to: "/analytics", label: "數據圖表", icon: ICON_CHART },
+      { to: "/security", label: "安全防護", icon: ICON_SHIELD },
+    ],
   },
   {
-    to: "/line-push",
-    label: "LINE 推播設定",
-    icon: (
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-      </svg>
-    ),
+    label: "成效",
+    items: [
+      { to: "/alerts", label: "警示列表", icon: ICON_ALERT },
+      { to: "/optimization", label: "優化中心", icon: ICON_TARGET },
+    ],
+  },
+  {
+    label: "花費",
+    items: [
+      { to: "/finance", label: "費用中心", icon: ICON_DOLLAR },
+      { to: "/store-expenses", label: "店家花費", icon: ICON_STORE },
+      { to: "/history", label: "歷史花費", icon: ICON_HISTORY },
+    ],
+  },
+  {
+    label: "設定",
+    items: [
+      { to: "/settings", label: "廣告帳號", icon: ICON_SETTINGS },
+      { to: "/line-push", label: "LINE 推播", icon: ICON_LINE },
+      { to: "/billing", label: "我的訂閱", icon: ICON_CARD },
+    ],
   },
 ];
 
@@ -256,7 +150,6 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
   const { user, logout } = useFbAuth();
   const subQuery = useSubscription();
   const sub = subQuery.data;
-  const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
   const [engineeringOpen, setEngineeringOpen] = useState(false);
   const menuWrapRef = useRef<HTMLDivElement | null>(null);
@@ -316,25 +209,20 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
           on the parent <aside> instead causes flex-1 + mt-auto to
           mis-measure and leave a dead-air gap below the avatar. */}
       <nav className="min-h-0 flex-1 overflow-y-auto p-2.5">
-        <div className="px-2.5 pt-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.8px] text-gray-300">
-          一般
-        </div>
-        {GENERAL_ITEMS.map((item) => (
-          <SidebarLink key={item.to} item={item} />
-        ))}
-
-        <div className="mt-2 px-2.5 pt-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.8px] text-gray-300">
-          主選單
-        </div>
-        {NAV_ITEMS.map((item) => (
-          <SidebarLink key={item.to} item={item} />
-        ))}
-
-        <div className="mt-2 px-2.5 pt-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.8px] text-gray-300">
-          工具
-        </div>
-        {TOOL_ITEMS.map((item) => (
-          <SidebarLink key={item.to} item={item} />
+        {NAV_GROUPS.map((group, idx) => (
+          <div key={group.label}>
+            <div
+              className={cn(
+                "px-2.5 pt-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.8px] text-gray-300",
+                idx > 0 && "mt-2",
+              )}
+            >
+              {group.label}
+            </div>
+            {group.items.map((item) => (
+              <SidebarLink key={item.to} item={item} />
+            ))}
+          </div>
         ))}
       </nav>
 
@@ -392,18 +280,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
                 </div>
                 <div className="mt-0.5 text-[10px] font-normal text-gray-300">Facebook 帳號</div>
               </div>
-              <button
-                type="button"
-                onMouseEnter={() => prefetchView("/billing")}
-                onFocus={() => prefetchView("/billing")}
-                onClick={() => {
-                  setMenuOpen(false);
-                  navigate("/billing");
-                }}
-                className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-[13px] text-gray-500 hover:bg-orange-bg hover:text-orange"
-              >
-                我的訂閱
-              </button>
+              {/* 我的訂閱 moved to 設定 group in sidebar */}
               <button
                 type="button"
                 onMouseEnter={() => {
