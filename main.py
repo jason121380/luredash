@@ -203,6 +203,14 @@ _global_fb_throttle_until: float = 0.0
 # sometimes does immediately after the throttle fires).
 _account_throttle_until: dict[str, float] = {}
 
+# Per-account FB capability memory. Some ad accounts reject optional
+# /campaigns parameters with Graph code=100 (Invalid parameter), most
+# commonly the archived effective_status filter. Once observed, skip that
+# optional tier for a while instead of paying one doomed FB call on every
+# dashboard load.
+_CAMPAIGNS_CAPABILITY_TTL_SECONDS = _env_int("CAMPAIGNS_CAPABILITY_TTL_SECONDS", 24 * 60 * 60)
+_campaigns_unsupported_until: dict[tuple[str, str], float] = {}
+
 # Ring buffer of the last N FB Graph API calls (success + error).
 # Each entry: {ts, path, account_id, method, ms, status, bucu_peak_pct,
 # cache_hit, error_code, retried}. Read-only — surfaced via
@@ -1622,6 +1630,32 @@ def _account_throttle_remaining(account_id: Optional[str]) -> float:
         _account_throttle_until.pop(account_id, None)
         return 0.0
     return remaining
+
+
+def _fb_detail_has_code(detail: object, code: int) -> bool:
+    return f"[code={code}" in str(detail)
+
+
+def _campaigns_capability_blocked(account_id: str, capability: str) -> bool:
+    key = (account_id, capability)
+    deadline = _campaigns_unsupported_until.get(key)
+    if not deadline:
+        return False
+    if deadline <= time.monotonic():
+        _campaigns_unsupported_until.pop(key, None)
+        return False
+    return True
+
+
+def _remember_campaigns_unsupported(account_id: str, capability: str, detail: object) -> None:
+    _campaigns_unsupported_until[(account_id, capability)] = (
+        time.monotonic() + _CAMPAIGNS_CAPABILITY_TTL_SECONDS
+    )
+    print(
+        f"[campaigns meta] {account_id} skip capability={capability} "
+        f"for {_CAMPAIGNS_CAPABILITY_TTL_SECONDS}s after FB code=100: {detail}",
+        flush=True,
+    )
 
 
 def _record_global_throttle(path: str, error_code: int) -> None:
@@ -4912,20 +4946,22 @@ async def _fetch_campaigns_metadata(
     adset_nest = "adsets.limit(50){daily_budget,lifetime_budget,status}"
     full_fields = base_no_adsets + (f",{adset_nest}" if include_adsets else "")
     archived_filter = {"effective_status": '["ACTIVE","PAUSED","ARCHIVED","DELETED"]'}
+    archived_filter_blocked = _campaigns_capability_blocked(account_id, "archived_filter")
+    adsets_nesting_blocked = _campaigns_capability_blocked(account_id, "adsets_nesting")
 
     attempts: list[tuple[str, dict]] = []
-    if include_archived and include_adsets:
+    if include_archived and include_adsets and not archived_filter_blocked and not adsets_nesting_blocked:
         attempts.append(
             ("full+archived", {"fields": full_fields, "limit": "500", **archived_filter})
         )
-    if include_archived:
+    if include_archived and not archived_filter_blocked:
         attempts.append(
             (
                 "no-adsets+archived",
                 {"fields": base_no_adsets, "limit": "500", **archived_filter},
             )
         )
-    if include_adsets:
+    if include_adsets and not adsets_nesting_blocked:
         attempts.append(("full", {"fields": full_fields, "limit": "500"}))
     attempts.append(("no-adsets", {"fields": base_no_adsets, "limit": "500"}))
     # Last-ditch: just id/name/status. Sufficient for the dashboard
@@ -4935,6 +4971,10 @@ async def _fetch_campaigns_metadata(
 
     last_error: Optional[HTTPException] = None
     for tier, params in attempts:
+        if "archived" in tier and _campaigns_capability_blocked(account_id, "archived_filter"):
+            continue
+        if tier in {"full+archived", "full"} and _campaigns_capability_blocked(account_id, "adsets_nesting"):
+            continue
         try:
             camps = await fb_get_paginated(
                 f"{account_id}/campaigns", params, ttl=_CAMPAIGNS_META_TTL_SECONDS
@@ -4955,6 +4995,11 @@ async def _fetch_campaigns_metadata(
             last_error = e
             if _is_rate_limit_exception(e):
                 raise
+            if _fb_detail_has_code(e.detail, 100):
+                if "archived" in tier:
+                    _remember_campaigns_unsupported(account_id, "archived_filter", e.detail)
+                if tier == "full":
+                    _remember_campaigns_unsupported(account_id, "adsets_nesting", e.detail)
             continue
     if last_error is not None:
         raise last_error
