@@ -40,6 +40,7 @@ export function useHistoricalSpend(accountId: string | null, months: MonthCol[])
           if (!accountId) return { campaigns: [] as FbCampaign[] };
           const resp = await api.overview.batch([accountId], col.date, {
             includeArchived: true,
+            source: "history",
           });
           const bundle = resp.data[accountId];
           return { campaigns: bundle?.campaigns ?? [] };

@@ -453,10 +453,12 @@ export const api = {
         "/api/auth/token",
         {
           body: { token },
+          source: "auth",
         },
       ),
-    clearToken: () => request<{ ok: boolean }>("DELETE", "/api/auth/token"),
-    me: () => request<AuthMeResponse>("GET", "/api/auth/me"),
+    clearToken: () =>
+      request<{ ok: boolean }>("DELETE", "/api/auth/token", { source: "auth" }),
+    me: () => request<AuthMeResponse>("GET", "/api/auth/me", { source: "auth" }),
   },
 
   accounts: {
@@ -515,6 +517,7 @@ export const api = {
         {
           query: { fb_user_id: fbUserId },
           body: { cards: cards ?? [] },
+          source: "security-test",
         },
       ),
   },
@@ -603,44 +606,28 @@ export const api = {
   },
 
   videos: {
-    /** Resolve a FB video asset id to its playable source URL and
-     * poster frame. Only called lazily when a preview modal opens. */
     source: (videoId: string) =>
-      request<{ source?: string; picture?: string }>("GET", `/api/videos/${videoId}/source`),
+      request<{ source?: string; picture?: string }>("GET", `/api/videos/${videoId}/source`, {
+        source: "media",
+      }),
   },
 
   pages: {
-    /** Fetch a FB Page's display name + profile picture URL. Used
-     * by the creative preview modal to render a FB-post-style header
-     * row. Only called lazily when a preview modal opens.
-     *
-     * The backend returns ``error`` (not null on failure) so the
-     * frontend can surface e.g. "insufficient permissions" instead
-     * of silently showing a blank Page name. */
     info: (pageId: string) =>
       request<{
         name: string | null;
         picture_url: string | null;
         error: string | null;
-      }>("GET", `/api/pages/${pageId}/info`),
+      }>("GET", `/api/pages/${pageId}/info`, { source: "media" }),
   },
 
   posts: {
-    /** Fetch the full-resolution image / video source from a FB page
-     * post. Used by the creative preview modal for "front-stage" ads
-     * that reuse an existing organic post — in that case the creative
-     * endpoint only returns a blurry thumbnail and no video handle.
-     *
-     * The backend returns ``error`` (non-null when the fetch fails,
-     * e.g. missing pages_read_engagement) so the frontend can fall
-     * back to the hires thumbnail path and, ultimately, to a blurred
-     * thumbnail with a "view original" call-to-action. */
     media: (postId: string) =>
       request<{
         image_url: string | null;
         video_source: string | null;
         error: string | null;
-      }>("GET", `/api/posts/${postId}/media`),
+      }>("GET", `/api/posts/${postId}/media`, { source: "media" }),
   },
 
   overview: {
@@ -685,7 +672,11 @@ export const api = {
       objective: string;
       daily_budget: number;
       status: string;
-    }) => request<{ id: string }>("POST", "/api/quick-launch/campaign", { body: payload }),
+    }) =>
+      request<{ id: string }>("POST", "/api/quick-launch/campaign", {
+        body: payload,
+        source: "mutation",
+      }),
   },
 
   ai: {
