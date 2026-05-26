@@ -126,17 +126,17 @@ export function BucuHeaderChip() {
 
   const tone =
     peak >= 90
-      ? "bg-red-100 text-red-700 ring-red-200 animate-pulse"
+      ? "bg-red-100 text-red-700 animate-pulse"
       : peak >= 70
-        ? "bg-orange-bg text-orange ring-orange-border"
+        ? "bg-orange-bg text-orange"
         : peak >= 50
-          ? "bg-amber-50 text-amber-700 ring-amber-200"
-          : "bg-bg text-gray-500 ring-border";
+          ? "bg-amber-50 text-amber-700"
+          : "bg-bg text-gray-500";
 
   return (
     <span
       className={cn(
-        "inline-flex select-none items-center gap-1 rounded-full px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wider ring-1 ring-inset",
+        "inline-flex select-none items-center gap-1 rounded-full px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wider",
         tone,
       )}
       title={`FB BUCU 當下峰值。任一帳戶任一 metric(呼叫次數 / CPU / 處理時間)取最大值。背景任務 ≥ 80% 自動暫停。`}
