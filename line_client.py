@@ -617,7 +617,6 @@ def build_security_alert_flex(
             campaign name (bold, large)
             row of status pill + anomaly pills
             KPI rows: 帳戶 / 建立時間 / 已花費 / 編號
-            optional CTA button: 立即查看
 
     Matches list shape (mirrors what `_format_security_push_text`
     consumed): each dict has `campaign` (FB-shape dict with id, name,
@@ -730,28 +729,6 @@ def build_security_alert_flex(
             body_contents.append(_sec_kpi_row("已花費", spend_val))
         body_contents.append(_sec_kpi_row("編號", cid))
 
-        footer = None
-        if view_url:
-            footer = {
-                "type": "box",
-                "layout": "vertical",
-                "spacing": "sm",
-                "paddingAll": "12px",
-                "contents": [
-                    {
-                        "type": "button",
-                        "style": "primary",
-                        "height": "sm",
-                        "color": "#FF6B2C",
-                        "action": {
-                            "type": "uri",
-                            "label": "立即查看",
-                            "uri": view_url,
-                        },
-                    }
-                ],
-            }
-
         bubble = {
             "type": "bubble",
             "size": "mega",
@@ -770,8 +747,6 @@ def build_security_alert_flex(
                 "contents": body_contents,
             },
         }
-        if footer:
-            bubble["footer"] = footer
         bubbles.append(bubble)
 
     if len(bubbles) == 1:
