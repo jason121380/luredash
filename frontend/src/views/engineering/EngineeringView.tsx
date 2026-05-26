@@ -79,7 +79,7 @@ function EngineeringPanels() {
 
   return (
     <div className="grid gap-4 md:grid-cols-[240px_minmax(0,1fr)]">
-      <aside className="md:sticky md:top-0 md:self-start">
+      <aside className="md:sticky md:top-0 md:self-start md:border-r md:border-border md:pr-4">
         <div
           className="flex gap-1 overflow-x-auto rounded-lg bg-bg p-1 md:flex-col md:gap-2 md:overflow-visible md:bg-transparent md:p-0"
           role="tablist"
