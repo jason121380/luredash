@@ -6654,6 +6654,12 @@ _SHARE_DATE_PRESET = {
 PUBLIC_SITE_URL = os.getenv("PUBLIC_SITE_URL", "").rstrip("/")
 
 
+def _security_view_url() -> Optional[str]:
+    if not PUBLIC_SITE_URL:
+        return None
+    return f"{PUBLIC_SITE_URL}/security"
+
+
 def _share_url_for_config(
     account_id: str,
     campaign_id: str,
@@ -8993,7 +8999,11 @@ async def test_security_push_config(
 
     # Build flex card carousel (one bubble per campaign) — same shape
     # the scheduler ships, so the test preview matches a real push.
-    flex = line_client.build_security_alert_flex(matches, tz_name=str(_scheduler_tz()))
+    flex = line_client.build_security_alert_flex(
+        matches,
+        tz_name=str(_scheduler_tz()),
+        view_url=_security_view_url(),
+    )
 
     # Mark test pushes in the altText so recipients can tell sample
     # from production. (Body text already says 「Meta後台系統警示」.)
@@ -10089,7 +10099,11 @@ async def _security_push_run_one(cfg: dict) -> dict:
         # Flex card carousel — one bubble per campaign. Matches the
         # shape the test endpoint sends so the production push looks
         # identical to what the user saw in the test preview.
-        flex = line_client.build_security_alert_flex(matches, tz_name=str(_scheduler_tz()))
+        flex = line_client.build_security_alert_flex(
+            matches,
+            tz_name=str(_scheduler_tz()),
+            view_url=_security_view_url(),
+        )
         for gid in cfg.get("group_ids") or []:
             try:
                 await line_client.line_push(
