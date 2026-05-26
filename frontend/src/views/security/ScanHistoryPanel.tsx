@@ -1,4 +1,6 @@
 import { api } from "@/api/client";
+import { useSecurityPushConfigs } from "@/api/hooks/useSecurityPush";
+import { useSharedSettings } from "@/api/hooks/useSettings";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { cn } from "@/lib/cn";
 import { useQuery } from "@tanstack/react-query";
@@ -74,11 +76,31 @@ function formatExact(iso: string): string {
   });
 }
 
+function formatNextPushTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
 export function ScanHistoryPanel() {
   const { user } = useFbAuth();
   const uid = user?.id ?? "";
   const [filter, setFilter] = useState<"all" | "auto" | "manual">("all");
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => readHiddenRecordIds(uid));
+  const sharedQuery = useSharedSettings();
+  const masterEnabled = sharedQuery.data?.security_push_master_enabled === true;
+  const configsQuery = useSecurityPushConfigs();
+  const nextPushAt = useMemo(() => {
+    if (!masterEnabled) return null;
+    const times = (configsQuery.data ?? [])
+      .filter((cfg) => cfg.enabled && cfg.next_run_at)
+      .map((cfg) => new Date(cfg.next_run_at as string).getTime())
+      .filter((ts) => Number.isFinite(ts));
+    if (times.length === 0) return null;
+    return new Date(Math.min(...times)).toISOString();
+  }, [configsQuery.data, masterEnabled]);
 
   useEffect(() => {
     setHiddenIds(readHiddenRecordIds(uid));
@@ -131,7 +153,14 @@ export function ScanHistoryPanel() {
       <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-3">
         <div className="min-w-0">
           <h2 className="text-[14px] font-bold text-ink">掃描紀錄</h2>
-          <p className="mt-0.5 text-[11px] text-gray-400">跨裝置同步 · 最近 20 筆</p>
+          <p className="mt-0.5 text-[11px] text-gray-400">
+            跨裝置同步 · 最近 20 筆
+            {nextPushAt ? (
+              <>
+                {" · "}下次推播 {formatNextPushTime(nextPushAt)}
+              </>
+            ) : null}
+          </p>
         </div>
         <button
           type="button"
