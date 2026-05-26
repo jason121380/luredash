@@ -522,7 +522,7 @@ interface AgentAdviceCardProps {
 
 function AgentAdviceCard({ agent, state, isLoading }: AgentAdviceCardProps) {
   return (
-    <section className="flex min-w-0 flex-col rounded-lg border border-border bg-white p-4 md:p-5">
+    <section className="flex min-w-0 flex-col">
       <header className="mb-3 flex items-start">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-[15px] font-bold text-ink">{agent.name_zh}</h2>
