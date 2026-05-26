@@ -46,7 +46,6 @@ export function Topbar({ title, titleAction, children, className }: TopbarProps)
         // on the right with overflow-x-auto if they're too wide.
         "sticky top-0 z-[50] flex min-h-[64px] shrink-0 items-center gap-2 border-b border-border bg-white px-3 py-2",
         "md:min-h-[60px] md:gap-3 md:px-6 md:py-0",
-        "shadow-[0_1px_0_var(--border)]",
         className,
       )}
     >
