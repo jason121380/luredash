@@ -155,20 +155,20 @@ function BlocksShuffleLoader() {
         </linearGradient>
       </defs>
       <style>{`
-        .loading-block {
+        .box5631 {
           transform-origin: 50% 50%;
           fill: url(#loading-orange-gradient);
         }
-        .loading-block:nth-of-type(1) { animation: loadingBlock1 4s infinite; }
-        .loading-block:nth-of-type(2) { animation: loadingBlock2 4s infinite; }
-        .loading-block:nth-of-type(3) { animation: loadingBlock3 4s infinite; }
-        .loading-block:nth-of-type(4) { animation: loadingBlock4 4s infinite; }
-        .loading-block:nth-of-type(5) { animation: loadingBlock5 4s infinite; }
-        .loading-block:nth-of-type(6) { animation: loadingBlock6 4s infinite; }
-        .loading-block:nth-of-type(7) { animation: loadingBlock7 4s infinite; }
-        .loading-block:nth-of-type(8) { animation: loadingBlock8 4s infinite; }
-        .loading-block:nth-of-type(9) { animation: loadingBlock9 4s infinite; }
-        @keyframes loadingBlock1 {
+        .box5631:nth-of-type(1) { animation: moveBox5631-1 4s infinite; }
+        .box5631:nth-of-type(2) { animation: moveBox5631-2 4s infinite; }
+        .box5631:nth-of-type(3) { animation: moveBox5631-3 4s infinite; }
+        .box5631:nth-of-type(4) { animation: moveBox5631-4 4s infinite; }
+        .box5631:nth-of-type(5) { animation: moveBox5631-5 4s infinite; }
+        .box5631:nth-of-type(6) { animation: moveBox5631-6 4s infinite; }
+        .box5631:nth-of-type(7) { animation: moveBox5631-7 4s infinite; }
+        .box5631:nth-of-type(8) { animation: moveBox5631-8 4s infinite; }
+        .box5631:nth-of-type(9) { animation: moveBox5631-9 4s infinite; }
+        @keyframes moveBox5631-1 {
           9.0909% { transform: translate(-12px, 0); }
           18.1818%, 27.2727% { transform: translate(0, 0); }
           36.3636% { transform: translate(12px, 0); }
@@ -178,7 +178,7 @@ function BlocksShuffleLoader() {
           90.9091% { transform: translate(-12px, 0); }
           100% { transform: translate(0, 0); }
         }
-        @keyframes loadingBlock2 {
+        @keyframes moveBox5631-2 {
           9.0909% { transform: translate(0, 0); }
           18.1818% { transform: translate(12px, 0); }
           27.2727% { transform: translate(0, 0); }
@@ -187,7 +187,7 @@ function BlocksShuffleLoader() {
           81.8182%, 90.9091% { transform: translate(0, 12px); }
           100% { transform: translate(0, 0); }
         }
-        @keyframes loadingBlock3 {
+        @keyframes moveBox5631-3 {
           9.0909%, 18.1818% { transform: translate(-12px, 0); }
           27.2727% { transform: translate(0, 0); }
           36.3636%, 45.4545%, 54.5455%, 63.6364%, 72.7273% { transform: translate(-12px, 0); }
@@ -195,7 +195,7 @@ function BlocksShuffleLoader() {
           90.9091% { transform: translate(0, -12px); }
           100% { transform: translate(0, 0); }
         }
-        @keyframes loadingBlock4 {
+        @keyframes moveBox5631-4 {
           9.0909%, 18.1818% { transform: translate(-12px, 0); }
           27.2727% { transform: translate(-12px, -12px); }
           36.3636% { transform: translate(0, -12px); }
@@ -205,14 +205,14 @@ function BlocksShuffleLoader() {
           90.9091% { transform: translate(-12px, 0); }
           100% { transform: translate(0, 0); }
         }
-        @keyframes loadingBlock5 {
+        @keyframes moveBox5631-5 {
           9.0909%, 18.1818%, 27.2727% { transform: translate(0, 0); }
           36.3636%, 45.4545%, 54.5455%, 63.6364%, 72.7273% { transform: translate(12px, 0); }
           81.8182% { transform: translate(12px, -12px); }
           90.9091% { transform: translate(0, -12px); }
           100% { transform: translate(0, 0); }
         }
-        @keyframes loadingBlock6 {
+        @keyframes moveBox5631-6 {
           9.0909% { transform: translate(0, 0); }
           18.1818%, 27.2727% { transform: translate(-12px, 0); }
           36.3636%, 45.4545%, 54.5455%, 63.6364% { transform: translate(0, 0); }
@@ -221,7 +221,7 @@ function BlocksShuffleLoader() {
           90.9091% { transform: translate(-12px, 0); }
           100% { transform: translate(0, 0); }
         }
-        @keyframes loadingBlock7 {
+        @keyframes moveBox5631-7 {
           9.0909%, 18.1818%, 27.2727% { transform: translate(12px, 0); }
           36.3636% { transform: translate(0, 0); }
           45.4545% { transform: translate(0, -12px); }
@@ -231,7 +231,7 @@ function BlocksShuffleLoader() {
           90.9091% { transform: translate(12px, 0); }
           100% { transform: translate(0, 0); }
         }
-        @keyframes loadingBlock8 {
+        @keyframes moveBox5631-8 {
           9.0909% { transform: translate(0, 0); }
           18.1818% { transform: translate(-12px, 0); }
           27.2727% { transform: translate(-12px, -12px); }
@@ -240,7 +240,7 @@ function BlocksShuffleLoader() {
           90.9091% { transform: translate(12px, 0); }
           100% { transform: translate(0, 0); }
         }
-        @keyframes loadingBlock9 {
+        @keyframes moveBox5631-9 {
           9.0909%, 18.1818% { transform: translate(-12px, 0); }
           27.2727% { transform: translate(0, 0); }
           36.3636% { transform: translate(-12px, 0); }
@@ -251,15 +251,15 @@ function BlocksShuffleLoader() {
           100% { transform: translate(0, 0); }
         }
       `}</style>
-      <circle className="loading-block" cx="13" cy="1" r="5" />
-      <circle className="loading-block" cx="13" cy="1" r="5" />
-      <circle className="loading-block" cx="25" cy="25" r="5" />
-      <circle className="loading-block" cx="13" cy="13" r="5" />
-      <circle className="loading-block" cx="13" cy="13" r="5" />
-      <circle className="loading-block" cx="25" cy="13" r="5" />
-      <circle className="loading-block" cx="1" cy="25" r="5" />
-      <circle className="loading-block" cx="13" cy="25" r="5" />
-      <circle className="loading-block" cx="25" cy="25" r="5" />
+      <circle className="box5631" cx="13" cy="1" r="5" />
+      <circle className="box5631" cx="13" cy="1" r="5" />
+      <circle className="box5631" cx="25" cy="25" r="5" />
+      <circle className="box5631" cx="13" cy="13" r="5" />
+      <circle className="box5631" cx="13" cy="13" r="5" />
+      <circle className="box5631" cx="25" cy="13" r="5" />
+      <circle className="box5631" cx="1" cy="25" r="5" />
+      <circle className="box5631" cx="13" cy="25" r="5" />
+      <circle className="box5631" cx="25" cy="25" r="5" />
     </svg>
   );
 }
