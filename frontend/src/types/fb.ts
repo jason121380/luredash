@@ -41,6 +41,8 @@ export interface FbBaseEntity {
   id: string;
   name: string;
   status: FbEntityStatus;
+  effective_status?: FbEntityStatus;
+  configured_status?: FbEntityStatus;
   insights?: FbInsightsEnvelope;
 }
 

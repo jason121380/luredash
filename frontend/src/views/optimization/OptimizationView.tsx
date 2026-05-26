@@ -678,15 +678,16 @@ function buildDigests(
   for (const c of campaigns) {
     const ins = getIns(c);
     const spend = Number(ins.spend) || 0;
-    const isActive = c.status === "ACTIVE";
-    const isPausedWithSpend = c.status === "PAUSED" && spend > 0;
+    const status = normalizeCampaignStatus(c);
+    const isActive = status === "ACTIVE";
+    const isPausedWithSpend = status === "PAUSED" && spend > 0;
     if (!isActive && !isPausedWithSpend) continue;
     const msgs = getMsgCount(c);
     out.push({
       name: c.name,
       account_name: c._accountId ? (acctName.get(c._accountId) ?? c._accountName ?? "") : "",
       objective: c.objective ?? undefined,
-      status: c.status,
+      status,
       spend,
       impressions: Number(ins.impressions) || 0,
       clicks: Number(ins.clicks) || 0,
@@ -698,6 +699,10 @@ function buildDigests(
     });
   }
   return out;
+}
+
+function normalizeCampaignStatus(c: FbCampaign): string {
+  return String(c.status || c.effective_status || c.configured_status || "").toUpperCase();
 }
 
 /** Compact relative-time formatter — "剛剛" / "X 分鐘前" / "X 小時

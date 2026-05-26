@@ -10480,6 +10480,16 @@ class RunAgentsRequest(BaseModel):
     campaigns: List[CampaignDigest]
 
 
+def _format_campaign_status_for_prompt(status: Optional[str]) -> str:
+    normalized = (status or "").strip().upper()
+    return {
+        "ACTIVE": "進行中",
+        "PAUSED": "已暫停",
+        "ARCHIVED": "已封存",
+        "DELETED": "已刪除",
+    }.get(normalized, normalized or "未回傳")
+
+
 def _format_campaigns_for_prompt(campaigns: List[CampaignDigest]) -> str:
     """Render the campaigns as a markdown grouped by account so the
     agent can structure per-account analysis. Sort accounts by total
@@ -10522,7 +10532,7 @@ def _format_campaigns_for_prompt(campaigns: List[CampaignDigest]) -> str:
         ]
         for c in shown_rows:
             table_lines.append(
-                f"| {c.name} | {c.status or '-'} | {c.objective or '-'} "
+                f"| {c.name} | {_format_campaign_status_for_prompt(c.status)} | {c.objective or '-'} "
                 f"| ${c.spend:,.0f} | {c.ctr:.2f}% | ${c.cpc:.2f} "
                 f"| {c.frequency:.2f} | {c.msgs} "
                 f"| {f'${c.msg_cost:.0f}' if c.msgs > 0 else '-'} |"
