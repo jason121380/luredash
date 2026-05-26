@@ -155,6 +155,18 @@ export function DashboardView() {
             className="bg-transparent px-0 py-0"
           />
           <TopbarSeparator />
+          <label className="hidden cursor-pointer items-center gap-1.5 whitespace-nowrap text-[13px] text-gray-500 md:flex">
+            <input
+              type="checkbox"
+              className="custom-cb"
+              checked={activeOnly}
+              onChange={(e) => setActiveOnly(e.currentTarget.checked)}
+            />
+            只顯示有花費
+          </label>
+          <span className="hidden md:inline">
+            <TopbarSeparator />
+          </span>
           <button
             type="button"
             onClick={toggleStatsCollapsed}
@@ -190,18 +202,6 @@ export function DashboardView() {
               )}
             </svg>
           </button>
-          <span className="hidden md:inline">
-            <TopbarSeparator />
-          </span>
-          <label className="hidden cursor-pointer items-center gap-1.5 whitespace-nowrap text-[13px] text-gray-500 md:flex">
-            <input
-              type="checkbox"
-              className="custom-cb"
-              checked={activeOnly}
-              onChange={(e) => setActiveOnly(e.currentTarget.checked)}
-            />
-            只顯示有花費
-          </label>
           <span className="hidden md:inline">
             <TopbarSeparator />
           </span>
