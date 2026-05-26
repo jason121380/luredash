@@ -386,7 +386,6 @@ function FbUsagePanel() {
   return (
     <Card
       title="FB API 節流狀態"
-      subtitle="X-Business-Use-Case-Usage 即時快照,每 10 秒更新。每一列是 FB 個別追蹤 rate limit 的對象(通常是廣告帳戶,少數情況是 Business Manager)。冷卻時間由 Facebook 估算,僅供參考。"
       collapsible
       defaultOpen={false}
       action={
@@ -414,11 +413,6 @@ function FbUsagePanel() {
         />
         <div className="flex-1">
           <div className="font-semibold text-ink">在 header 顯示 BUCU%</div>
-          <div className="mt-0.5 text-[11px] text-gray-500">
-            打開後,每個頁面的 Topbar 右側會顯示即時 peak BUCU(每 15s
-            更新)。配色:&lt;50% 灰 / 50-69% 琥珀 / 70-89% 橘 / ≥90%
-            紅閃。預設關。
-          </div>
         </div>
       </label>
       {usageQuery.isLoading ? (
@@ -986,91 +980,6 @@ function FbCallsPanel() {
             )}
           </div>
 
-          {/* Top paths + Top accounts */}
-          <div className="mt-3 grid gap-3 md:grid-cols-2">
-            <div>
-              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
-                5 分鐘熱門路徑
-              </h3>
-              {data.top_paths_5m.length === 0 ? (
-                <div className="text-[12px] text-gray-400">尚無資料</div>
-              ) : (
-                <ul className="flex flex-col gap-0.5 text-[12px]">
-                  {data.top_paths_5m.slice(0, 10).map((p) => {
-                    const m = p.path.match(/^(act_\d+)/);
-                    const nm = m ? nameFor(m[1]) : null;
-                    return (
-                      <li
-                        key={p.path}
-                        className="flex items-center justify-between gap-2 rounded border border-border bg-bg px-2 py-1"
-                      >
-                        <span className="min-w-0 flex-1 truncate" title={p.path}>
-                          {nm ? <span className="mr-1 text-ink">{nm}</span> : null}
-                          <span
-                            className={cn(
-                              "font-mono",
-                              nm ? "text-[10px] text-gray-400" : "text-ink",
-                            )}
-                          >
-                            {p.path}
-                          </span>
-                        </span>
-                        <span className="flex shrink-0 items-center gap-1.5">
-                          {formatSourceBadge(p.top_source)}
-                          <span
-                            className="font-mono text-gray-500"
-                            title={`總數 ${p.count} · cache ${p.cache_hits}`}
-                          >
-                            {p.live}
-                          </span>
-                          {p.errors > 0 ? (
-                            <span className="rounded bg-red-100 px-1 font-mono text-[10px] text-red-700">
-                              err {p.errors}
-                            </span>
-                          ) : null}
-                        </span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </div>
-            <div>
-              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
-                5 分鐘熱門帳戶
-              </h3>
-              {data.top_accounts_5m.length === 0 ? (
-                <div className="text-[12px] text-gray-400">尚無資料</div>
-              ) : (
-                <ul className="flex flex-col gap-0.5 text-[12px]">
-                  {data.top_accounts_5m.slice(0, 10).map((a) => {
-                    const nm = nameFor(a.account_id);
-                    return (
-                      <li
-                        key={a.account_id}
-                        className="flex items-center justify-between gap-2 rounded border border-border bg-bg px-2 py-1"
-                      >
-                        <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
-                          {nm ? (
-                            <span className="truncate text-ink">{nm}</span>
-                          ) : (
-                            <span className="truncate font-mono text-ink">{a.account_id}</span>
-                          )}
-                          {nm ? (
-                            <span className="shrink-0 font-mono text-[10px] text-gray-400">
-                              {a.account_id}
-                            </span>
-                          ) : null}
-                        </span>
-                        <span className="shrink-0 font-mono text-gray-500">{a.count}</span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </div>
-          </div>
-
           {/* Recent throttle events */}
           {data.throttle_events.length > 0 && (
             <div className="mt-3">
@@ -1121,14 +1030,6 @@ function FbCallsPanel() {
                 只看真實 FB 呼叫(隱藏 cache)
               </label>
             </div>
-            <p className="mb-2 text-[11px] leading-relaxed text-gray-500">
-              <b className="text-emerald-700">快取</b> = 從本機快取回答,沒打 FB,不算 BUCU。
-              <b className="ml-2 text-gray-700">成功</b> = 真的呼叫 FB 成功。
-              <b className="ml-2 text-amber-700">參數錯 / 節流 / 逾時</b> = 真的呼叫但 FB 拒絕或太慢。
-              <b className="ml-2 text-red-700">已擋</b> = 該帳戶在冷卻中,系統主動擋下。
-              「來源」欄分辨是背景任務還是你剛剛點了什麼。同一帳戶連續看到 3 筆「快取」
-              通常是 cache 預熱每 60s 刷一次熱門帳戶,免費的別緊張。
-            </p>
             {recent.length === 0 ? (
               <div className="text-[12px] text-gray-400">尚無呼叫紀錄</div>
             ) : (
