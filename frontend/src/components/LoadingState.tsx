@@ -121,7 +121,9 @@ export function LoadingState({
       <div className="text-[16px] font-bold text-ink">{title}</div>
       {effectiveSubtitle && <div className="text-[12px] text-gray-500">{effectiveSubtitle}</div>}
       <div className="flex flex-col items-center gap-2.5">
-        <BlocksShuffleLoader />
+        <div className="flex h-[42px] w-[42px] items-center justify-center">
+          <BlocksShuffleLoader />
+        </div>
         <div className="text-[13px] font-semibold tabular-nums text-orange">{pct}%</div>
         <progress value={pct} max={100} className="sr-only" aria-label="載入進度">
           {pct}%
@@ -144,7 +146,7 @@ function BlocksShuffleLoader() {
       viewBox="-13 -13 45 45"
       role="img"
       aria-label="載入中"
-      className="overflow-visible"
+      className="overflow-visible -translate-x-[3px]"
     >
       <title>載入中</title>
       <defs>
