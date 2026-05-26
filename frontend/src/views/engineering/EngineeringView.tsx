@@ -78,7 +78,7 @@ function EngineeringPanels() {
   const activeMeta = ENGINEERING_TABS.find((t) => t.id === activeTab) ?? ENGINEERING_TABS[0];
 
   return (
-    <div className="grid gap-4 md:grid-cols-[240px_minmax(0,1fr)]">
+    <div className="grid gap-4 md:h-[calc(100dvh-140px)] md:min-h-0 md:grid-cols-[240px_minmax(0,1fr)]">
       <aside className="md:sticky md:top-0 md:self-start">
         <div
           className="flex gap-1 overflow-x-auto rounded-lg bg-bg p-1 md:flex-col md:gap-2 md:overflow-visible md:bg-transparent md:p-0"
@@ -124,7 +124,11 @@ function EngineeringPanels() {
         </div>
       </aside>
 
-      <div role="tabpanel" aria-label={activeMeta?.label ?? "工程模式"} className="min-w-0">
+      <div
+        role="tabpanel"
+        aria-label={activeMeta?.label ?? "工程模式"}
+        className="min-w-0 md:min-h-0 md:overflow-y-auto md:pr-2"
+      >
         {activeTab === "dashboard" ? (
           <FbCallsPanel />
         ) : activeTab === "ad-account" ? (
@@ -150,7 +154,7 @@ export function EngineeringModal({
       onOpenChange={onOpenChange}
       title="工程模式"
       width={1100}
-      className="max-h-[92dvh] md:max-h-[calc(100vh-48px)]"
+      className="max-h-[92dvh] md:h-[calc(100dvh-48px)] md:max-h-[calc(100dvh-48px)] md:overflow-hidden"
     >
       <EngineeringPanels />
     </Modal>
