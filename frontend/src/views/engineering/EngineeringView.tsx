@@ -50,21 +50,25 @@ type EngineeringTab = "dashboard" | "ad-account" | "other";
 const ENGINEERING_TABS: Array<{
   id: EngineeringTab;
   label: string;
+  mobileLabel: string;
   subtitle: string;
 }> = [
   {
     id: "dashboard",
     label: "FB Rate Limit Dashboard",
+    mobileLabel: "Dashboard",
     subtitle: "原 FB Rate Limit 戰情室",
   },
   {
     id: "ad-account",
     label: "FB Rate Limit by Ad Account",
+    mobileLabel: "By Account",
     subtitle: "FB API 節流狀態",
   },
   {
     id: "other",
     label: "Other",
+    mobileLabel: "Other",
     subtitle: "其他診斷",
   },
 ];
@@ -77,7 +81,7 @@ function EngineeringPanels() {
     <div className="grid gap-4 md:grid-cols-[240px_minmax(0,1fr)]">
       <aside className="md:sticky md:top-0 md:self-start">
         <div
-          className="flex gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0"
+          className="flex gap-1 overflow-x-auto rounded-lg bg-bg p-1 md:flex-col md:gap-2 md:overflow-visible md:bg-transparent md:p-0"
           role="tablist"
           aria-label="工程模式分類"
         >
@@ -91,18 +95,24 @@ function EngineeringPanels() {
                 aria-selected={selected}
                 onClick={() => setActiveTab(tab.id)}
                 className={cn(
-                  "min-w-[210px] select-none rounded-lg px-2.5 py-2 text-left transition-[all] duration-150 active:scale-[0.98] md:min-w-0",
+                  "min-w-[104px] flex-1 select-none rounded-md px-2 py-2 text-center transition-[all] duration-150 active:scale-[0.98] md:min-w-0 md:flex-none md:rounded-lg md:px-2.5 md:text-left",
                   selected
                     ? "bg-orange-bg text-orange"
                     : "text-gray-500 hover:bg-orange-bg hover:text-orange",
                 )}
               >
-                <div className={cn("text-[13px] leading-tight", selected ? "font-semibold" : "font-medium")}>
-                  {tab.label}
+                <div
+                  className={cn(
+                    "text-[12px] leading-tight md:text-[13px]",
+                    selected ? "font-semibold" : "font-medium",
+                  )}
+                >
+                  <span className="md:hidden">{tab.mobileLabel}</span>
+                  <span className="hidden md:inline">{tab.label}</span>
                 </div>
                 <div
                   className={cn(
-                    "mt-1 text-[10px] leading-tight",
+                    "mt-1 hidden text-[10px] leading-tight md:block",
                     selected ? "text-orange/70" : "text-gray-400",
                   )}
                 >
@@ -135,7 +145,13 @@ export function EngineeringModal({
   onOpenChange: (open: boolean) => void;
 }) {
   return (
-    <Modal open={open} onOpenChange={onOpenChange} title="工程模式" width={1100}>
+    <Modal
+      open={open}
+      onOpenChange={onOpenChange}
+      title="工程模式"
+      width={1100}
+      className="max-h-[92dvh] md:max-h-[calc(100vh-48px)]"
+    >
       <EngineeringPanels />
     </Modal>
   );
