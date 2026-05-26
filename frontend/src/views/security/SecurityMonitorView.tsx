@@ -32,7 +32,7 @@ import {
 type SecurityTab = "pending" | "safe";
 
 const topbarActionBase =
-  "inline-flex h-9 select-none items-center justify-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 text-[13px] font-medium font-sans leading-none transition-all duration-150 cursor-pointer active:scale-95";
+  "inline-flex h-10 shrink-0 select-none items-center justify-center gap-2 whitespace-nowrap rounded-xl border-[1.5px] px-3.5 text-[13px] font-medium font-sans leading-none transition-all duration-150 cursor-pointer active:scale-95 md:h-9";
 const topbarSecondaryAction = cn(
   topbarActionBase,
   "border-border bg-white text-ink hover:border-orange-border hover:bg-orange-bg",
@@ -437,7 +437,7 @@ export function SecurityMonitorView() {
   return (
     <>
       <Topbar title="安全防護">
-        <div className="flex items-center gap-2 md:gap-3">
+        <div className="flex min-w-0 items-center gap-2 overflow-x-auto md:gap-3 md:overflow-visible">
           {/* 安全監控限定到「上個月」為止 — 立即掃描 fetch 固定
               last_90d,選 last_90d 或更久的自訂區間會看不到資料。
               拿掉 custom 日曆,只留 6 個 preset。 */}
