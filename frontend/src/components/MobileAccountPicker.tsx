@@ -83,7 +83,7 @@ export function MobileAccountPicker({
     // mr-auto on mobile pushes this picker to the LEFT of the topbar,
     // leaving the DatePicker and other controls right-aligned. Reset
     // on desktop so the normal `justify-end` flow still works.
-    <div className={cn("mr-auto flex shrink-0 items-center gap-2 md:hidden", className)}>
+    <div className={cn("mr-auto flex shrink-0 items-center gap-2 md:!hidden", className)}>
       <span className="hidden whitespace-nowrap text-[11px] font-bold uppercase tracking-[0.5px] text-gray-300 sm:inline">
         {label}
       </span>
