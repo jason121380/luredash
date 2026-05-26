@@ -1,3 +1,4 @@
+import { ProgressBar } from "@/components/ProgressBar";
 import { cn } from "@/lib/cn";
 import { type ReactNode, useEffect, useState } from "react";
 
@@ -141,14 +142,9 @@ export function LoadingState({
       <progress value={pct} max={100} className="sr-only" aria-label="載入進度">
         {pct}%
       </progress>
-      <div className="flex w-[220px] flex-col items-center gap-1.5" aria-hidden="true">
+      <div className="flex w-[240px] flex-col items-center gap-1.5" aria-hidden="true">
         <div className="text-[11px] font-semibold tabular-nums text-orange">{pct}%</div>
-        <div className="h-1 w-full overflow-hidden rounded-full bg-border">
-          <div
-            className="h-full bg-orange transition-[width] duration-300 ease-out"
-            style={{ width: `${pct}%` }}
-          />
-        </div>
+        <ProgressBar value={pct} size="md" ariaLabel="載入進度" />
       </div>
       {hint && (
         <div className="mt-1 max-w-[280px] text-center text-[11px] leading-relaxed text-gray-300">
