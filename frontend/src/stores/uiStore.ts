@@ -35,10 +35,6 @@ export interface UiState {
   finSelectedAcctIds: string[];
   finSort: TreeSort;
 
-  // Store expenses view: list of selected account ids (empty = all).
-  // Persisted to localStorage so the picker survives reloads.
-  storeSelectedAcctIds: string[];
-
   /** Whether the desktop account sidebar (dashboard / alerts /
    * finance) is collapsed. Shared across all 3 views so toggling on
    * one view applies everywhere — keeps the layout consistent. */
@@ -73,8 +69,6 @@ export interface UiState {
   setFinSelectedAcctIds: (ids: string[]) => void;
   setFinSort: (key: string | null, dir?: SortDir) => void;
 
-  setStoreSelectedAcctIds: (ids: string[]) => void;
-
   toggleAcctSidebar: () => void;
   setAcctSidebarCollapsed: (v: boolean) => void;
 
@@ -96,7 +90,6 @@ const initial = {
   alertSelectedAcctId: null as string | null,
   finSelectedAcctIds: [] as string[],
   finSort: { key: null, dir: "desc" as SortDir },
-  storeSelectedAcctIds: [] as string[],
   acctSidebarCollapsed: false,
   statsCollapsed: false,
   extraTreeCols: [] as string[],
@@ -139,7 +132,6 @@ export const useUiStore = create<UiState>((set) => ({
 
   setFinSelectedAcctIds: (ids) => set({ finSelectedAcctIds: ids }),
 
-  setStoreSelectedAcctIds: (ids) => set({ storeSelectedAcctIds: ids }),
   setFinSort: (key, dir) =>
     set((state) => ({
       finSort: {
@@ -163,7 +155,6 @@ export const useUiStore = create<UiState>((set) => ({
 
 const K_SIDEBAR_COLLAPSED = "ui_acct_sidebar_collapsed";
 const K_STATS_COLLAPSED = "ui_stats_collapsed";
-const K_STORE_SELECTED = "store_selected_accounts";
 const K_EXTRA_TREE_COLS = "ui_extra_tree_cols";
 
 /** Hydrate the persisted UI bits (sidebar / stats collapse) from
@@ -175,13 +166,6 @@ export function hydrateUiFromStorage(): void {
     }
     if (localStorage.getItem(K_STATS_COLLAPSED) === "true") {
       useUiStore.setState({ statsCollapsed: true });
-    }
-    const raw = localStorage.getItem(K_STORE_SELECTED);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.every((v) => typeof v === "string")) {
-        useUiStore.setState({ storeSelectedAcctIds: parsed });
-      }
     }
     const rawExtra = localStorage.getItem(K_EXTRA_TREE_COLS);
     if (rawExtra) {
@@ -208,13 +192,6 @@ export function installUiStorageSync(): () => void {
     if (state.statsCollapsed !== prev.statsCollapsed) {
       try {
         localStorage.setItem(K_STATS_COLLAPSED, String(state.statsCollapsed));
-      } catch {
-        /* quota */
-      }
-    }
-    if (state.storeSelectedAcctIds !== prev.storeSelectedAcctIds) {
-      try {
-        localStorage.setItem(K_STORE_SELECTED, JSON.stringify(state.storeSelectedAcctIds));
       } catch {
         /* quota */
       }

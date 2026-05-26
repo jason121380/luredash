@@ -14,9 +14,7 @@ import { useAccountsStore } from "@/stores/accountsStore";
 import { useFiltersStore } from "@/stores/filtersStore";
 import { useFinanceStore } from "@/stores/financeStore";
 import { useUiStore } from "@/stores/uiStore";
-import type { FbAccount } from "@/types/fb";
-import * as Popover from "@radix-ui/react-popover";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   type DesignerBreakdown,
   type StoreSortKey,
@@ -57,20 +55,6 @@ export function StoreExpensesView() {
   const setDate = useFiltersStore((s) => s.setDate);
   const settingsReady = useUiStore((s) => s.settingsReady);
 
-  // Per-page account picker. `storeSelectedAcctIds` is persisted to
-  // localStorage so the user's narrowed-down selection survives reloads.
-  // Empty array = "全部帳戶" (default after first visit).
-  const storeSelectedAcctIds = useUiStore((s) => s.storeSelectedAcctIds);
-  const setStoreSelectedAcctIds = useUiStore((s) => s.setStoreSelectedAcctIds);
-  const effectiveAccounts = useMemo(() => {
-    if (storeSelectedAcctIds.length === 0) return visible;
-    const sel = new Set(storeSelectedAcctIds);
-    const filtered = visible.filter((a) => sel.has(a.id));
-    // If selection got stale (account no longer visible), fall back
-    // to all visible so the page isn't accidentally empty.
-    return filtered.length > 0 ? filtered : visible;
-  }, [visible, storeSelectedAcctIds]);
-
   const rowMarkups = useFinanceStore((s) => s.rowMarkups);
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
 
@@ -83,7 +67,7 @@ export function StoreExpensesView() {
 
   // include_archived: true so historical spend rolls up correctly,
   // matching the Finance view's behaviour.
-  const overview = useMultiAccountOverview(effectiveAccounts, date, {
+  const overview = useMultiAccountOverview(visible, date, {
     includeArchived: true,
     source: "store-expenses",
   });
@@ -147,11 +131,6 @@ export function StoreExpensesView() {
     <>
       <Topbar title="店家花費">
         <div className="flex items-center gap-2 md:gap-3">
-          <AccountMultiPicker
-            accounts={visible}
-            selectedIds={storeSelectedAcctIds}
-            onChange={setStoreSelectedAcctIds}
-          />
           <Button
             variant="ghost"
             size="sm"
@@ -311,139 +290,6 @@ function DesignerCell({ designers }: { designers: DesignerBreakdown[] }) {
         </span>
       ))}
     </div>
-  );
-}
-
-/**
- * Compact multi-select for ad accounts. Trigger button shows
- * "全部帳戶" when nothing is selected, "X 個帳戶" otherwise. Popover
- * has a search input and a checkbox-per-row list with 全選 / 清除
- * shortcuts. Persisted across reloads via the parent's `onChange`
- * (uiStore → localStorage).
- */
-function AccountMultiPicker({
-  accounts,
-  selectedIds,
-  onChange,
-}: {
-  accounts: FbAccount[];
-  selectedIds: string[];
-  onChange: (ids: string[]) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const searchRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    setQuery("");
-    const t = window.setTimeout(() => searchRef.current?.focus(), 50);
-    return () => window.clearTimeout(t);
-  }, [open]);
-
-  const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return accounts;
-    return accounts.filter(
-      (a) =>
-        a.name.toLowerCase().includes(q) ||
-        a.id.toLowerCase().includes(q),
-    );
-  }, [accounts, query]);
-
-  const toggle = (id: string) => {
-    if (selected.has(id)) {
-      onChange(selectedIds.filter((x) => x !== id));
-    } else {
-      onChange([...selectedIds, id]);
-    }
-  };
-
-  const triggerLabel =
-    selectedIds.length === 0
-      ? "全部帳戶"
-      : selectedIds.length === 1
-        ? (accounts.find((a) => a.id === selectedIds[0])?.name ?? `${selectedIds.length} 個帳戶`)
-        : `${selectedIds.length} 個帳戶`;
-
-  return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          className="flex h-10 items-center gap-1 rounded-lg border-[1.5px] border-border bg-white px-3 text-[13px] leading-none outline-none hover:border-orange focus:border-orange md:h-[30px] md:px-2.5"
-        >
-          <span className="inline-flex max-w-[140px] items-center truncate">{triggerLabel}</span>
-          <span className="text-gray-300">▾</span>
-        </button>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          align="end"
-          sideOffset={4}
-          className="z-[1100] w-[280px] rounded-xl border border-border bg-white p-2 shadow-md"
-        >
-          <input
-            ref={searchRef}
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.currentTarget.value)}
-            placeholder="搜尋帳號名稱或 ID"
-            className="mb-2 h-9 w-full rounded-lg border border-border px-2.5 text-[13px] outline-none focus:border-orange"
-          />
-          <div className="mb-1.5 flex items-center justify-between px-1 text-[11px]">
-            <span className="text-gray-300">
-              {selectedIds.length === 0 ? "全部" : `已選 ${selectedIds.length}`} / {accounts.length}
-            </span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => onChange(accounts.map((a) => a.id))}
-                className="font-semibold text-orange hover:underline"
-              >
-                全選
-              </button>
-              <button
-                type="button"
-                onClick={() => onChange([])}
-                className="text-gray-500 hover:text-orange"
-              >
-                清除
-              </button>
-            </div>
-          </div>
-          <div
-            className="max-h-[320px] overflow-y-auto overscroll-contain"
-            style={{ touchAction: "pan-y", WebkitOverflowScrolling: "touch" }}
-          >
-            {filtered.length === 0 ? (
-              <div className="px-2 py-3 text-center text-[12px] text-gray-300">無符合的項目</div>
-            ) : (
-              filtered.map((a) => {
-                const isOn = selected.has(a.id);
-                return (
-                  <button
-                    key={a.id}
-                    type="button"
-                    onClick={() => toggle(a.id)}
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left",
-                      isOn ? "bg-orange-bg" : "hover:bg-bg",
-                    )}
-                  >
-                    <input type="checkbox" className="custom-cb pointer-events-none" checked={isOn} readOnly />
-                    <span className={cn("min-w-0 flex-1 truncate text-[13px]", isOn && "text-orange font-semibold")}>
-                      {a.name}
-                    </span>
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
   );
 }
 
