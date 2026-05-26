@@ -139,8 +139,8 @@ export function LoadingState({
 function BlocksShuffleLoader() {
   return (
     <svg
-      width="76"
-      height="76"
+      width="38"
+      height="38"
       viewBox="-13 -13 45 45"
       role="img"
       aria-label="載入中"
