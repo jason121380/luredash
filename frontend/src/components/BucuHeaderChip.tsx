@@ -136,12 +136,12 @@ export function BucuHeaderChip() {
   return (
     <span
       className={cn(
-        "inline-flex h-7 select-none items-center gap-1 whitespace-nowrap rounded-full border px-2.5 text-[11px] font-semibold",
+        "inline-flex select-none items-center gap-1 whitespace-nowrap rounded-full border px-1.5 py-[1px] text-[9px] font-bold uppercase leading-none tracking-wider",
         tone,
       )}
       title={`FB BUCU 當下峰值。任一帳戶任一 metric(呼叫次數 / CPU / 處理時間)取最大值。背景任務 ≥ 80% 自動暫停。`}
     >
-      <span className="text-[10px] uppercase tracking-wider opacity-70">BUCU</span>
+      <span className="opacity-70">BUCU</span>
       <span className="font-mono tabular-nums">{peak}%</span>
     </span>
   );
