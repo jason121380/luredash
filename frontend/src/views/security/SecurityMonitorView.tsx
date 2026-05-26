@@ -1,4 +1,5 @@
-import type { SecurityPushTestCard } from "@/api/client";
+import { api, type SecurityPushTestCard } from "@/api/client";
+import { useFbAuth } from "@/auth/FbAuthProvider";
 import { queryClient } from "@/lib/queryClient";
 import { ScanHistoryModal, appendScanHistory } from "./ScanHistoryModal";
 import { useAccounts } from "@/api/hooks/useAccounts";
@@ -53,6 +54,7 @@ export function SecurityMonitorView() {
   const accountsQuery = useAccounts();
   const allAccounts = accountsQuery.data ?? [];
   const visibleAll = useAccountsStore((s) => s.visibleAccounts)(allAccounts);
+  const { user } = useFbAuth();
 
   const settingsReady = useUiStore((s) => s.settingsReady);
 
@@ -211,17 +213,69 @@ export function SecurityMonitorView() {
   // 偵測「scanning → done」transition 確保每個 scan 只記一次.
   useEffect(() => {
     if (wasScanning.current && !isScanning && scanStartAt !== null) {
+      const durationMs = Date.now() - scanStartAt;
       appendScanHistory({
         ts: Date.now(),
-        durationMs: Date.now() - scanStartAt,
+        durationMs,
         totalCampaigns: overview.campaigns.length,
         pendingCount,
         hasError: Object.keys(overview.errors).length > 0,
       });
+      // 也送一份到 backend security_scan_records,讓 team-wide 有
+      // browseable scan history (auto + manual 兩條路徑共表)。
+      // 只送目前「待查看」tab 看得到的(過濾掉已標記安全的),這
+      // 是 user 實際關心的 anomaly 清單。
+      const uid = user?.id ?? "";
+      if (uid) {
+        const matches = visibleAll.length
+          ? allDays.flatMap((day) =>
+              day.rows
+                .filter((r) => !safeIds.has(r.campaign.id))
+                .map((r) => ({
+                  campaign_id: r.campaign.id,
+                  name: r.campaign.name ?? null,
+                  objective: r.campaign.objective ?? null,
+                  status: r.campaign.status ?? null,
+                  created_time: r.campaign.created_time ?? null,
+                  daily_budget: effectiveDailyBudget(r.campaign),
+                  lifetime_budget: r.campaign.lifetime_budget
+                    ? Number(r.campaign.lifetime_budget)
+                    : null,
+                  account_id: r.campaign._accountId ?? null,
+                  account_name: r.campaign._accountName ?? null,
+                  anomalies: r.anomalies ?? [],
+                  // creator name 沒有 eager prefetch 了(BUCU 優化),
+                  // 卡片展開時才會拉。記錄時填 null,future query 可
+                  // 由 activity log join 補上。
+                  creator: null,
+                })),
+            )
+          : [];
+        void api.securityScan
+          .postRecord(uid, {
+            account_ids: visibleAll.map((a) => a.id),
+            duration_ms: durationMs,
+            matches,
+          })
+          .catch((e) => {
+            // Non-fatal — local history (localStorage) still has it
+            console.warn("[security-scan] post record failed:", e);
+          });
+      }
       setScanStartAt(null);
     }
     wasScanning.current = isScanning;
-  }, [isScanning, scanStartAt, overview.campaigns.length, overview.errors, pendingCount]);
+  }, [
+    isScanning,
+    scanStartAt,
+    overview.campaigns.length,
+    overview.errors,
+    pendingCount,
+    user?.id,
+    visibleAll,
+    allDays,
+    safeIds,
+  ]);
 
   // Filter days by tab. We drop a day group entirely when none of its
   // rows match — avoids showing empty headers.

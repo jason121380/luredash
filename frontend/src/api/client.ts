@@ -522,6 +522,41 @@ export const api = {
       ),
   },
 
+  securityScan: {
+    /** Persist a 立即掃描 result snapshot to security_scan_records.
+     * Fire-and-forget after the scan completes; UI already rendered
+     * so a DB hiccup doesn't break the user experience. */
+    postRecord: (
+      fbUserId: string,
+      payload: {
+        account_ids: string[];
+        duration_ms: number;
+        matches: Array<{
+          campaign_id: string;
+          name?: string | null;
+          objective?: string | null;
+          status?: string | null;
+          created_time?: string | null;
+          daily_budget?: number | null;
+          lifetime_budget?: number | null;
+          account_id?: string | null;
+          account_name?: string | null;
+          anomalies?: string[];
+          creator?: string | null;
+        }>;
+      },
+    ) =>
+      request<{ ok: boolean; matches_count?: number; reason?: string }>(
+        "POST",
+        "/api/security-scan/records",
+        {
+          query: { fb_user_id: fbUserId },
+          body: payload,
+          source: "security-scan-record",
+        },
+      ),
+  },
+
   campaigns: {
     get: (campaignId: string, date: DateConfig) =>
       request<{ data: FbCampaign }>("GET", `/api/campaigns/${campaignId}`, {
