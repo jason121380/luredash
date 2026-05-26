@@ -11,10 +11,9 @@ import { Fragment } from "react";
  *   `inline code`
  *   blank line → paragraph break
  *
- * Special: any `## 優先` (or 「Action」 / 「Priority」 / 「待辦」)
- * heading + the blocks following it (until the next h2) are rendered
- * as an orange callout card so the operator's eye lands on the
- * "do this today" list immediately.
+ * Special: every `## 帳戶名稱` section is rendered as an account
+ * card. The backend now asks Gemini to group to-dos by ad account
+ * and then by severity, so the UI should make that hierarchy obvious.
  *
  * No GFM tables, no images, no HTML — agent advice is short prose
  * + bullets and we trust the LLM to stay in this lane via the
@@ -108,24 +107,8 @@ function parseBlocks(src: string): Block[] {
   return blocks;
 }
 
-/** True when an h2 looks like the agent's "do this today" section.
- *  Both the system prompt and English / Chinese variants are matched
- *  defensively in case Gemini deviates from the requested wording. */
-function isActionPlanHeading(text: string): boolean {
-  const norm = text.replace(/[\s:：]/g, "").toLowerCase();
-  return (
-    norm.includes("優先") ||
-    norm.includes("priority") ||
-    norm.includes("actionplan") ||
-    norm.includes("action") ||
-    norm.includes("待辦") ||
-    norm.includes("todo")
-  );
-}
-
-/** Walk the block list and group any action-plan h2 with all
- *  blocks following it (until the next h2) into an orange callout
- *  wrapper. Everything else renders inline. */
+/** Walk the block list and group every h2 with the blocks following
+ *  it (until the next h2) into a compact account card. */
 function renderGrouped(blocks: Block[]): React.ReactNode[] {
   const out: React.ReactNode[] = [];
   let i = 0;
@@ -135,7 +118,7 @@ function renderGrouped(blocks: Block[]): React.ReactNode[] {
       i++;
       continue;
     }
-    if (b.type === "h2" && isActionPlanHeading(b.text)) {
+    if (b.type === "h2") {
       const group: Block[] = [b];
       i++;
       while (i < blocks.length) {
@@ -147,15 +130,12 @@ function renderGrouped(blocks: Block[]): React.ReactNode[] {
       }
       out.push(
         <div
-          key={`callout-${i}`}
-          className="mt-1 min-w-0 overflow-visible rounded-xl border-l-4 border-orange bg-[#FFF5F0] p-3 shadow-sm"
+          key={`account-${i}`}
+          className="min-w-0 overflow-visible rounded-xl border border-border bg-white p-3 shadow-sm"
         >
-          <div className="mb-1 flex items-center gap-1.5 text-[12px] font-bold uppercase tracking-wide text-orange">
-            <span>優先</span>
-          </div>
           <div className="flex flex-col gap-1.5">
             {group.map((g, j) => (
-              <BlockNode key={j} block={g} inCallout />
+              <BlockNode key={j} block={g} inAccountCard />
             ))}
           </div>
         </div>,
@@ -168,16 +148,26 @@ function renderGrouped(blocks: Block[]): React.ReactNode[] {
   return out;
 }
 
-function BlockNode({ block, inCallout = false }: { block: Block; inCallout?: boolean }) {
+function BlockNode({ block, inAccountCard = false }: { block: Block; inAccountCard?: boolean }) {
   if (block.type === "h2") {
-    // Hide the literal "優先" text inside the callout — the pinned
-    // label above already does the job.
-    if (inCallout) return null;
-    return <h2 className="mt-1 text-[14px] font-bold text-ink">{renderInline(block.text)}</h2>;
+    return (
+      <h2
+        className={
+          inAccountCard
+            ? "text-[15px] font-bold text-ink"
+            : "mt-1 text-[14px] font-bold text-ink"
+        }
+      >
+        {renderInline(block.text)}
+      </h2>
+    );
   }
   if (block.type === "h3") {
+    const severityClass = getSeverityClass(block.text);
     return (
-      <h3 className="mt-1 text-[13px] font-semibold text-ink/90">
+      <h3
+        className={`mt-1 w-fit rounded-pill px-2 py-0.5 text-[12px] font-bold ${severityClass}`}
+      >
         {renderInline(block.text)}
       </h3>
     );
@@ -186,7 +176,7 @@ function BlockNode({ block, inCallout = false }: { block: Block; inCallout?: boo
     return (
       <ul
         className={
-          inCallout
+          inAccountCard
             ? "m-0 flex min-w-0 list-disc flex-col gap-1 pl-5 text-ink marker:text-orange"
             : "m-0 flex min-w-0 list-disc flex-col gap-1 pl-5"
         }
@@ -203,7 +193,7 @@ function BlockNode({ block, inCallout = false }: { block: Block; inCallout?: boo
     return (
       <ol
         className={
-          inCallout
+          inAccountCard
             ? "m-0 flex min-w-0 list-decimal flex-col gap-1 pl-5 font-medium text-ink marker:font-bold marker:text-orange"
             : "m-0 flex min-w-0 list-decimal flex-col gap-1 pl-5"
         }
@@ -220,6 +210,20 @@ function BlockNode({ block, inCallout = false }: { block: Block; inCallout?: boo
     return <p className="m-0 min-w-0 break-words [overflow-wrap:anywhere]">{renderInline(block.text)}</p>;
   }
   return null;
+}
+
+function getSeverityClass(text: string): string {
+  const norm = text.trim();
+  if (norm.includes("嚴重") || norm.includes("高")) {
+    return "bg-red-50 text-red-600";
+  }
+  if (norm.includes("中")) {
+    return "bg-orange-50 text-orange";
+  }
+  if (norm.includes("低")) {
+    return "bg-gray-100 text-gray-500";
+  }
+  return "bg-bg text-gray-600";
 }
 
 /** Inline parsing: **bold** and `code`. Keep it simple — agents

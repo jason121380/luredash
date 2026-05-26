@@ -27,10 +27,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "./Markdown";
 
 /** localStorage key + payload contract for "last successful run".
- *  Bumped to 2 → wipe on schema change so old corrupt entries
+ *  Bumped to 3 → wipe on schema change so old global-priority output
  *  don't show up as half-rendered cards. */
 const LAST_RUN_STORAGE_KEY = "ai-staff-last-run";
-const LAST_RUN_VERSION = 2;
+const LAST_RUN_VERSION = 3;
 interface StoredLastRun {
   version: number;
   generatedAt: string;
@@ -472,7 +472,7 @@ function ActionBar({
           >
             {accountsCount} 個帳戶{filterActive ? " (已篩選)" : ""}
           </button>{" "}
-          下的 {campaignsCount} 個進行中活動,直接輸出優先 / 次要 / 一般 action。
+          下的 {campaignsCount} 個進行中活動,依帳戶輸出嚴重程度分級 to-do。
           {!blockedByTier && (
             <span className="ml-1 text-gray-400">每次點擊扣 1 次配額。</span>
           )}
@@ -542,7 +542,7 @@ function AgentAdviceCard({ agent, state, isLoading }: AgentAdviceCardProps) {
           <div className="flex h-[220px] items-center justify-center">
             <div className="flex flex-col items-center gap-2 text-[12px] text-gray-400">
               <Spinner size={20} />
-              <span>正在整理 action...</span>
+              <span>正在整理各帳戶 to-do...</span>
             </div>
           </div>
         ) : state == null ? (
