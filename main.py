@@ -801,6 +801,25 @@ async def lifespan(app: FastAPI):
                     ON security_scan_records (config_id, scanned_at DESC)
                     """
                 )
+                # `auth_verify_cache`: PG mirror of the in-memory
+                # `_AUTH_VERIFY_CACHE` so a Zeabur redeploy doesn't
+                # flush every tab's verified token, forcing them all
+                # to re-hit FB `/me` simultaneously (which triggers
+                # code 4 "Application request limit reached").
+                #
+                # Key is SHA-256 prefix of the FB access token — token
+                # itself is never stored.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS auth_verify_cache (
+                        token_hash TEXT PRIMARY KEY,
+                        uid TEXT NOT NULL,
+                        name TEXT,
+                        picture_url TEXT,
+                        verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
                 # ── Per-user FB tokens (Phase A — multi-tenant) ───
                 # Each FB user's long-lived token is persisted here so a
                 # server restart doesn't blow away every user's session.
@@ -2606,12 +2625,86 @@ def _check_agent_rate_limit(uid: str) -> None:
 # re-exchange) skip the FB round-trip for 5 minutes — main culprit for
 # rate-limit incidents on the auth endpoint. Token itself is NEVER
 # cached as plaintext: we key by SHA-256 prefix.
+#
+# The in-memory dict is mirrored to `auth_verify_cache` in PG so a
+# Zeabur redeploy doesn't blow away the cache and force every tab to
+# re-hit FB's `/me` (which hits the user-level Graph API rate limit,
+# code 4). PG entries live longer than the in-memory TTL — 24h —
+# because the cost of「old name/picture from 12h ago」is much smaller
+# than「FB code 4 because all my tabs reloaded after redeploy」.
 _AUTH_VERIFY_CACHE: dict[str, tuple[float, dict]] = {}
 _AUTH_VERIFY_TTL_SECONDS = 5 * 60
+_AUTH_VERIFY_PG_TTL_SECONDS = 24 * 60 * 60
 
 
 def _auth_cache_key(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+async def _auth_verify_pg_lookup(token_hash: str) -> Optional[dict]:
+    """Read PG-backed verify cache. Returns the cached `/me` payload
+    or None on miss / stale / no DB."""
+    if _db_pool is None:
+        return None
+    try:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT uid, name, picture_url, verified_at
+                FROM auth_verify_cache
+                WHERE token_hash = $1
+                """,
+                token_hash,
+            )
+    except Exception:
+        return None
+    if row is None:
+        return None
+    verified_at = row["verified_at"]
+    if verified_at is None:
+        return None
+    age = (datetime.now(timezone.utc) - verified_at).total_seconds()
+    if age > _AUTH_VERIFY_PG_TTL_SECONDS:
+        return None
+    return {
+        "id": row["uid"],
+        "name": row["name"],
+        "picture": {"data": {"url": row["picture_url"] or ""}},
+    }
+
+
+async def _auth_verify_pg_store(token_hash: str, me: dict) -> None:
+    """Mirror a successful `/me` verify into PG. Best-effort — a
+    failure here just means the next redeploy will need to re-hit FB."""
+    if _db_pool is None:
+        return
+    try:
+        uid = str(me.get("id") or "")
+        name = str(me.get("name") or "")
+        pic_url = ""
+        try:
+            pic_url = str(((me.get("picture") or {}).get("data") or {}).get("url") or "")
+        except Exception:
+            pass
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO auth_verify_cache
+                    (token_hash, uid, name, picture_url, verified_at)
+                VALUES ($1, $2, $3, $4, NOW())
+                ON CONFLICT (token_hash) DO UPDATE
+                SET uid = EXCLUDED.uid,
+                    name = EXCLUDED.name,
+                    picture_url = EXCLUDED.picture_url,
+                    verified_at = NOW()
+                """,
+                token_hash,
+                uid,
+                name,
+                pic_url,
+            )
+    except Exception as exc:
+        print(f"[auth] verify PG cache store failed: {exc}", flush=True)
 
 
 @app.post("/api/auth/token")
@@ -2626,25 +2719,36 @@ async def set_token(payload: TokenPayload):
     # client just minted a brand-new token via FB.login. Direct httpx
     # call with payload.token sidesteps the cache entirely.
 
-    # First check the 5-min /me cache so a flood of page reloads with
-    # the same token doesn't burn FB rate-limit budget.
+    # Two-tier verify cache so a flood of page reloads / multi-tab
+    # post-redeploy stampede doesn't burn FB's `/me` rate limit:
+    #   1. In-memory `_AUTH_VERIFY_CACHE` (5min) — fastest, same-process
+    #   2. PG `auth_verify_cache` (24h) — survives Zeabur redeploys,
+    #      cross-process for future multi-worker setups
+    # On PG hit, write back into the in-memory cache so subsequent
+    # requests in this process don't even need the DB roundtrip.
     cache_key = _auth_cache_key(payload.token)
     cached = _AUTH_VERIFY_CACHE.get(cache_key)
-    if cached:
-        ts, me_cached = cached
-        if time.time() - ts < _AUTH_VERIFY_TTL_SECONDS:
-            uid = str(me_cached.get("id") or "")
-            _runtime_token = payload.token
-            if uid:
-                _user_token_cache[uid] = payload.token
-                _KNOWN_FB_USERS.add(uid)
-            return {
-                "ok": True,
-                "name": me_cached.get("name"),
-                "id": me_cached.get("id"),
-                "pictureUrl": me_cached.get("picture", {}).get("data", {}).get("url"),
-                "cached": True,
-            }
+    me_cached: Optional[dict] = None
+    if cached and time.time() - cached[0] < _AUTH_VERIFY_TTL_SECONDS:
+        me_cached = cached[1]
+    if me_cached is None:
+        pg_hit = await _auth_verify_pg_lookup(cache_key)
+        if pg_hit is not None:
+            me_cached = pg_hit
+            _AUTH_VERIFY_CACHE[cache_key] = (time.time(), pg_hit)
+    if me_cached is not None:
+        uid = str(me_cached.get("id") or "")
+        _runtime_token = payload.token
+        if uid:
+            _user_token_cache[uid] = payload.token
+            _KNOWN_FB_USERS.add(uid)
+        return {
+            "ok": True,
+            "name": me_cached.get("name"),
+            "id": me_cached.get("id"),
+            "pictureUrl": me_cached.get("picture", {}).get("data", {}).get("url"),
+            "cached": True,
+        }
 
     if _http_client is None:
         raise HTTPException(status_code=503, detail="伺服器尚未初始化,請稍後再試")
@@ -2705,9 +2809,12 @@ async def set_token(payload: TokenPayload):
             await _persist_user_token(uid, payload.token)
             _KNOWN_FB_USERS.add(uid)
             await _persist_known_user(uid)
-        # Cache the verified /me response so subsequent re-exchanges
-        # with the same token skip FB entirely.
+        # Cache the verified /me response in both layers so subsequent
+        # re-exchanges with the same token skip FB entirely. PG mirror
+        # is best-effort — a DB hiccup must not surface as a login
+        # failure.
         _AUTH_VERIFY_CACHE[cache_key] = (time.time(), me)
+        await _auth_verify_pg_store(cache_key, me)
         return {"ok": True, "name": me.get("name"), "id": me.get("id"), "pictureUrl": pic}
     except HTTPException:
         raise

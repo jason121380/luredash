@@ -228,38 +228,97 @@ export function setApiUserId(id: string | null): void {
   _apiFbUserId = id && id.trim() ? id.trim() : null;
 }
 
-function refreshBackendToken(): Promise<void> {
-  if (refreshPromise) return refreshPromise;
-  refreshPromise = new Promise<void>((resolve, reject) => {
-    const FB = (
-      window as unknown as {
-        FB?: {
-          getLoginStatus: (
-            cb: (r: { status: string; authResponse?: { accessToken: string } }) => void,
-          ) => void;
-        };
+// Cross-tab refresh lock. Without this, every open tab independently
+// fires POST /api/auth/token on the SAME mass 401 event(typically a
+// Zeabur redeploy that wiped backend `_runtime_token`); N tabs × one
+// /me verify each from the SAME FB token can trip FB's user-level
+// rate limit (code 4, "Application request limit reached"). The
+// lock holds a localStorage key for up to 8s; tabs that see the
+// lock just wait for it to clear instead of firing their own POST.
+const REFRESH_LOCK_KEY = "auth_refresh_lock";
+const REFRESH_LOCK_MAX_MS = 8000;
+
+async function waitForOtherTabRefresh(): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < REFRESH_LOCK_MAX_MS) {
+    try {
+      const raw = localStorage.getItem(REFRESH_LOCK_KEY);
+      if (!raw) return;
+      const lockedAt = Number(raw);
+      // Stale lock(設置者 tab 已關但沒清)— grab it ourselves.
+      if (!Number.isFinite(lockedAt) || Date.now() - lockedAt > REFRESH_LOCK_MAX_MS) {
+        return;
       }
-    ).FB;
-    if (!FB) {
-      reject(new Error("FB SDK not loaded"));
+    } catch {
       return;
     }
-    FB.getLoginStatus((resp) => {
-      const accessToken = resp.authResponse?.accessToken;
-      if (resp.status === "connected" && accessToken) {
-        request<{ ok: boolean }>("POST", "/api/auth/token", {
-          body: { token: accessToken },
-          skipAuthRefresh: true,
-        })
-          .then(() => resolve())
-          .catch(reject);
-      } else {
-        reject(new Error("FB session not connected"));
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
+function refreshBackendToken(): Promise<void> {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = (async () => {
+    // If another tab is already refreshing, just wait for it. After
+    // it finishes, our next user-facing request will retry with the
+    // updated token / runtime cache.
+    let acquired = false;
+    try {
+      const existing = localStorage.getItem(REFRESH_LOCK_KEY);
+      if (existing) {
+        await waitForOtherTabRefresh();
+        return;
       }
-    });
-  });
-  // Clear the shared promise after it settles so subsequent 401s
-  // can trigger another refresh if needed.
+      localStorage.setItem(REFRESH_LOCK_KEY, String(Date.now()));
+      acquired = true;
+      window.dispatchEvent(new StorageEvent("storage", { key: REFRESH_LOCK_KEY }));
+    } catch {
+      // localStorage unavailable(private mode etc) — fall through to
+      // local-only refresh, no cross-tab dedup possible.
+    }
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const FB = (
+          window as unknown as {
+            FB?: {
+              getLoginStatus: (
+                cb: (r: {
+                  status: string;
+                  authResponse?: { accessToken: string };
+                }) => void,
+              ) => void;
+            };
+          }
+        ).FB;
+        if (!FB) {
+          reject(new Error("FB SDK not loaded"));
+          return;
+        }
+        FB.getLoginStatus((resp) => {
+          const accessToken = resp.authResponse?.accessToken;
+          if (resp.status === "connected" && accessToken) {
+            request<{ ok: boolean }>("POST", "/api/auth/token", {
+              body: { token: accessToken },
+              skipAuthRefresh: true,
+            })
+              .then(() => resolve())
+              .catch(reject);
+          } else {
+            reject(new Error("FB session not connected"));
+          }
+        });
+      });
+    } finally {
+      if (acquired) {
+        try {
+          localStorage.removeItem(REFRESH_LOCK_KEY);
+          window.dispatchEvent(new StorageEvent("storage", { key: REFRESH_LOCK_KEY }));
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  })();
   refreshPromise.finally(() => {
     refreshPromise = null;
   });
