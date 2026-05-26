@@ -128,14 +128,6 @@ function buildDaysFromScanRecord(matches: ScanRecordMatch[]): SecurityDay[] {
   return days;
 }
 
-function formatRelativeScanTime(d: Date): string {
-  const sec = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (sec < 60) return "剛剛";
-  if (sec < 3600) return `${Math.floor(sec / 60)} 分鐘前`;
-  if (sec < 86400) return `${Math.floor(sec / 3600)} 小時前`;
-  return d.toLocaleDateString("zh-TW");
-}
-
 /**
  * 安全監控 — surfaces newly-created campaigns grouped by day so the
  * operator can scan for unusual creations (deep-night / weekend /
@@ -455,11 +447,6 @@ export function SecurityMonitorView() {
             allowedPresets={["today", "yesterday", "last_7d", "last_30d", "this_month", "last_month"]}
           />
           <TopbarSeparator />
-          {lastScanAt && (
-            <span className="hidden whitespace-nowrap text-[11px] text-gray-400 md:inline">
-              上次掃描:{formatRelativeScanTime(lastScanAt)}
-            </span>
-          )}
           <button
             type="button"
             onClick={() => {
