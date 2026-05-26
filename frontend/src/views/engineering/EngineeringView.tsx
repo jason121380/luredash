@@ -651,6 +651,7 @@ function FbCallsPanel() {
       analytics: { label: "數據分析", cls: "bg-emerald-50 text-emerald-700" },
       history: { label: "歷史花費", cls: "bg-emerald-50 text-emerald-700" },
       preload: { label: "登入預載", cls: "bg-cyan-50 text-cyan-700" },
+      auth: { label: "登入驗證", cls: "bg-cyan-50 text-cyan-700" },
       "store-expenses": { label: "店家花費", cls: "bg-emerald-50 text-emerald-700" },
       "ai-staff": { label: "AI 幕僚", cls: "bg-emerald-50 text-emerald-700" },
       view: { label: "瀏覽畫面", cls: "bg-gray-100 text-gray-700" },
