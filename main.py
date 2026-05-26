@@ -1391,6 +1391,26 @@ _fb_cache_locks: dict[str, asyncio.Lock] = {}
 # the user before they hit 100% or show how long to wait after a
 # rate-limit error.
 _fb_usage: dict[str, dict[str, Any]] = {}
+_BUCU_USAGE_STALE_SECONDS = _env_int("BUCU_USAGE_STALE_SECONDS", 15 * 60)
+_BUCU_LIVE_GATE_PCT = _env_int("FB_LIVE_BUCU_GATE_PCT", 95)
+
+
+def _fresh_bucu_entries() -> list[dict[str, Any]]:
+    """Return recent BUCU snapshots and drop stale rows.
+
+    If we stop all FB calls to let BUCU decay, FB will not send new
+    headers. Without aging, the last high snapshot would keep the app in
+    self-throttle forever.
+    """
+    now = time.time()
+    fresh: list[dict[str, Any]] = []
+    for key, usage in list(_fb_usage.items()):
+        observed = float(usage.get("observed_at") or 0)
+        if observed <= 0 or now - observed > _BUCU_USAGE_STALE_SECONDS:
+            _fb_usage.pop(key, None)
+            continue
+        fresh.append(usage)
+    return fresh
 
 
 def _parse_bucu_header(raw: Optional[str]) -> None:
@@ -1449,10 +1469,11 @@ def _peak_regain_minutes() -> int:
     errors so the UI can say "try again in N minutes" instead of a
     generic "rate limited" message.
     """
-    if not _fb_usage:
+    entries = _fresh_bucu_entries()
+    if not entries:
         return 0
     return max(
-        int(u.get("estimated_time_to_regain_access", 0) or 0) for u in _fb_usage.values()
+        int(u.get("estimated_time_to_regain_access", 0) or 0) for u in entries
     )
 
 
@@ -1462,10 +1483,11 @@ def _peak_bucu_pct() -> int:
     headroom AT THE TIME the call was made, instead of the panel only
     being able to show the current snapshot.
     """
-    if not _fb_usage:
+    entries = _fresh_bucu_entries()
+    if not entries:
         return 0
     peak = 0
-    for u in _fb_usage.values():
+    for u in entries:
         for k in ("call_count", "total_cputime", "total_time"):
             try:
                 peak = max(peak, int(u.get(k, 0) or 0))
@@ -1474,13 +1496,36 @@ def _peak_bucu_pct() -> int:
     return peak
 
 
-# Self-imposed BUCU ceiling for ALL background tasks (warm loop +
-# scheduler + security push). When any account / BM crosses this
-# threshold on any metric, we pause background work so we don't keep
-# pushing the same account higher until FB explicitly throttles.
-# User-facing requests are NOT gated here — they still go through
-# (with per-request retry + per-account throttle deadline doing
-# defense-in-depth).
+def _bucu_snapshot_expires_in() -> int:
+    entries = _fresh_bucu_entries()
+    if not entries:
+        return 0
+    newest = max(float(u.get("observed_at") or 0) for u in entries)
+    return max(0, int(_BUCU_USAGE_STALE_SECONDS - (time.time() - newest)))
+
+
+def _live_bucu_gate_reason() -> Optional[str]:
+    """Reason to block live FB calls, or None when live traffic is OK."""
+    regain = _peak_regain_minutes()
+    if regain > 0:
+        return f"FB BUCU regain={regain}min"
+    peak = _peak_bucu_pct()
+    if peak >= _BUCU_LIVE_GATE_PCT:
+        return f"self-throttle: BUCU peak {peak}% ≥ {_BUCU_LIVE_GATE_PCT}%"
+    return None
+
+
+def _live_bucu_gate_wait_seconds() -> int:
+    regain = _peak_regain_minutes()
+    if regain > 0:
+        return max(60, regain * 60)
+    return max(60, _bucu_snapshot_expires_in())
+
+
+# Self-imposed BUCU ceiling for background tasks (warm loop + scheduler
+# + security push). User-facing live calls use the stricter
+# _BUCU_LIVE_GATE_PCT above: cache hits still work, but cache misses
+# fail fast while BUCU is in the danger zone.
 _BUCU_BACKGROUND_GATE_PCT = 80
 
 
@@ -1888,6 +1933,27 @@ async def _fb_request(
             ),
         )
 
+    live_gate_reason = _live_bucu_gate_reason()
+    if live_gate_reason:
+        wait = _live_bucu_gate_wait_seconds()
+        _log_fb_call(
+            path=path,
+            account_id=_extract_account_id_from_path(path),
+            method=method,
+            ms=0,
+            status=429,
+            cache_hit=False,
+            error_code=4,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"FB BUCU 保護模式啟動({live_gate_reason}),約 {wait} 秒後可重試。"
+                f"期間只允許既有快取,不再送出新的 FB Graph API 呼叫 "
+                f"[code=4 self_bucu_gate=1 retry_after_seconds={wait}]"
+            ),
+        )
+
     # Per-account throttle short-circuit. When we've seen 80000-80014
     # for this account, refuse to issue ANY new call for `cooldown_s`
     # — continuing to hit FB just extends the lockout. Returns a 429
@@ -2223,6 +2289,27 @@ async def fb_get_paginated(
             detail=(
                 f"FB Graph API 全域節流冷卻中,約 {int(global_remaining)} 秒後可重試 "
                 f"[code=4 retry_after_seconds={int(global_remaining)}]"
+            ),
+        )
+
+    live_gate_reason = _live_bucu_gate_reason()
+    if live_gate_reason:
+        wait = _live_bucu_gate_wait_seconds()
+        _log_fb_call(
+            path=path,
+            account_id=_extract_account_id_from_path(path),
+            method="GET",
+            ms=0,
+            status=429,
+            cache_hit=False,
+            error_code=4,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"FB BUCU 保護模式啟動({live_gate_reason}),約 {wait} 秒後可重試。"
+                f"期間只允許既有快取,不再送出新的 FB Graph API 呼叫 "
+                f"[code=4 self_bucu_gate=1 retry_after_seconds={wait}]"
             ),
         )
 
@@ -2914,6 +3001,17 @@ async def set_token(payload: TokenPayload):
         raise HTTPException(
             status_code=429,
             detail=f"FB 登入驗證冷卻中,請等待 {wait} 秒後再試。期間不會再呼叫 FB /me。",
+        )
+
+    live_gate_reason = _live_bucu_gate_reason()
+    if live_gate_reason:
+        wait = _live_bucu_gate_wait_seconds()
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"FB 登入驗證暫停({live_gate_reason}),請等待 {wait} 秒後再試。"
+                "期間不會再呼叫 FB /me。"
+            ),
         )
 
     # Coalesce concurrent verifies for the same token. Without this
@@ -4550,12 +4648,21 @@ async def get_accounts():
 async def get_fb_usage():
     """Latest parsed `X-Business-Use-Case-Usage` snapshot.
 
-    Populated as a side-effect of every FB call. Entries expire on
-    their own (FB re-sends the header on subsequent calls with fresh
-    numbers); we don't age them out on our side because "last known
-    value" is what the UI wants anyway.
+    Populated as a side-effect of every FB call. Entries age out after
+    BUCU_USAGE_STALE_SECONDS so self-throttle can clear even when we
+    intentionally stop making FB calls.
     """
-    return {"data": _fb_usage, "peak_regain_minutes": _peak_regain_minutes()}
+    _fresh_bucu_entries()
+    live_gate_reason = _live_bucu_gate_reason()
+    return {
+        "data": _fb_usage,
+        "peak_regain_minutes": _peak_regain_minutes(),
+        "peak_bucu_pct": _peak_bucu_pct(),
+        "live_gate_reason": live_gate_reason,
+        "live_gate_retry_after_seconds": _live_bucu_gate_wait_seconds()
+        if live_gate_reason
+        else 0,
+    }
 
 
 @app.get("/api/engineering/fb-calls")
@@ -4750,6 +4857,10 @@ async def get_engineering_fb_calls():
         "cache_hit_rate_5m": round(cache_hit_rate, 3),
         "account_throttle_until": cooldowns,
         "global_throttle_until": (now_wall + global_remaining) if global_remaining > 0 else None,
+        "live_bucu_gate_reason": _live_bucu_gate_reason(),
+        "live_bucu_gate_retry_after_seconds": _live_bucu_gate_wait_seconds()
+        if _live_bucu_gate_reason()
+        else 0,
         "error_count_5m": error_count,
         "live_total_5m": live_total,
         "blocked_total_5m": blocked_total,
