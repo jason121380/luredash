@@ -28,9 +28,11 @@ export function AlertAccountPanel({
   if (collapsed) return null;
 
   return (
-    <aside className="sticky top-0 flex min-h-[calc(100dvh-64px)] w-[160px] shrink-0 flex-col overflow-hidden border-r border-border bg-white">
-      <div className="border-b border-border px-3 py-2.5 text-[10px] font-bold uppercase tracking-[0.5px] text-gray-300">
-        廣告帳戶
+    <aside className="sticky top-0 flex min-h-[calc(100dvh-64px)] w-[160px] shrink-0 flex-col border-r border-border bg-bg">
+      <div className="border-b border-border bg-white px-3 pb-2 pt-2.5">
+        <h4 className="text-[11px] font-bold uppercase tracking-[0.6px] text-gray-300">
+          廣告帳戶
+        </h4>
       </div>
       <div className="flex-1 overflow-y-auto">
         <AcctButton
