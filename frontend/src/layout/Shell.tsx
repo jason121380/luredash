@@ -51,12 +51,8 @@ export function Shell() {
           onClick={closeOnBackdrop}
         />
       )}
-      {/* Mobile: padding-bottom uses env(safe-area-inset-bottom) so
-          content extends to the screen edge but doesn't render under
-          the iOS home indicator. Desktop env() resolves to 0 (no-op). */}
       <main
         className="shell-main ml-sidebar flex h-[100dvh] flex-1 flex-col overflow-x-hidden overflow-y-auto bg-bg"
-        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       >
         <MobileToggleContext.Provider value={() => setMobileOpen((v) => !v)}>
           {preloadDone && (
