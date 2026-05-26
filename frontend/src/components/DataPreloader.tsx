@@ -1,5 +1,6 @@
 import { api } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
+import { ProgressBar } from "@/components/ProgressBar";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useFiltersStore } from "@/stores/filtersStore";
 import { useQueryClient } from "@tanstack/react-query";
@@ -235,12 +236,7 @@ export function DataPreloader({ onComplete }: { onComplete: () => void }) {
         <div className="text-[15px] font-bold text-ink">更新數據中</div>
         <div className="flex w-full flex-col items-center gap-2">
           <div className="text-[13px] font-semibold tabular-nums text-orange">{pct}%</div>
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-border">
-            <div
-              className="h-full bg-orange transition-[width] duration-300 ease-out"
-              style={{ width: `${pct}%` }}
-            />
-          </div>
+          <ProgressBar value={pct} size="md" ariaLabel="預載進度" />
           {progress.total > 0 && (
             <div className="text-[11px] text-gray-500">
               {displayLoaded > 0

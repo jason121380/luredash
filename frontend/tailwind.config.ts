@@ -95,6 +95,13 @@ const config: Config = {
           "0%": { backgroundPosition: "200% 0" },
           "100%": { backgroundPosition: "-200% 0" },
         },
+        // For <ProgressBar> — slower & in the opposite direction so
+        // the gradient looks like it's flowing INTO the bar, not
+        // sliding off it.
+        "progress-shimmer": {
+          "0%": { backgroundPosition: "100% 0" },
+          "100%": { backgroundPosition: "0% 0" },
+        },
         spin: {
           to: { transform: "rotate(360deg)" },
         },
@@ -118,6 +125,7 @@ const config: Config = {
       },
       animation: {
         shimmer: "shimmer 1.2s infinite",
+        "progress-shimmer": "progress-shimmer 1.8s linear infinite",
         spin: "spin 0.7s linear infinite",
         "fade-in": "fade-in 0.25s ease-out both",
         "bounce-dot": "bounce-dot 1.2s ease-in-out infinite both",

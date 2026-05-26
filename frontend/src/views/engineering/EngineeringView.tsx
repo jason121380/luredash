@@ -1,8 +1,10 @@
 import { api } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useFbAuth } from "@/auth/FbAuthProvider";
+import { useShowBucuInHeader } from "@/components/BucuHeaderChip";
 import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
+import { ProgressBar } from "@/components/ProgressBar";
 import { toast } from "@/components/Toast";
 import { cn } from "@/lib/cn";
 import { queryClient } from "@/lib/queryClient";
@@ -226,10 +228,9 @@ function MemoryPanel() {
     v === null ? "—" : `${v.toLocaleString("zh-TW")} MB`;
   const fmtPct = (v: number | null): string => (v === null ? "—" : `${v.toFixed(1)}%`);
   // Cap visual bar at 100% even if the backend somehow reports > 100.
-  const barWidth = pct === null ? 0 : Math.min(100, Math.max(0, pct));
-  // Colour the bar by pressure: green-ish under 50, orange 50-80, red >80.
-  const barTone =
-    pct === null ? "bg-gray-200" : pct >= 80 ? "bg-red" : pct >= 50 ? "bg-orange" : "bg-indigo-400";
+  const barValue = pct === null ? 0 : Math.min(100, Math.max(0, pct));
+  // Colour by pressure: <50% warm(orange 漸層)/ 50-80% amber / >80% danger.
+  const barTone = pct === null ? "warm" : pct >= 80 ? "danger" : pct >= 50 ? "amber" : "warm";
 
   return (
     <section className="rounded-2xl border border-border bg-white p-4 md:p-5">
@@ -240,11 +241,8 @@ function MemoryPanel() {
         </div>
         <div className="text-[13px] font-semibold tabular-nums text-gray-500">{fmtPct(pct)}</div>
       </div>
-      <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-bg">
-        <div
-          className={cn("h-full rounded-full transition-all duration-500", barTone)}
-          style={{ width: `${barWidth}%` }}
-        />
+      <div className="mt-2">
+        <ProgressBar value={barValue} size="md" tone={barTone} ariaLabel="記憶體使用率" />
       </div>
       <div className="mt-2 text-[11px] text-gray-300">
         來源:{source === "proc" ? "主機" : "無法取得(非 Linux 環境)"}
@@ -269,6 +267,7 @@ function FbUsagePanel() {
     staleTime: 0,
   });
   const accountsQuery = useAccounts();
+  const [showBucuInHeader, setShowBucuInHeader] = useShowBucuInHeader();
   const peak = usageQuery.data?.peak_regain_minutes ?? 0;
   // Sort by total_time desc so the busiest rate-limit pool floats to
   // the top. Falls back to call_count then cputime when total_time
@@ -353,6 +352,22 @@ function FbUsagePanel() {
           ⚠ 部分業務已達節流閾值,Facebook 預估約 <b>{peak}</b> 分鐘後可恢復呼叫(此為 FB 的估算值,非精確倒數)
         </div>
       )}
+      <label className="mb-3 flex cursor-pointer items-start gap-2 rounded-md border border-border bg-bg/40 p-2.5 text-[12px]">
+        <input
+          type="checkbox"
+          className="custom-cb mt-0.5"
+          checked={showBucuInHeader}
+          onChange={(e) => setShowBucuInHeader(e.currentTarget.checked)}
+        />
+        <div className="flex-1">
+          <div className="font-semibold text-ink">在 header 顯示 BUCU%</div>
+          <div className="mt-0.5 text-[11px] text-gray-500">
+            打開後,每個頁面的 Topbar 右側會顯示即時 peak BUCU(每 15s
+            更新)。配色:&lt;50% 灰 / 50-69% 琥珀 / 70-89% 橘 / ≥90%
+            紅閃。預設關。
+          </div>
+        </div>
+      </label>
       {usageQuery.isLoading ? (
         <div className="text-sm text-gray-400">載入中…</div>
       ) : entries.length === 0 ? (
@@ -454,17 +469,11 @@ function UsageMobileCard({
 }
 
 function MobileMetricRow({ label, value }: { label: string; value: number }) {
-  const pct = Math.max(0, Math.min(100, value));
-  const color = pct >= 80 ? "bg-red-500" : pct >= 50 ? "bg-amber-400" : "bg-emerald-500";
+  const tone = value >= 80 ? "danger" : value >= 50 ? "amber" : "ok";
   return (
     <div className="flex items-center gap-2 text-[11px]">
       <span className="w-[52px] shrink-0 text-gray-500">{label}</span>
-      <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-gray-200">
-        <div
-          className={cn("absolute inset-y-0 left-0 rounded-full", color)}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
+      <ProgressBar value={value} size="sm" tone={tone} className="flex-1" />
       <span className="w-[34px] shrink-0 text-right font-mono text-gray-600">{value}%</span>
     </div>
   );
@@ -538,16 +547,10 @@ function UsageRow({
 }
 
 function UsageCell({ value }: { value: number }) {
-  const pct = Math.max(0, Math.min(100, value));
-  const color = pct >= 80 ? "bg-red-500" : pct >= 50 ? "bg-amber-400" : "bg-emerald-500";
+  const tone = value >= 80 ? "danger" : value >= 50 ? "amber" : "ok";
   return (
     <div className="flex items-center gap-2">
-      <div className="relative h-1.5 min-w-[80px] flex-1 overflow-hidden rounded-full bg-gray-200">
-        <div
-          className={cn("absolute inset-y-0 left-0 rounded-full", color)}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
+      <ProgressBar value={value} size="sm" tone={tone} className="min-w-[80px] flex-1" />
       <span className="w-[36px] shrink-0 text-right font-mono text-gray-600">{value}%</span>
     </div>
   );

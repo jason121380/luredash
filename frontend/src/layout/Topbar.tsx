@@ -1,3 +1,4 @@
+import { BucuHeaderChip } from "@/components/BucuHeaderChip";
 import { useMobileSidebarToggle } from "@/layout/Shell";
 import { cn } from "@/lib/cn";
 import type { ReactNode } from "react";
@@ -76,7 +77,10 @@ export function Topbar({ title, titleAction, children, className }: TopbarProps)
         {title}
       </div>
       {titleAction}
-      <div className="flex min-w-0 flex-1 items-center justify-end gap-2 md:gap-3">{children}</div>
+      <div className="flex min-w-0 flex-1 items-center justify-end gap-2 md:gap-3">
+        {children}
+        <BucuHeaderChip />
+      </div>
     </div>
   );
 }
