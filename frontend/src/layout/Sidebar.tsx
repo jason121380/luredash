@@ -188,11 +188,18 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
         if (onMobileClose && mobileOpen) onMobileClose();
       }}
     >
-      {/* Logo header */}
-      <div className="flex h-[50px] shrink-0 items-center gap-2 border-b border-border px-4 md:h-[60px]">
-        <div className="text-[15px] font-bold tracking-[-0.2px] text-ink">
-          METADASH <span className="text-orange">by LURE</span>
-        </div>
+      {/* Logo header — PNG asset lives at frontend/public/logo3.png,
+          copied into dist/ at build, served by main.py via the
+          dedicated /logo3.png route. Width is intrinsic to the
+          image; height locks to the header row so the brand bar
+          stays the same overall size as the previous text logo. */}
+      <div className="flex h-[50px] shrink-0 items-center border-b border-border px-4 md:h-[60px]">
+        <img
+          src="/logo3.png"
+          alt="METADASH by LURE"
+          className="h-7 w-auto select-none md:h-8"
+          draggable={false}
+        />
       </div>
 
       {/* Nav — owns the scroll so the user dropdown below stays
