@@ -214,28 +214,19 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
               <SidebarLink key={item.to} item={item} />
             ))}
             {group.label === "設定" && (
-              <>
-                <SidebarActionButton
-                  icon={ICON_TERMINAL}
-                  label="工程模式"
-                  onMouseEnter={() => {
-                    void importEngineeringModal();
-                  }}
-                  onFocus={() => {
-                    void importEngineeringModal();
-                  }}
-                  onClick={() => {
-                    setEngineeringOpen(true);
-                  }}
-                />
-                <SidebarActionButton
-                  icon={ICON_LOGOUT}
-                  label="登出"
-                  onClick={() => {
-                    void logout();
-                  }}
-                />
-              </>
+              <SidebarActionButton
+                icon={ICON_TERMINAL}
+                label="工程模式"
+                onMouseEnter={() => {
+                  void importEngineeringModal();
+                }}
+                onFocus={() => {
+                  void importEngineeringModal();
+                }}
+                onClick={() => {
+                  setEngineeringOpen(true);
+                }}
+              />
             )}
           </div>
         ))}
@@ -281,6 +272,24 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
                 <BucuHeaderChip />
               </span>
             </div>
+            {/* Logout — was a row in the 設定 nav group up until
+                2026-05-27; moved to the footer at the user's request
+                so the arrow-out icon sits next to the avatar that
+                identifies *who* is being signed out. */}
+            <button
+              type="button"
+              onClick={() => {
+                void logout();
+              }}
+              aria-label="登出"
+              title="登出"
+              className={cn(
+                "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-gray-400",
+                "transition-colors hover:bg-orange-bg hover:text-orange active:scale-95",
+              )}
+            >
+              {ICON_LOGOUT}
+            </button>
           </div>
         </div>
       </div>
