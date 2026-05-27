@@ -5,6 +5,7 @@ import type {
   LinePushFrequency,
 } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
+import { useAdsets } from "@/api/hooks/useAdsets";
 import { useCampaigns } from "@/api/hooks/useCampaigns";
 import {
   useDeleteLinePushConfig,
@@ -97,6 +98,15 @@ interface EditorState {
    *  management UI from displaying the bare campaign_id when no
    *  team-wide nickname is set. */
   campaignName: string;
+  /** When true, the report is scoped to specific adsets inside the
+   *  selected campaign — backend emits a Flex carousel (one bubble
+   *  per adset, title = adset name). When false, single bubble at
+   *  campaign level (original behaviour). */
+  byAdset: boolean;
+  /** Adsets the user picked when `byAdset` is true. Empty when
+   *  `byAdset` is false. Capped at 10 (LINE carousel limit 12,
+   *  enforced server-side). */
+  adsetIds: string[];
   /** Which tab is currently visible — purely a UI selector, doesn't
    *  affect what gets saved. */
   activeFrequency: LinePushFrequency;
@@ -122,6 +132,8 @@ const blankState = (): EditorState => ({
   accountName: "",
   campaignId: "",
   campaignName: "",
+  byAdset: false,
+  adsetIds: [],
   activeFrequency: "weekly",
   byFreq: {
     daily: blankFreq(),
@@ -178,11 +190,14 @@ export function GroupPushConfigModal({
     if (!open) return;
     if (editing) {
       const acct = accounts.find((a) => a.id === editing.account_id);
+      const editingAdsetIds = editing.adset_ids ?? [];
       setState({
         accountId: editing.account_id,
         accountName: acct?.name ?? "",
         campaignId: editing.campaign_id,
         campaignName: editing.campaign_name ?? "",
+        byAdset: editingAdsetIds.length > 0,
+        adsetIds: [...editingAdsetIds],
         activeFrequency: editing.frequency,
         byFreq: {
           daily: blankFreq(),
@@ -280,6 +295,12 @@ export function GroupPushConfigModal({
           }
         }
       }
+      // 廣告組合模式驗證 — 開啟「以廣告組合播報」就必須至少選一個。
+      const effectiveAdsetIds = state.byAdset ? state.adsetIds : [];
+      if (state.byAdset && effectiveAdsetIds.length === 0) {
+        toast("已勾選「以廣告組合播報」,請至少選一個廣告組合", "error");
+        return;
+      }
       // 再 upsert 啟用的 config(每個頻率一筆)
       for (const f of enabledFreqs) {
         const s = state.byFreq[f];
@@ -299,6 +320,7 @@ export function GroupPushConfigModal({
           include_report_button: s.includeReportButton,
           include_recommendations: s.includeRecommendations,
           campaign_name: state.campaignName,
+          adset_ids: effectiveAdsetIds,
           ...(s.dateRange === "custom"
             ? { date_from: s.customFrom, date_to: s.customTo }
             : {}),
@@ -340,6 +362,8 @@ export function GroupPushConfigModal({
                 // Reset campaign + per-freq state when account changes
                 // (avoid orphaned id + stale sibling data).
                 campaignId: prev.accountId === v ? prev.campaignId : "",
+                byAdset: prev.accountId === v ? prev.byAdset : false,
+                adsetIds: prev.accountId === v ? prev.adsetIds : [],
                 byFreq:
                   prev.accountId === v
                     ? prev.byFreq
@@ -368,6 +392,10 @@ export function GroupPushConfigModal({
                 ...prev,
                 campaignId: v,
                 campaignName: name,
+                // Adset selection is campaign-scoped, so reset
+                // whenever the user picks a different campaign.
+                byAdset: prev.campaignId === v ? prev.byAdset : false,
+                adsetIds: prev.campaignId === v ? prev.adsetIds : [],
                 // Re-blank per-freq state when campaign changes so the
                 // hydration effect can re-populate from the new
                 // campaign's siblings.
@@ -385,6 +413,40 @@ export function GroupPushConfigModal({
             nicknames={nicknames}
           />
         </div>
+
+        {/* Adset scoping — only meaningful after a campaign is picked.
+            Checkbox toggles the multi-select; backend emits a Flex
+            carousel (one bubble per adset) when adset_ids is non-empty. */}
+        {state.campaignId && (
+          <div className="flex flex-col gap-1">
+            <label className="flex items-center gap-2 text-[13px] text-ink">
+              <input
+                type="checkbox"
+                className="custom-cb"
+                checked={state.byAdset}
+                onChange={(e) => {
+                  const next = e.currentTarget.checked;
+                  setState((prev) => ({
+                    ...prev,
+                    byAdset: next,
+                    // Clear selection when turning off so a follow-up
+                    // turn-on starts fresh; preserve on turn-on so the
+                    // user can toggle without losing picks.
+                    adsetIds: next ? prev.adsetIds : [],
+                  }));
+                }}
+              />
+              以廣告組合播報
+            </label>
+            {state.byAdset && (
+              <AdsetMultiPicker
+                campaignId={state.campaignId}
+                value={state.adsetIds}
+                onChange={(ids) => setState((prev) => ({ ...prev, adsetIds: ids }))}
+              />
+            )}
+          </div>
+        )}
 
         {/* Frequency tabs — each tab carries its own enabled state.
             Active tab gets orange fill; enabled tabs (incl. inactive)
@@ -662,6 +724,173 @@ function CampaignPicker({
       disabled={!accountId || campaignsQuery.isLoading}
       loadingText={campaignsQuery.isLoading ? "載入行銷活動中..." : undefined}
     />
+  );
+}
+
+/** Multi-select picker for the adsets under a campaign. Capped at 10
+ *  (server enforces; LINE carousel limit is 12 — we leave headroom).
+ *  Status badge per adset so operators can avoid binding to paused
+ *  rows, mirroring `CampaignPicker`'s combobox decoration. */
+function AdsetMultiPicker({
+  campaignId,
+  value,
+  onChange,
+}: {
+  campaignId: string;
+  value: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  // Always last-30d for the picker — we only need names + status
+  // metadata; spend / insights aren't surfaced here, so we don't pay
+  // the FB cost of richer queries.
+  const adsetsQuery = useAdsets(
+    campaignId || null,
+    { preset: "last_30d", from: null, to: null },
+    !!campaignId,
+    { source: "line-push-adset-picker", budgetOnly: true },
+  );
+  const adsets = adsetsQuery.data ?? [];
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    const t = window.setTimeout(() => searchRef.current?.focus(), 50);
+    return () => window.clearTimeout(t);
+  }, [open]);
+
+  const selected = useMemo(() => new Set(value), [value]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return adsets;
+    return adsets.filter(
+      (a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q),
+    );
+  }, [adsets, query]);
+
+  const toggle = (id: string) => {
+    if (selected.has(id)) {
+      onChange(value.filter((v) => v !== id));
+      return;
+    }
+    if (value.length >= 10) {
+      toast("最多選 10 個廣告組合(LINE carousel 限制)", "info");
+      return;
+    }
+    onChange([...value, id]);
+  };
+
+  const triggerLabel = (() => {
+    if (value.length === 0) return "請選擇廣告組合";
+    if (value.length === 1) {
+      const one = adsets.find((a) => a.id === value[0]);
+      return one?.name ?? value[0] ?? "";
+    }
+    return `已選 ${value.length} 個廣告組合`;
+  })();
+
+  const disabled = !campaignId || adsetsQuery.isLoading;
+  const loadingText = adsetsQuery.isLoading ? "載入廣告組合中..." : undefined;
+
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          disabled={disabled}
+          className={cn(
+            "flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-border bg-white px-2.5 text-left text-[13px] outline-none focus:border-orange disabled:bg-bg disabled:text-gray-300",
+            value.length === 0 && !disabled && "text-gray-300",
+          )}
+        >
+          <span className="truncate">{loadingText ?? triggerLabel}</span>
+          <span className="shrink-0 text-gray-300">▾</span>
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          align="start"
+          sideOffset={4}
+          className="z-[1100] w-[var(--radix-popover-trigger-width)] rounded-xl border border-border bg-white p-2 shadow-md"
+        >
+          <input
+            ref={searchRef}
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.currentTarget.value)}
+            placeholder="搜尋廣告組合名稱或 ID"
+            className="mb-2 h-9 w-full rounded-lg border border-border px-2.5 text-[13px] outline-none focus:border-orange"
+          />
+          <div className="flex items-center justify-between px-1 pb-1 text-[11px] text-gray-300">
+            <span>
+              {filtered.length} / {adsets.length}
+            </span>
+            <span>已選 {value.length} / 10</span>
+          </div>
+          <div
+            // Same touch/wheel handling as SearchableCombobox so the
+            // picker scrolls smoothly inside a mobile Modal.
+            className="max-h-[260px] overflow-y-auto overscroll-contain"
+            style={{ touchAction: "pan-y", WebkitOverflowScrolling: "touch" }}
+            onWheel={(e) => {
+              const el = e.currentTarget;
+              const max = el.scrollHeight - el.clientHeight;
+              const next = Math.max(0, Math.min(max, el.scrollTop + e.deltaY));
+              if (next !== el.scrollTop) {
+                el.scrollTop = next;
+                e.stopPropagation();
+              }
+            }}
+          >
+            {adsetsQuery.isLoading ? (
+              <div className="px-2 py-3 text-center text-[12px] text-gray-300">
+                載入中...
+              </div>
+            ) : filtered.length === 0 ? (
+              <div className="px-2 py-3 text-center text-[12px] text-gray-300">
+                {adsets.length === 0 ? "此活動沒有廣告組合" : "無符合的項目"}
+              </div>
+            ) : (
+              filtered.map((a) => {
+                const checked = selected.has(a.id);
+                return (
+                  <button
+                    key={a.id}
+                    type="button"
+                    onClick={() => toggle(a.id)}
+                    className={cn(
+                      "flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left",
+                      checked ? "bg-orange-bg text-orange" : "text-ink hover:bg-orange-bg",
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      className="custom-cb mt-0.5 pointer-events-none"
+                      checked={checked}
+                      readOnly
+                      tabIndex={-1}
+                    />
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="flex w-full items-center gap-1.5">
+                        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">
+                          {a.name}
+                        </span>
+                        <Badge status={a.status} />
+                      </span>
+                      <span className="w-full truncate font-mono text-[10px] text-gray-300">
+                        {a.id}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }
 
