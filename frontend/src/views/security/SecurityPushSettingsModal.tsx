@@ -206,6 +206,20 @@ function ConfigList({
   const del = useDeleteSecurityPushConfig();
   const test = useTestSecurityPushConfig();
   const refreshGroup = useRefreshLineGroupName();
+  const groupsQuery = useLineGroups();
+  const groupNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const g of groupsQuery.data ?? []) {
+      m.set(g.group_id, g.group_name || g.label || g.group_id);
+    }
+    return m;
+  }, [groupsQuery.data]);
+  const displayLabel = (cfg: SecurityPushConfig): string => {
+    if (cfg.group_ids.length === 0) return cfg.name || "未綁定群組";
+    const names = cfg.group_ids.map((gid) => groupNameById.get(gid) ?? gid);
+    if (names.length <= 2) return names.join("、");
+    return `${names[0]}、${names[1]} + ${names.length - 2} 個其他群組`;
+  };
   const [testingId, setTestingId] = useState<string | null>(null);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
 
@@ -278,7 +292,7 @@ function ConfigList({
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <span className="text-[13px] font-semibold text-ink">{cfg.name}</span>
+                    <span className="text-[13px] font-semibold text-ink">{displayLabel(cfg)}</span>
                     <button
                       type="button"
                       onClick={() => handleRefreshGroupNames(cfg)}
@@ -400,7 +414,6 @@ function ConfigForm({
     [groupsQuery.data],
   );
 
-  const [name, setName] = useState(initial?.name ?? "");
   const [channelId, setChannelId] = useState(initial?.channel_id ?? channels[0]?.id ?? "");
   // `channels` arrives async from useLineChannels; first render gets
   // an empty array → useState seeds channelId="". Once the query
@@ -446,10 +459,6 @@ function ConfigForm({
 
   const handleSave = async () => {
     setError(null);
-    if (!name.trim()) {
-      setError("請輸入名稱");
-      return;
-    }
     if (!channelId) {
       setError("請選擇 LINE channel");
       return;
@@ -462,9 +471,18 @@ function ConfigForm({
       setError("請至少勾選一項異常條件");
       return;
     }
+    // Custom name field was removed — backend still requires a
+    // non-empty `name`, so derive it from the first selected group
+    // (the UI surfaces a richer "Group A、Group B + N 個其他" label
+    // separately via lineGroups lookup; this column is just a
+    // server-side identifier now).
+    const firstGroupId = [...groupIds][0] ?? "";
+    const firstGroupName =
+      groups.find((g) => g.group_id === firstGroupId)?.group_name ?? "";
+    const derivedName = (firstGroupName || initial?.name || firstGroupId || "推播設定").slice(0, 80);
     const payload: SecurityPushConfigInput = {
       ...(initial ? { id: initial.id } : {}),
-      name: name.trim(),
+      name: derivedName,
       channel_id: channelId,
       group_ids: [...groupIds],
       account_ids: [],
@@ -481,15 +499,6 @@ function ConfigForm({
 
   return (
     <div className="flex flex-col gap-3">
-      <Field label="名稱" hint="顯示用,例如「深夜異常告警」">
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          className="w-full rounded-md border border-border bg-white px-2.5 py-1.5 text-[13px] outline-none focus:border-orange"
-        />
-      </Field>
-
       <Field label="LINE Channel(OA)" hint="從哪個官方帳號發出">
         <select
           value={channelId}
