@@ -1416,7 +1416,6 @@ _MANIFEST_JSON: Optional[bytes] = (
 _FAVICON_PNG: Optional[bytes] = _read_bytes(DIST_DIR / "favicon.png")
 _ICON_192_PNG: Optional[bytes] = _read_bytes(DIST_DIR / "icon-192.png")
 _ICON_512_PNG: Optional[bytes] = _read_bytes(DIST_DIR / "icon-512.png")
-_LOGO3_PNG: Optional[bytes] = _read_bytes(DIST_DIR / "logo3.png")
 
 # Loud startup banner so Zeabur logs show at-a-glance whether the
 # React build was found. If you see "[startup] React build: MISSING"
@@ -2771,13 +2770,6 @@ async def icon_512_png():
     if _ICON_512_PNG is None:
         raise HTTPException(status_code=404, detail="icon missing")
     return Response(content=_ICON_512_PNG, media_type="image/png", headers=_ICON_CACHE)
-
-
-@app.get("/logo3.png")
-async def logo3_png():
-    if _LOGO3_PNG is None:
-        raise HTTPException(status_code=404, detail="logo missing")
-    return Response(content=_LOGO3_PNG, media_type="image/png", headers=_ICON_CACHE)
 
 
 @app.get("/sw.js")
