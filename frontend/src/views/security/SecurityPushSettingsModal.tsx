@@ -4,7 +4,11 @@ import type {
   SecurityPushConfigInput,
   SecurityPushTestCard,
 } from "@/api/client";
-import { useLineChannels, useLineGroups } from "@/api/hooks/useLinePush";
+import {
+  useLineChannels,
+  useLineGroups,
+  useRefreshLineGroupName,
+} from "@/api/hooks/useLinePush";
 import {
   useDeleteSecurityPushConfig,
   useSaveSecurityPushConfig,
@@ -201,7 +205,35 @@ function ConfigList({
 }) {
   const del = useDeleteSecurityPushConfig();
   const test = useTestSecurityPushConfig();
+  const refreshGroup = useRefreshLineGroupName();
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [refreshingId, setRefreshingId] = useState<string | null>(null);
+
+  const handleRefreshGroupNames = async (cfg: SecurityPushConfig) => {
+    if (cfg.group_ids.length === 0) {
+      toast("此設定沒有綁定任何 LINE 群組", "info");
+      return;
+    }
+    setRefreshingId(cfg.id);
+    try {
+      // Parallel fan-out: per-group LINE Summary call. `allSettled`
+      // so one bad group_id (bot kicked / channel token expired)
+      // doesn't take the rest down — we count successes and surface
+      // failures in the toast.
+      const results = await Promise.allSettled(
+        cfg.group_ids.map((gid) => refreshGroup.mutateAsync(gid)),
+      );
+      const ok = results.filter((r) => r.status === "fulfilled").length;
+      const failed = results.length - ok;
+      if (failed === 0) {
+        toast(`已重新取得 ${ok} 個群組名稱`, "success");
+      } else {
+        toast(`${ok} 個已更新,${failed} 個失敗(bot 可能已退出)`, "error", 5000);
+      }
+    } finally {
+      setRefreshingId(null);
+    }
+  };
 
   const handleTest = async (id: string) => {
     setTestingId(id);
@@ -247,6 +279,34 @@ function ConfigList({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="text-[13px] font-semibold text-ink">{cfg.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleRefreshGroupNames(cfg)}
+                      disabled={refreshingId === cfg.id}
+                      title="重新取得 LINE 群組名稱"
+                      aria-label="重新取得 LINE 群組名稱"
+                      className={cn(
+                        "flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-gray-400 transition-colors",
+                        "hover:bg-orange-bg hover:text-orange",
+                        "disabled:cursor-not-allowed disabled:opacity-50",
+                      )}
+                    >
+                      <svg
+                        width="13"
+                        height="13"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                        className={refreshingId === cfg.id ? "animate-spin" : ""}
+                      >
+                        <path d="M21 12a9 9 0 1 1-3-6.7" />
+                        <polyline points="21 4 21 10 15 10" />
+                      </svg>
+                    </button>
                     {!cfg.enabled && (
                       <span className="rounded-full bg-gray-100 px-1.5 py-[1px] text-[10px] text-gray-500">
                         已停用
