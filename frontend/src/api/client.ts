@@ -59,6 +59,10 @@ export interface LinePushConfig {
   include_recommendations: boolean;
   /** Cached FB campaign name at save-time. Falls back to ID when empty. */
   campaign_name?: string;
+  /** When non-empty, the push reports per-adset (one Flex carousel
+   *  bubble per id, title = adset name). Empty = campaign-level
+   *  single bubble. Capped server-side at 10 (LINE carousel limit 12). */
+  adset_ids: string[];
   /** ISO YYYY-MM-DD; populated only when date_range === "custom". */
   date_from?: string | null;
   date_to?: string | null;
@@ -92,6 +96,8 @@ export interface LinePushConfigInput {
   /** FB campaign name; cached on the row at save-time so the group
    *  management UI doesn't have to fall back to the bare campaign_id. */
   campaign_name?: string;
+  /** Optional list of adset ids to scope the report to. Empty = whole campaign. */
+  adset_ids?: string[];
   /** ISO YYYY-MM-DD; required when date_range === "custom". */
   date_from?: string;
   date_to?: string;

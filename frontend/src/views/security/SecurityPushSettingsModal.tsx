@@ -80,14 +80,24 @@ export function SecurityPushSettingsModal({
   const configsQuery = useSecurityPushConfigs();
   const configs = configsQuery.data ?? [];
 
-  // Master switch — flipped via the「每小時整點檢查並推播」checkbox,
-  // stored team-wide in shared_settings.security_push_master_enabled.
-  // Defaults to **false** (off) when missing — feature is opt-in so
-  // a fresh deploy doesn't quietly start hitting FB rate-limit.
+  // Auto-scan cadence — replaces the older boolean「每小時整點檢查」
+  // checkbox. Stored team-wide in
+  // `shared_settings.security_push_interval_hours`. Valid values:
+  //   0  → disabled (feature off; manual test still works)
+  //   1/2/6/12/24 → scan every N hours at local-clock multiples
+  // Backwards compat: if the legacy `security_push_master_enabled`
+  // bool is True and the new key is missing, the backend serves
+  // 1 (hourly); we mirror that here so existing deployments keep
+  // working before the operator picks a new cadence explicitly.
   const sharedQuery = useSharedSettings();
   const setShared = useSetSharedSetting();
-  const masterEnabledRaw = sharedQuery.data?.security_push_master_enabled;
-  const masterEnabled = masterEnabledRaw === true;
+  const legacyMasterEnabled = sharedQuery.data?.security_push_master_enabled === true;
+  const intervalRaw = sharedQuery.data?.security_push_interval_hours;
+  const intervalHours = ((): number => {
+    const n = typeof intervalRaw === "number" ? intervalRaw : Number(intervalRaw);
+    if ([1, 2, 6, 12, 24].includes(n)) return n;
+    return legacyMasterEnabled ? 1 : 0;
+  })();
   const enabledConfigsCount = configs.filter((cfg) => cfg.enabled).length;
 
   return (
@@ -109,19 +119,25 @@ export function SecurityPushSettingsModal({
     >
       {state.mode === "list" ? (
         <div className="flex flex-col gap-3">
-          <label className="flex cursor-pointer items-start gap-2 rounded-md border border-border bg-bg/40 p-3 text-[13px]">
-            <input
-              type="checkbox"
-              className="custom-cb mt-0.5"
-              checked={masterEnabled}
+          <div className="flex items-start gap-3 rounded-md border border-border bg-bg/40 p-3 text-[13px]">
+            <div className="flex-1">
+              <div className="font-semibold text-ink">自動檢查並推播</div>
+              <div className="mt-0.5 text-[11px] text-gray-500">
+                選「停用」後系統會暫停所有設定的自動掃描;手動點「測試」仍可運作。
+              </div>
+            </div>
+            <select
+              value={intervalHours}
               onChange={(e) => {
-                const next = e.target.checked;
+                const next = Number(e.currentTarget.value);
                 setShared.mutate(
-                  { key: "security_push_master_enabled", value: next },
+                  { key: "security_push_interval_hours", value: next },
                   {
                     onSuccess: () =>
                       toast(
-                        next ? "已啟用每小時整點自動檢查" : "已停用自動檢查",
+                        next === 0
+                          ? "已停用自動檢查"
+                          : `已設定為每 ${next} 小時整點自動檢查`,
                         "success",
                       ),
                     onError: (err) =>
@@ -132,15 +148,17 @@ export function SecurityPushSettingsModal({
                   },
                 );
               }}
-            />
-            <div className="flex-1">
-              <div className="font-semibold text-ink">每小時整點檢查並推播</div>
-              <div className="mt-0.5 text-[11px] text-gray-500">
-                關掉後系統會暫停所有設定的自動掃描;手動點「測試」仍可運作。
-              </div>
-            </div>
-          </label>
-          {masterEnabled && enabledConfigsCount === 0 && (
+              className="h-9 shrink-0 rounded-lg border border-border bg-white px-2.5 text-[13px] outline-none focus:border-orange"
+            >
+              <option value={0}>停用</option>
+              <option value={1}>每小時整點 (0點, 1點, 2點…)</option>
+              <option value={2}>每 2 小時整點 (0點, 2點, 4點…)</option>
+              <option value={6}>每 6 小時整點 (0點, 6點, 12點…)</option>
+              <option value={12}>每 12 小時整點 (0點, 12點)</option>
+              <option value={24}>每 24 小時整點 (0點)</option>
+            </select>
+          </div>
+          {intervalHours > 0 && enabledConfigsCount === 0 && (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-800">
               已開啟總開關,但目前沒有啟用中的推播設定,所以排程不會自動掃描。
               請新增推播或把既有設定改為啟用。
@@ -152,6 +170,7 @@ export function SecurityPushSettingsModal({
             pendingCards={pendingCards}
             onAdd={() => setState({ mode: "new" })}
             onEdit={(cfg) => setState({ mode: "edit", cfg })}
+            intervalHours={intervalHours}
           />
         </div>
       ) : (
@@ -171,12 +190,14 @@ function ConfigList({
   pendingCards,
   onAdd,
   onEdit,
+  intervalHours,
 }: {
   configs: SecurityPushConfig[];
   loading: boolean;
   pendingCards?: SecurityPushTestCard[];
   onAdd: () => void;
   onEdit: (cfg: SecurityPushConfig) => void;
+  intervalHours: number;
 }) {
   const del = useDeleteSecurityPushConfig();
   const test = useTestSecurityPushConfig();
@@ -233,8 +254,13 @@ function ConfigList({
                     )}
                   </div>
                   <div className="mt-1 text-[11px] text-gray-500">
-                    {cfg.group_ids.length} 個 LINE 群組 · 每小時整點檢查 ·
-                    異常:
+                    {cfg.group_ids.length} 個 LINE 群組 ·{" "}
+                    {intervalHours === 0
+                      ? "自動檢查停用"
+                      : intervalHours === 1
+                        ? "每小時整點檢查"
+                        : `每 ${intervalHours} 小時整點檢查`}{" "}
+                    · 異常:
                     {cfg.anomaly_filters
                       .map((t) => ANOMALY_OPTIONS.find((o) => o.value === t)?.label ?? t)
                       .join("、")}
@@ -471,7 +497,7 @@ function ConfigForm({
           {selectedAccountIds.length === 0 && "(請先去啟用帳戶,否則無活動可掃)"}
         </div>
         <div className="mt-1">
-          自動掃描固定在每小時整點執行(例如 9:00、10:00、11:00)。上方「每小時整點檢查並推播」可暫停整個排程。
+          自動掃描在整點執行(例如 6 小時間隔 → 0:00、6:00、12:00、18:00)。上方「自動檢查並推播」下拉可調整頻率或停用。
         </div>
       </div>
 

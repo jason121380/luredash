@@ -271,7 +271,7 @@ def verify_webhook_signature(body: bytes, signature: Optional[str], *, secret: s
     return hmac.compare_digest(expected, signature)
 
 
-def build_flex_report(
+def _build_flex_report_bubble(
     *,
     title: str,
     subtitle: str,
@@ -281,9 +281,10 @@ def build_flex_report(
     status_color: str = "#888888",
     recommendations: Optional[List[str]] = None,
     report_url: Optional[str] = None,
-    alt_text: Optional[str] = None,
 ) -> dict:
-    """Build a LINE Flex Message bubble for a campaign report.
+    """Build a single bubble dict for `build_flex_report` /
+    `build_flex_report_carousel`. Same content rules apply; carousel
+    callers stitch several of these into a single Flex message.
 
     Layout (everything left-aligned for visual consistency):
         Header (orange — slim, two lines only)
@@ -302,8 +303,6 @@ def build_flex_report(
         Footer (white)              (only if report_url is provided)
             [ 查看完整報告 ]         (primary button → uri action)
     """
-    alt = alt_text or f"{title}（{subtitle}）"
-
     kpi_rows: list[dict[str, Any]] = []
     for label, value in kpis:
         kpi_rows.append(
@@ -485,7 +484,52 @@ def build_flex_report(
             ],
         }
 
+    return bubble
+
+
+def build_flex_report(
+    *,
+    title: str,
+    subtitle: str,
+    kpis: list[tuple[str, str]],
+    objective_label: str = "",
+    status_label: str = "",
+    status_color: str = "#888888",
+    recommendations: Optional[List[str]] = None,
+    report_url: Optional[str] = None,
+    alt_text: Optional[str] = None,
+) -> dict:
+    """Single-bubble Flex Message for a campaign report. Most callers
+    use this; per-adset reporting goes through `build_flex_report_carousel`."""
+    bubble = _build_flex_report_bubble(
+        title=title,
+        subtitle=subtitle,
+        kpis=kpis,
+        objective_label=objective_label,
+        status_label=status_label,
+        status_color=status_color,
+        recommendations=recommendations,
+        report_url=report_url,
+    )
+    alt = alt_text or f"{title}({subtitle})"
     return {"type": "flex", "altText": alt[:400], "contents": bubble}
+
+
+def build_flex_report_carousel(
+    *,
+    bubbles: list[dict],
+    alt_text: str,
+) -> dict:
+    """Wrap pre-built bubble dicts (from `_build_flex_report_bubble`)
+    into a single Flex carousel Message. LINE caps carousel at 12
+    bubbles; the caller is expected to enforce the limit upstream."""
+    if not bubbles:
+        raise ValueError("build_flex_report_carousel needs at least one bubble")
+    return {
+        "type": "flex",
+        "altText": (alt_text or "報告")[:400],
+        "contents": {"type": "carousel", "contents": bubbles[:12]},
+    }
 
 
 # ── 安全監控 alert flex ─────────────────────────────────────────

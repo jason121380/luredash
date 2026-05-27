@@ -718,6 +718,18 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS date_to DATE
                     """
                 )
+                # Migration (2026-05-27): per-adset scoping. When this
+                # array is non-empty, the LINE flex push reports each
+                # selected adset as its own bubble in a carousel (title
+                # = adset name, KPI = that adset's insights). Empty
+                # array preserves the original behaviour (one bubble,
+                # campaign-level numbers).
+                await conn.execute(
+                    """
+                    ALTER TABLE campaign_line_push_configs
+                    ADD COLUMN IF NOT EXISTS adset_ids TEXT[] NOT NULL DEFAULT '{}'
+                    """
+                )
                 # `line_push_logs`: audit trail per push attempt, keeps
                 # the last N entries per config for the "最近推播" UI.
                 await conn.execute(
@@ -3515,6 +3527,27 @@ async def upsert_shared_setting(key: str, payload: SettingsValuePayload):
                     """,
                     next_run_at,
                 )
+            elif key == "security_push_interval_hours":
+                # Operator picked a new cadence — re-align every enabled
+                # config so the next scan fires at the new boundary,
+                # not at the old `last_run_at + previous_interval`
+                # boundary which can be hours in the future for
+                # 12h / 24h cadences.
+                try:
+                    n = int(payload.value)
+                except (TypeError, ValueError):
+                    n = 0
+                if n in _VALID_SECURITY_PUSH_INTERVALS:
+                    next_run_at = _next_security_push_run_at(interval_hours=n)
+                    await conn.execute(
+                        """
+                        UPDATE security_push_configs
+                        SET next_run_at = $1,
+                            updated_at = NOW()
+                        WHERE enabled
+                        """,
+                        next_run_at,
+                    )
     print(f"[settings] shared POST key={key!r}", flush=True)
     return {"ok": True}
 
@@ -6824,49 +6857,24 @@ async def _markup_for_campaign(campaign_id: str) -> float:
     return default_markup
 
 
-async def _build_flex_for_config(cfg: dict) -> dict:
-    """Produce the LINE Flex Message for one push config row.
+def _kpis_from_insights(
+    ins: dict,
+    *,
+    traffic_mode: bool,
+    selected: list[str],
+    markup_pct: float,
+) -> tuple[list[tuple[str, str]], dict]:
+    """Convert one FB insights row into (kpis, raw_inputs).
 
-    Hits FB's per-campaign Graph endpoint directly (`GET /{campaign_id}`)
-    instead of `_fetch_campaigns_for_account` which would page through
-    every campaign on the account just to pick one — that fan-out is
-    the dominant latency in the manual「測試」button (5–15 s for big
-    accounts). Single-campaign lookup is one HTTP round-trip and
-    completes in well under a second.
-    """
-    account_id = cfg["account_id"]
-    campaign_id = cfg["campaign_id"]
-    date_range = cfg["date_range"]
-    date_from = cfg.get("date_from")
-    date_to = cfg.get("date_to")
-    date_preset, time_range = _date_range_to_preset(date_range, date_from, date_to)
+    `kpis` is the ordered list of (label, formatted_value) tuples for
+    the Flex body; `raw_inputs` is a dict the caller passes to
+    `_evaluate_alert_recommendations` so the 優化建議 block stays in
+    sync with the KPI numbers shown above it.
 
-    ins_clause = _insights_clause(
-        "spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
-        "inline_link_clicks,cost_per_inline_link_click,"
-        "cost_per_action_type,purchase_roas,website_purchase_roas",
-        date_preset,
-        time_range,
-    )
-    fields = f"id,name,status,objective,daily_budget,lifetime_budget,updated_time,{ins_clause}"
-    try:
-        camp = await fb_get(campaign_id, {"fields": fields})
-    except HTTPException:
-        # Fall back to the account-wide path if FB rejects the
-        # single-campaign request (e.g. campaign was archived in a
-        # way that needs the account-level filter to surface).
-        # LINE flex push only reads campaign-level fields (spend / msgs
-        # / CPC) — no adset nesting needed, so opt out to save BUCU.
-        campaigns = await _fetch_campaigns_for_account(
-            account_id, date_preset, time_range,
-            include_archived=True, lite=False, include_adsets=False,
-        )
-        camp = next((c for c in campaigns if c.get("id") == campaign_id), None)
-        if camp is None:
-            raise RuntimeError(f"Campaign {campaign_id} not found under {account_id}")
-
-    ins_list = (camp.get("insights") or {}).get("data") or []
-    ins = ins_list[0] if ins_list else {}
+    Used for BOTH the campaign-level single-bubble path AND the
+    per-adset carousel path. The only thing that changes between the
+    two is the source `ins` dict; everything downstream — rule
+    thresholds, field catalog, spend_plus markup — is identical."""
     try:
         spend_f = float(ins.get("spend") or 0)
     except (TypeError, ValueError):
@@ -6882,11 +6890,6 @@ async def _build_flex_for_config(cfg: dict) -> dict:
     msgs = _extract_msg_count(ins.get("actions"))
     msg_cost_f = (spend_f / msgs) if msgs > 0 else 0.0
 
-    # E-commerce KPIs. Action-type lookups walk a priority list:
-    # omni_* (cross-platform aggregate) is preferred when present,
-    # falling back to pixel-only or generic. ROAS lives in its own
-    # array shape, with website_purchase_roas as the secondary source
-    # for accounts that only run web pixel conversions.
     actions_arr = ins.get("actions") or []
     cost_per_action_arr = ins.get("cost_per_action_type") or []
     purchases_n = int(_extract_action_value(actions_arr, _PURCHASE_ACTION_TYPES))
@@ -6904,26 +6907,12 @@ async def _build_flex_for_config(cfg: dict) -> dict:
     roas_arr = ins.get("purchase_roas") or ins.get("website_purchase_roas") or []
     roas_f = _extract_action_value(roas_arr, _PURCHASE_ACTION_TYPES)
 
-    objective = camp.get("objective")
-    traffic_mode = _is_traffic_objective(objective)
-    objective_label = _translate_objective(objective)
-
-    # 計算 +% 後的金額(若使用者在 multi-select 選了 spend_plus
-    # 取代 spend,報告的花費就會顯示這個含成本加成的數字)。
-    # 標籤刻意用「花費*」星號代替具體百分比 — LINE 報告的對象通常
-    # 是業主而非內部,不要洩漏具體加成比例。
-    markup_pct = await _markup_for_campaign(campaign_id)
     spend_plus_f = math.ceil(spend_f * (1 + markup_pct / 100)) if spend_f > 0 else 0.0
-    spend_plus_label = "花費*"
-
-    # 全部可選的 KPI 欄位 — code → (label, value getter)。新增欄位
-    # 在這個 dict 一處改即可,前端 multi-select 也讀取相同的 code。
-    # spend / spend_plus 在 UI 是 mutex,同一份報告只會出現一個。
     msg_cost_str = _fmt_money(msg_cost_f) if msgs > 0 else "—"
     msgs_str = _fmt_int(msgs) if msgs > 0 else "—"
-    field_catalog: dict[str, tuple[str, str]] = {
+    catalog: dict[str, tuple[str, str]] = {
         "spend": ("花費", _fmt_money(spend_f)),
-        "spend_plus": (spend_plus_label, _fmt_money(spend_plus_f)),
+        "spend_plus": ("花費*", _fmt_money(spend_plus_f)),
         "impressions": ("曝光", _fmt_int(ins.get("impressions"))),
         "clicks": ("點擊", _fmt_int(ins.get("clicks"))),
         "ctr": ("CTR", _fmt_pct(ins.get("ctr"))),
@@ -6962,17 +6951,100 @@ async def _build_flex_for_config(cfg: dict) -> dict:
             f"{roas_f:.2f}" if roas_f > 0 else "—",
         ),
     }
-
-    selected = list(cfg.get("report_fields") or [])
     if selected:
-        # 使用者自訂欄位:照他們選的順序輸出,跳過 catalog 沒有的 code
-        kpis = [field_catalog[c] for c in selected if c in field_catalog]
+        kpis = [catalog[c] for c in selected if c in catalog]
     else:
-        # 預設(沿用先前行為):流量目標略過私訊指標
         default_codes = ["spend", "impressions", "clicks", "ctr", "cpc"]
         if not traffic_mode:
             default_codes += ["msgs", "msg_cost"]
-        kpis = [field_catalog[c] for c in default_codes]
+        kpis = [catalog[c] for c in default_codes]
+
+    return kpis, {
+        "spend": spend_f,
+        "msgs": msgs,
+        "msg_cost": msg_cost_f,
+        "cpc": cpc_f,
+        "frequency": freq_f,
+        "purchases": purchases_n,
+        "cost_per_purchase": cost_per_purchase_f,
+        "roas": roas_f,
+        "add_to_cart": atc_n,
+        "cost_per_add_to_cart": cost_per_atc_f,
+        "link_clicks": link_clicks_n,
+        "cost_per_link_click": cost_per_link_click_f,
+    }
+
+
+async def _build_flex_for_config(cfg: dict) -> dict:
+    """Produce the LINE Flex Message for one push config row.
+
+    Hits FB's per-campaign Graph endpoint directly (`GET /{campaign_id}`)
+    instead of `_fetch_campaigns_for_account` which would page through
+    every campaign on the account just to pick one — that fan-out is
+    the dominant latency in the manual「測試」button (5–15 s for big
+    accounts). Single-campaign lookup is one HTTP round-trip and
+    completes in well under a second.
+
+    When `cfg["adset_ids"]` is non-empty, the push reports per-adset:
+    one Flex carousel bubble per selected adset, KPI scoped to that
+    adset's own insights, bubble title = adset name.
+    """
+    account_id = cfg["account_id"]
+    campaign_id = cfg["campaign_id"]
+    date_range = cfg["date_range"]
+    date_from = cfg.get("date_from")
+    date_to = cfg.get("date_to")
+    date_preset, time_range = _date_range_to_preset(date_range, date_from, date_to)
+
+    ins_clause = _insights_clause(
+        "spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
+        "inline_link_clicks,cost_per_inline_link_click,"
+        "cost_per_action_type,purchase_roas,website_purchase_roas",
+        date_preset,
+        time_range,
+    )
+    fields = f"id,name,status,objective,daily_budget,lifetime_budget,updated_time,{ins_clause}"
+    try:
+        camp = await fb_get(campaign_id, {"fields": fields})
+    except HTTPException:
+        # Fall back to the account-wide path if FB rejects the
+        # single-campaign request (e.g. campaign was archived in a
+        # way that needs the account-level filter to surface).
+        # LINE flex push only reads campaign-level fields (spend / msgs
+        # / CPC) — no adset nesting needed, so opt out to save BUCU.
+        campaigns = await _fetch_campaigns_for_account(
+            account_id, date_preset, time_range,
+            include_archived=True, lite=False, include_adsets=False,
+        )
+        camp = next((c for c in campaigns if c.get("id") == campaign_id), None)
+        if camp is None:
+            raise RuntimeError(f"Campaign {campaign_id} not found under {account_id}")
+
+    ins_list = (camp.get("insights") or {}).get("data") or []
+    ins = ins_list[0] if ins_list else {}
+
+    objective = camp.get("objective")
+    traffic_mode = _is_traffic_objective(objective)
+    objective_label = _translate_objective(objective)
+
+    markup_pct = await _markup_for_campaign(campaign_id)
+    selected = list(cfg.get("report_fields") or [])
+    kpis, raw_inputs = _kpis_from_insights(
+        ins, traffic_mode=traffic_mode, selected=selected, markup_pct=markup_pct
+    )
+    # Keep these scalars locally for the recommendation + share-page paths below.
+    spend_f = raw_inputs["spend"]
+    cpc_f = raw_inputs["cpc"]
+    freq_f = raw_inputs["frequency"]
+    msgs = raw_inputs["msgs"]
+    msg_cost_f = raw_inputs["msg_cost"]
+    purchases_n = raw_inputs["purchases"]
+    cost_per_purchase_f = raw_inputs["cost_per_purchase"]
+    roas_f = raw_inputs["roas"]
+    atc_n = raw_inputs["add_to_cart"]
+    cost_per_atc_f = raw_inputs["cost_per_add_to_cart"]
+    link_clicks_n = raw_inputs["link_clicks"]
+    cost_per_link_click_f = raw_inputs["cost_per_link_click"]
 
     recommendations = (
         _evaluate_alert_recommendations(
@@ -7072,15 +7144,93 @@ async def _build_flex_for_config(cfg: dict) -> dict:
         else None
     )
 
-    return line_client.build_flex_report(
-        title=title,
-        subtitle=subtitle,
-        objective_label=objective_label,
-        status_label=status_label,
-        status_color=status_color,
-        kpis=kpis,
-        recommendations=recommendations,
-        report_url=report_url,
+    adset_ids = list(cfg.get("adset_ids") or [])
+    if not adset_ids:
+        return line_client.build_flex_report(
+            title=title,
+            subtitle=subtitle,
+            objective_label=objective_label,
+            status_label=status_label,
+            status_color=status_color,
+            kpis=kpis,
+            recommendations=recommendations,
+            report_url=report_url,
+            alt_text=f"{title} {concrete_range or _date_range_label(date_range, date_from, date_to)}",
+        )
+
+    # Per-adset carousel: one bubble per selected adset. Title = adset
+    # name (campaign name moves into the subtitle as context). Each
+    # bubble re-derives KPI from that adset's own insights so the
+    # numbers are scoped, not pro-rated. Adsets are fetched in parallel
+    # because FB rate-limits per-edge, not per-account.
+    adset_fields = f"id,name,status,{ins_clause}"
+    adset_tasks = [
+        fb_get(aid, {"fields": adset_fields}) for aid in adset_ids
+    ]
+    adset_results = await asyncio.gather(*adset_tasks, return_exceptions=True)
+    bubbles: list[dict] = []
+    for aid, res in zip(adset_ids, adset_results):
+        if isinstance(res, BaseException):
+            # Skip adsets that FB can't return — better to ship a
+            # partial carousel than to fail the entire push because
+            # one adset got archived.
+            print(f"[flex] skip adset {aid}: {res}", flush=True)
+            continue
+        adset_data = res if isinstance(res, dict) else {}
+        adset_name = adset_data.get("name") or aid
+        adset_ins_list = (adset_data.get("insights") or {}).get("data") or []
+        adset_ins = adset_ins_list[0] if adset_ins_list else {}
+        adset_kpis, adset_raw = _kpis_from_insights(
+            adset_ins, traffic_mode=traffic_mode, selected=selected, markup_pct=markup_pct
+        )
+        adset_recs = (
+            _evaluate_alert_recommendations(
+                spend=adset_raw["spend"],
+                msgs=adset_raw["msgs"],
+                msg_cost=adset_raw["msg_cost"],
+                cpc=adset_raw["cpc"],
+                frequency=adset_raw["frequency"],
+                objective=objective,
+                purchases=adset_raw["purchases"],
+                cost_per_purchase=adset_raw["cost_per_purchase"],
+                roas=adset_raw["roas"],
+                add_to_cart=adset_raw["add_to_cart"],
+                cost_per_add_to_cart=adset_raw["cost_per_add_to_cart"],
+                link_clicks=adset_raw["link_clicks"],
+                cost_per_link_click=adset_raw["cost_per_link_click"],
+                selected_fields=selected,
+            )
+            if cfg.get("include_recommendations")
+            else None
+        )
+        bubbles.append(
+            line_client._build_flex_report_bubble(
+                title=adset_name,
+                subtitle=f"{title} · {concrete_range or _date_range_label(date_range, date_from, date_to)}",
+                objective_label=objective_label,
+                status_label=status_label,
+                status_color=status_color,
+                kpis=adset_kpis,
+                recommendations=adset_recs,
+                report_url=report_url,
+            )
+        )
+    if not bubbles:
+        # All adset lookups failed — fall back to the campaign-level
+        # bubble rather than raise, so the operator still gets a push.
+        return line_client.build_flex_report(
+            title=title,
+            subtitle=subtitle,
+            objective_label=objective_label,
+            status_label=status_label,
+            status_color=status_color,
+            kpis=kpis,
+            recommendations=recommendations,
+            report_url=report_url,
+            alt_text=f"{title} {concrete_range or _date_range_label(date_range, date_from, date_to)}",
+        )
+    return line_client.build_flex_report_carousel(
+        bubbles=bubbles,
         alt_text=f"{title} {concrete_range or _date_range_label(date_range, date_from, date_to)}",
     )
 
@@ -8157,6 +8307,10 @@ class LinePushConfigPayload(BaseModel):
     # Used only when date_range == "custom"; ISO YYYY-MM-DD strings.
     date_from: Optional[str] = None
     date_to: Optional[str] = None
+    # When non-empty, the flex push reports each selected adset as its
+    # own bubble in a carousel (title = adset name). Empty = campaign-
+    # level single bubble (original behaviour).
+    adset_ids: List[str] = []
 
 
 def _config_row_to_dict(r: asyncpg.Record) -> dict:
@@ -8176,6 +8330,7 @@ def _config_row_to_dict(r: asyncpg.Record) -> dict:
         "include_report_button": bool(r["include_report_button"]),
         "include_recommendations": bool(r["include_recommendations"]),
         "campaign_name": r["campaign_name"] or "",
+        "adset_ids": list(r["adset_ids"] or []),
         "date_from": r["date_from"].isoformat() if r["date_from"] else None,
         "date_to": r["date_to"].isoformat() if r["date_to"] else None,
         "last_run_at": r["last_run_at"].isoformat() if r["last_run_at"] else None,
@@ -8284,6 +8439,19 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                 raise HTTPException(status_code=400, detail="自訂區間需要起訖日期")
             if date_from_val > date_to_val:
                 raise HTTPException(status_code=400, detail="自訂區間起始日期不能晚於結束日期")
+        # Dedup + cap to 10 adsets (LINE carousel hard limit is 12; we
+        # leave headroom for any future "summary" bubble). Order
+        # preserved so the operator's picking order matches the push.
+        adset_ids_clean: list[str] = []
+        seen: set[str] = set()
+        for aid in payload.adset_ids or []:
+            s = (aid or "").strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            adset_ids_clean.append(s)
+            if len(adset_ids_clean) >= 10:
+                break
         if payload.id:
             row = await conn.fetchrow(
                 """
@@ -8293,10 +8461,10 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                     hour = $7, minute = $8, date_range = $9, enabled = $10,
                     report_fields = $11, include_report_button = $12,
                     include_recommendations = $13, campaign_name = $14,
-                    date_from = $15, date_to = $16,
-                    next_run_at = $17, fail_count = 0, last_error = NULL,
+                    date_from = $15, date_to = $16, adset_ids = $17,
+                    next_run_at = $18, fail_count = 0, last_error = NULL,
                     updated_at = NOW()
-                WHERE id = $18::uuid
+                WHERE id = $19::uuid
                 RETURNING *
                 """,
                 payload.campaign_id,
@@ -8315,6 +8483,7 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                 (payload.campaign_name or "").strip(),
                 date_from_val,
                 date_to_val,
+                adset_ids_clean,
                 next_run,
                 payload.id,
             )
@@ -8331,9 +8500,9 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                     frequency, weekdays, month_day, hour, minute,
                     date_range, enabled, report_fields, include_report_button,
                     include_recommendations, campaign_name,
-                    date_from, date_to, next_run_at
+                    date_from, date_to, adset_ids, next_run_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                 ON CONFLICT (campaign_id, group_id, frequency) DO UPDATE
                 SET account_id = EXCLUDED.account_id,
                     weekdays = EXCLUDED.weekdays,
@@ -8348,6 +8517,7 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                     campaign_name = EXCLUDED.campaign_name,
                     date_from = EXCLUDED.date_from,
                     date_to = EXCLUDED.date_to,
+                    adset_ids = EXCLUDED.adset_ids,
                     next_run_at = EXCLUDED.next_run_at,
                     fail_count = 0,
                     last_error = NULL,
@@ -8370,6 +8540,7 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                 (payload.campaign_name or "").strip(),
                 date_from_val,
                 date_to_val,
+                adset_ids_clean,
                 next_run,
             )
     return {"ok": True, "data": _config_row_to_dict(row)}
@@ -8557,19 +8728,45 @@ def _sec_push_row_to_dict(r) -> dict:
     }
 
 
-def _next_security_push_run_at(after: Optional[datetime] = None) -> datetime:
-    """Return the next hourly boundary in UTC for security auto-scan.
+_VALID_SECURITY_PUSH_INTERVALS = (1, 2, 6, 12, 24)
 
-    Security auto-scan is intentionally fixed to hourly, but the old
-    `last_run_at + 60 minutes` schedule drifted when a tick started late
-    or the scan took time. Aligning to the next hour keeps runs at
-    09:00, 10:00, 11:00... local time instead of 09:03, 10:04...
+
+def _next_security_push_run_at(
+    after: Optional[datetime] = None,
+    interval_hours: int = 1,
+) -> datetime:
+    """Return the next scheduled scan boundary in UTC.
+
+    `interval_hours` aligns the schedule to local-clock multiples
+    (e.g. 6 → 0/6/12/18 local). Hourly mode (`interval_hours == 1`)
+    keeps the previous behaviour of bumping to the next top-of-hour.
+
+    Aligning at local-clock boundaries (rather than UTC or
+    last_run_at + N hours) means the operator's intuition matches
+    reality — "每6小時整點" should fire at 00:00 / 06:00 / 12:00 /
+    18:00 local time, regardless of when the previous run completed.
     """
     base = after or datetime.now(timezone.utc)
     if base.tzinfo is None:
         base = base.replace(tzinfo=timezone.utc)
-    base = base.astimezone(timezone.utc)
-    return base.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    interval = int(interval_hours) if interval_hours else 1
+    if interval not in _VALID_SECURITY_PUSH_INTERVALS:
+        interval = 1
+    # Compute in local timezone so 0/6/12/18 etc. align to wall clock.
+    local_tz = _scheduler_tz()
+    local = base.astimezone(local_tz).replace(minute=0, second=0, microsecond=0)
+    # Hour rounded up to the next multiple of `interval`. If we're
+    # exactly at a slot already, advance one full interval (don't
+    # re-fire at the same boundary).
+    next_hour = ((local.hour // interval) + 1) * interval
+    if next_hour >= 24:
+        # Roll into the next day at hour 0; works for 1/2/6/12/24
+        # (the only valid intervals) because all of them divide 24.
+        days_forward = next_hour // 24
+        next_local = local.replace(hour=0) + timedelta(days=days_forward)
+    else:
+        next_local = local.replace(hour=next_hour)
+    return next_local.astimezone(timezone.utc)
 
 
 def _security_auto_scan_since_dt(now: Optional[datetime] = None) -> datetime:
@@ -8631,7 +8828,11 @@ async def upsert_security_push_config(
     # ~1 hr). 60 min keeps total FB calls per workspace well under
     # budget regardless of account count.
     poll_minutes = 60
-    next_run_at = _next_security_push_run_at()
+    # Align `next_run_at` to the operator's currently-selected cadence
+    # so a fresh config doesn't fire 1 hour later when they've set
+    # 24h interval — it should follow the chosen rhythm.
+    interval_hours = await _security_push_interval_hours() or 1
+    next_run_at = _next_security_push_run_at(interval_hours=interval_hours)
     async with pool.acquire() as conn:
         if payload.id:
             row = await conn.fetchrow(
@@ -9428,37 +9629,58 @@ async def _scheduler_loop() -> None:
         raise
 
 
-async def _security_push_enabled() -> bool:
-    """Runtime gate for the security-push tick. Reads
-    `shared_settings.security_push_master_enabled` — defaults to
-    **False** (disabled) when the row is missing. The feature is
-    opt-in via the UI checkbox; without an explicit True, the
-    scheduler stays quiet so it never silently burns FB rate-limit
-    budget on a fresh deploy.
+async def _security_push_interval_hours() -> int:
+    """Runtime gate + cadence for the security-push tick. Returns:
+        0  → feature disabled (no auto-scan, manual test still works)
+        1/2/6/12/24 → scan every N hours, aligned to local-clock slots
+
+    Reads `shared_settings.security_push_interval_hours` first. Falls
+    back to the legacy boolean key `security_push_master_enabled` so
+    existing deployments that flipped the checkbox don't suddenly go
+    silent — True maps to 1-hour cadence (the original behaviour).
+    Defaults to **0** (disabled) when neither row is present so a
+    fresh deploy never silently burns FB rate-limit budget.
     """
     if _db_pool is None:
-        return False
+        return 0
     try:
         async with _db_pool.acquire() as conn:
             row = await conn.fetchrow(
+                "SELECT value FROM shared_settings WHERE key = 'security_push_interval_hours'"
+            )
+            if row is not None and row["value"] is not None:
+                raw = row["value"]
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except ValueError:
+                        return 0
+                try:
+                    n = int(raw)
+                except (TypeError, ValueError):
+                    return 0
+                return n if n in _VALID_SECURITY_PUSH_INTERVALS else 0
+            # Legacy fallback — bool checkbox.
+            legacy = await conn.fetchrow(
                 "SELECT value FROM shared_settings WHERE key = 'security_push_master_enabled'"
             )
     except Exception:
-        return False  # fail-closed: any DB issue → don't push
-    if row is None or row["value"] is None:
-        return False
-    # asyncpg returns JSONB as a JSON-encoded string, not a parsed
-    # Python value. The frontend writes `value: true` (bool) which
-    # serializes to the JSON literal `true` — so we get back the
-    # string "true" here, not Python True. Decode if it's a string;
-    # otherwise trust whatever truthy/falsy value the column holds.
-    raw = row["value"]
+        return 0  # fail-closed: any DB issue → don't push
+    if legacy is None or legacy["value"] is None:
+        return 0
+    raw = legacy["value"]
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
         except ValueError:
-            return False
-    return raw is True
+            return 0
+    return 1 if raw is True else 0
+
+
+async def _security_push_enabled() -> bool:
+    """Backwards-compat boolean gate. New code should use
+    `_security_push_interval_hours()` directly."""
+    return (await _security_push_interval_hours()) > 0
 
 
 # ── 安全監控推播 (event-driven push on new-campaign anomalies) ───
@@ -10154,6 +10376,12 @@ async def _security_push_tick() -> None:
     _fb_call_source.set("security-push")
     if _db_pool is None:
         return
+    interval_hours = await _security_push_interval_hours()
+    if interval_hours == 0:
+        # Belt-and-suspenders gate; the scheduler loop already checks
+        # this before calling, but if the setting flipped between the
+        # gate read and now we want to bail out cleanly.
+        return
     now = datetime.now(timezone.utc)
     async with _db_pool.acquire() as conn:
         async with conn.transaction():
@@ -10171,7 +10399,7 @@ async def _security_push_tick() -> None:
     for row in due:
         cfg = dict(row)
         cid = cfg["id"]
-        next_run_at = _next_security_push_run_at(now)
+        next_run_at = _next_security_push_run_at(now, interval_hours)
         start_mono = time.monotonic()
         run_result: dict = {"matches_count": 0, "pushed_groups": 0}
         run_error: Optional[str] = None
