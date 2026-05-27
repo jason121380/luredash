@@ -85,7 +85,7 @@ const config: Config = {
         // Sidebar + Shell both read it via `w-sidebar` / `ml-sidebar`.
         // Mobile (<768px) uses a 300px drawer width declared in
         // globals.css and is unaffected by this token.
-        sidebar: "200px",
+        sidebar: "224px",
       },
       fontSize: {
         xxs: ["10px", { lineHeight: "1.3" }],
