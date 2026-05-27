@@ -41,7 +41,12 @@ Connects to Facebook Marketing API v21.0 to manage 80+ ad accounts across multip
 | `frontend/` | React + Vite + TypeScript SPA source |
 | `frontend/src/main.tsx` | React entry + QueryClient provider |
 | `frontend/src/App.tsx` | Auth gate + host-level modals |
-| `frontend/src/router.tsx` | Router + lazy-loaded views |
+| `frontend/src/router.tsx` | Router + lazy-loaded views (no `/launch` route — 快速上架 removed 2026-05-26) |
+| `frontend/src/layout/Sidebar.tsx` | Grouped nav (一般/成效/花費/設定) + 工程模式 / 登出 buttons + footer with avatar / tier / Bucu chip |
+| `frontend/src/components/LoadingState.tsx` | Shared loading block — 3×3 blocks-shuffle SVG animation + asymptotic % curve |
+| `frontend/src/views/optimization/` | 優化中心 (formerly AI 幕僚) — per-account collapsible cards rendered by `Markdown.tsx` |
+| `frontend/src/views/billing/BillingView.tsx` | `/billing` — self-serve subscription + Polar customer portal |
+| `agent_personas/` | Python module exporting `PERSONAS` dict (bundled into deploy artefact, NOT read from disk at runtime) |
 | `frontend/public/` | Favicon + PWA icons (copied to `dist/` root at build) |
 | `dist/` | `pnpm build` output — served by FastAPI in prod |
 | `.env` | FB + Gemini credentials (never commit) |
@@ -87,15 +92,32 @@ uvicorn main:app --port 8001 --reload
 ## Views / Layout Structure
 
 ```
-[Left Sidebar 220px - fixed]
-  Logo: LURE META
-  Nav: 儀表板 | 數據分析 | 警示列表 | 安全監控 | AI 幕僚 | 費用中心 | 歷史花費 | 店家花費 | 廣告帳號設定 | LINE 推播設定
-  Bottom: User avatar (no border, no hover, no arrow — dropdown opens upward)
+[Left Sidebar 200px - fixed (`w-sidebar` = tailwind spacing.sidebar)]
+  Logo: METADASH by LURE
+  Nav grouped (一般 / 成效 / 花費 / 設定):
+    一般 → 儀表板 | 數據圖表 | 安全防護 (Beta)
+    成效 → 警示列表 | 優化中心 (Beta)
+    花費 → 費用中心 | 店家花費 | 歷史花費
+    設定 → 廣告帳號 | LINE 推播 | 我的訂閱
+             (button) 工程模式 — opens `EngineeringModal` (lazy)
+             (button) 登出
+  Footer: avatar + name + TierBadge + BucuHeaderChip
+          (no dropdown — 登出 moved into 設定 group; chip moved out of Topbar 2026-05-27)
 
 [Main Content]
-  [Topbar 60px — date picker + controls]
+  [Topbar 60px desktop / 52px mobile — title + date picker + controls (right-aligned)]
   [View-specific body]
 ```
+
+Renames (2026-05-26):
+- 數據分析 → **數據圖表**
+- 安全監控 → **安全防護** (Beta tag)
+- AI 幕僚 → **優化中心** (Beta tag)
+- 廣告帳號設定 → **廣告帳號** / LINE 推播設定 → **LINE 推播**
+- New entry: **我的訂閱** (`/billing`)
+- **快速上架** view + `/api/quick-launch/campaign` endpoint + AI chat (`/api/ai/chat`) **deleted** (commit `e382110`, 2026-05-26). No replacement.
+
+`TopbarSeparator` is now a no-op component (`return null`) — kept as a stub for old call sites until they're removed.
 
 ### Dashboard view
 ```
@@ -192,6 +214,16 @@ Do NOT use `accent-color` inline style — always use the `custom-cb` class.
 - Clicking a `CreativeRow` opens a preview Modal showing the FB thumbnail enlarged, plus the creative title / body text.
 - Backend `get_ads` passes `thumbnail_width=600` and `thumbnail_height=600` when requesting the creative field so the thumbnail is sharp at modal scale. FB returns the nearest CDN size.
 - The dashboard tree card has a transparent bg (only the search header has `bg-white` explicitly). When the table is shorter than the card, the area below 合計 shows the page warm-white instead of a stark white block.
+
+### Optimization view (優化中心, formerly AI 幕僚)
+- Backend `/api/optimization/run-agents-stream` ships campaign digests up to Gemini grouped by ad account; `_format_campaigns_for_prompt` (main.py:10493) renders each account as its own `### 帳號:` section in the markdown table, capped per-account so low-spend accounts still get a slot. The system prompt forces the model to emit `## [帳戶名稱] → ### 嚴重/中等/低 → bullet to-dos`, including a mandatory `### 無待辦` block for clean accounts.
+- Frontend `Markdown.tsx` walks the parsed block list and wraps every `##` (account) heading + its descendants in a collapsible `<details open>` card with chevron icon (`renderGrouped`). Severity `### h3` headings render as pill badges (red / orange / gray for 嚴重 / 中等 / 低).
+- Two-phase hydration in `OptimizationView.tsx`: phase 1 reads cached payload from `localStorage["ai-staff-last-run"]` synchronously; phase 2 fetches `/api/optimization/last-run` and overwrites only if newer than the local copy. This is what lets a user open the same report on a second device without re-spending Gemini quota.
+- Quota lives in `subscriptions.agent_advice_limit` (per-tier; -1 = unlimited). `_count_advice_runs_for_quota` selects monthly-or-lifetime counts based on `agent_advice_period`. Each click of 「產生分析」 inserts one row in `agent_advice_runs` with the JSONB payload.
+
+### LoadingState animation (2026-05-27)
+- The shared `<LoadingState/>` block renders a 3×3 **blocks-shuffle SVG** in the product orange gradient (was previously a Spinner). The 9 `<rect>` boxes animate via inline CSS keyframes (`moveBox5631-1..9`) on a 4s cycle.
+- Progress curve is unchanged: time-based asymptotic `1 - e^(-t/tau)` capped at 92%, OR per-query `loaded/total` if the caller supplies honest counts.
 
 ### Optimistic status toggle (Dashboard)
 - `CampaignRow` / `AdsetRow` / `CreativeRow` keep a local `pendingStatus: FbEntityStatus | null` so the Toggle + Badge flip instantly. Source of truth = `pendingStatus ?? entity.status`. A `useEffect` clears `pendingStatus` whenever `entity.status` changes (server-side update arrived). On mutation error, also clear `pendingStatus` so the UI snaps back to truth. Without this the controlled Toggle component snaps back to the stale prop while the FB round-trip is in flight, and users mash the switch repeatedly.

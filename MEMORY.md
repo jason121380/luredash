@@ -142,7 +142,9 @@ This means the scope is **safe to request even without review** — FB's behavio
 
 ## Layout
 
-- Left sidebar: 220px fixed, flex-column, user avatar at bottom (no border/hover/arrow, dropdown opens upward)
+- Left sidebar: 200px fixed (`w-sidebar`), flex-column, grouped nav (一般 / 成效 / 花費 / 設定), avatar + TierBadge + BucuHeaderChip in the footer
+- **No more avatar dropdown** — 登出 + 工程模式 are first-class items inside the 設定 group (2026-05-26)
+- 工程模式 opens `EngineeringModal` (lazy `EngineeringView`); modal is portaled inside the sidebar tree
 - Dashboard view: account list 240px | stats + 3-level tree table
 - 關注名單 view: account list 240px (dash-acct-item style) | 3 side-by-side alert cards
 - Finance view: account list 160px | toolbar + campaign table
@@ -151,7 +153,11 @@ This means the scope is **safe to request even without review** — FB's behavio
 
 ## Views Renamed
 
-- "AI警示建議" → **關注名單** (as of 2026-04-12)
+- "AI警示建議" → **關注名單** (2026-04-12)
+- 數據分析 → **數據圖表**, 安全監控 → **安全防護** (Beta), AI 幕僚 → **優化中心** (Beta) (2026-05-26)
+- 廣告帳號設定 → **廣告帳號**, LINE 推播設定 → **LINE 推播** (2026-05-26)
+- New: **我的訂閱** (`/billing`), **工程模式** button
+- **Removed**: 快速上架 (`/launch`), AI 對話 (`/api/ai/chat`) — both deleted in `e382110` (2026-05-26, ~430 lines net deletion). No replacement.
 
 ## Private Message Counting (Critical)
 
@@ -279,3 +285,33 @@ Branch `claude/audit-optimize-performance-pmMDU`. Sequence of fixes:
 
 ### Campaign picker shows status badge (commit `884c009`)
 - `GroupPushConfigModal`'s `SearchableCombobox` items now accept an optional `badge: ReactNode`. `CampaignPicker` passes `<Badge status={c.status} />` so the operator can avoid binding a push to a paused / archived campaign.
+
+## 2026-05-26/27 — Sidebar restructure + 優化中心 overhaul + loader swap
+
+Two-day burst on `main`. ~50 commits, themed in three buckets:
+
+### 1. Sidebar restructure (commits `e382110` → `25e88ef`)
+- Nav reorganised into four labeled groups (一般 / 成效 / 花費 / 設定). Used to be one flat list; now each group has a uppercase grey label and tight spacing between items.
+- Sidebar width fixed at `w-sidebar` (200px) and slightly widened (`25e88ef`).
+- Renames (see "Views Renamed" above). 安全防護 + 優化中心 get a small orange Beta tag rendered to the right of the label (`2f316d1`).
+- **Avatar dropdown deleted**: 登出 + 工程模式 are now plain SidebarActionButton rows inside the 設定 group (`bc00ccb`). The footer is just `avatar + name + tier badge + Bucu chip` — no popover, no chevron.
+- BucuHeaderChip moved from Topbar to sidebar footer (`9ab1ca6`). Outline removed (`b1dc1ed`), height aligned with TierBadge (`385b7ca`, `c85412e`), sidebar variant shrunk to fit the narrow footer (`8f73b18`).
+- `/launch` (`QuickLaunchView`, 283 LOC) + `/api/ai/chat` (98 LOC) + `frontend/src/api/client.ts` AI wrapper — all deleted in one `chore:` commit (`e382110`). Nothing in the codebase references them.
+
+### 2. 優化中心 overhaul (commits `5bbbd54` → `c946c62`)
+- Backend system prompt rewritten to force **per-account `## 帳戶名稱` sections** with a strict `### 嚴重 / 中等 / 低` severity hierarchy. Even accounts with no issues must emit `### 無待辦 / - 目前無需介入` so the UI hierarchy is always parallel.
+- `_format_campaigns_for_prompt` reshaped to group campaigns by `account_name`, cap *per account* (not global) so low-spend accounts still get a card, and sort accounts by total spend desc.
+- `Markdown.tsx` got a `renderGrouped()` pass: every `## h2` and the blocks until the next `## h2` become one `<details open>` card with a chevron toggle. `### h3` headings inside the card render as severity pill badges (red / orange / gray).
+- Per-account cards default expanded; user can collapse them. Status normalised so 進行中 / 已暫停 / 已封存 / 已刪除 are stable strings the LLM emits (`4527975`).
+- Restored localStorage-cached last run after a brief regression where switching tabs wiped the panel (`c946c62`).
+
+### 3. Loader swap + mobile polish (commits `2b775ad` → `775158a`)
+- `LoadingState` replaced its spinner with a **3×3 blocks-shuffle SVG** in the product orange linear gradient. 9 `<rect>` boxes, inline CSS keyframes, 4s loop, 42×42 container, centered. SVG ids renamed `loaderBox5631` → `box5631` (`8b1ef14`) to match.
+- Mobile PWA: bottom safe-area padding reduced (`3b90fa0`) and shell spacing tightened (`95d8743`) — the previous values left a noticeable gap under the iOS home indicator.
+- Mobile topbar buttons vertically centered (`aa959ad`) and controls horizontally centered (`40b758c`).
+- Account picker explicitly hidden on desktop with a `md:hidden` guard (`c36299f` then `dd8c955` — the second one is stricter; the first didn't catch a few mount points).
+- Engineering view: tabs become `sticky` so they don't scroll out of view (`ed5f835`), divider removed (`64918ab`), padding tightened (`6473b3f`).
+- Alerts: archived campaigns excluded from the scan pass (`eecfbba`) — they were polluting the "high CPC" cards with stale data.
+- Security view: scan record labels shortened (`c9de181`), 「查看」button removed (`15a4e4a`), all scan records always shown (`5a0ab0c`). Security push button was removed then immediately restored (`1a2b1c1` → `e578c2b` revert) — keep it visible.
+- Store expenses: per-account selection store + 158-line UI block removed (`56ef801`). View now always uses ALL store-tagged accounts; `useUiStore.storeExpensesAccountIds` state is dead.
+- `TopbarSeparator` is now a no-op stub (returns `null`) after `601307f` removed the divider rule globally.
