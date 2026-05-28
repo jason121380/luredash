@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 import path from "node:path";
 
-// Vite config for the LURE Meta Platform React frontend.
+// Vite config for the luredash 廣告管理平台 React frontend.
 //
 // Key decisions:
 // - outDir points to ../dist (repo-root) so FastAPI main.py can serve it
@@ -13,7 +13,7 @@ import path from "node:path";
 //   FastAPI serves both the static bundle and the API.
 // - vite-plugin-pwa generates a Workbox service worker that replaces the
 //   hand-rolled static/sw.js, with the same #FF6B2C theme color and
-//   METADASH branding.
+//   luredash branding.
 export default defineConfig({
   plugins: [
     react(),
@@ -21,9 +21,9 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["favicon.png", "icon-192.png", "icon-512.png"],
       manifest: {
-        name: "LURE META PLATFORM",
-        short_name: "METADASH",
-        description: "Facebook Ads management dashboard for LURE agency",
+        name: "luredash 廣告管理平台",
+        short_name: "luredash",
+        description: "Facebook Ads management dashboard",
         theme_color: "#FF6B2C",
         background_color: "#FFFFFF",
         display: "standalone",

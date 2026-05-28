@@ -2635,7 +2635,7 @@ def _index_bytes() -> bytes:
     """
     if _REACT_INDEX_HTML is not None:
         return _REACT_INDEX_HTML
-    return b"<!doctype html><title>LURE Meta Platform</title><body>build missing</body>"
+    return "<!doctype html><title>luredash 廣告管理平台</title><body>build missing</body>".encode()
 
 
 # index.html must always be revalidated so a redeploy picks up the

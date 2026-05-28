@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 /**
  * Login page — full-screen split layout matching the original design lines
  * 765–798. Left: animated orange gradient blobs on dark panel. Right:
- * white card with METADASH wordmark and "Continue with Facebook" CTA.
+ * white card with luredash title and "Continue with Facebook" CTA.
  *
  * Three visible states:
  *   1. `checking` — FB SDK is still loading, spinner + "驗證登入狀態..."
@@ -54,10 +54,10 @@ export function LoginView() {
         <div className="relative z-[2]">
           <div className="mb-6 h-1 w-11 rounded-sm bg-orange" />
           <div className="mb-3.5 text-[36px] font-extrabold leading-[1.1] tracking-[-1px] text-white">
-            METADASH <span className="text-orange">by LURE</span>
+            luredash
           </div>
           <div className="max-w-[280px] text-sm leading-[1.7] text-white/45">
-            統一管理所有 Meta 廣告帳戶，即時掌握成效數據與異常警示。
+            廣告管理平台，統一掌握成效數據與異常警示。
           </div>
         </div>
       </div>
@@ -78,9 +78,9 @@ export function LoginView() {
         style={{ paddingBottom: "max(40px, env(safe-area-inset-bottom))" }}
       >
         <div className="mb-1 text-[22px] font-extrabold tracking-[-0.3px] text-ink">
-          METADASH <span className="text-orange">by LURE</span>
+          luredash
         </div>
-        <div className="mb-12 text-xs tracking-[0.3px] text-gray-300">META 廣告管理平台</div>
+        <div className="mb-12 text-xs tracking-[0.3px] text-gray-300">廣告管理平台</div>
 
         {status === "checking" ? (
           <div className="flex flex-col items-center gap-2.5 py-5 text-[13px] text-gray-300">

@@ -21,11 +21,11 @@ function renderApp() {
 describe("App scaffold", () => {
   it("renders the LoginView while FB SDK is loading (checking state)", () => {
     renderApp();
-    // Both the dark brand panel AND the right login card say METADASH,
+    // Both the dark brand panel AND the right login card say luredash,
     // so use getAllByText and assert on the count.
-    const headings = screen.getAllByText(/METADASH/i);
+    const headings = screen.getAllByText(/luredash/i);
     expect(headings.length).toBeGreaterThanOrEqual(2);
     // Tagline renders only in the auth-checking state
-    expect(screen.getByText(/META 廣告管理平台/)).toBeInTheDocument();
+    expect(screen.getByText(/廣告管理平台/)).toBeInTheDocument();
   });
 });

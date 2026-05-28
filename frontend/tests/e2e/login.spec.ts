@@ -5,7 +5,7 @@ import { test, expect } from "@playwright/test";
  *
  * Intercepts the FB SDK script load to prevent outbound network calls
  * to facebook.net during CI, and asserts that the LoginView renders
- * its core elements: the METADASH brand wordmark on both panels and
+ * its core elements: the luredash brand title on both panels and
  * either the spinner (auth checking) or the login button (unauth).
  *
  * This is a DETERMINISTIC smoke test — it runs without needing a real
@@ -23,11 +23,11 @@ test.describe("Login view", () => {
 
   test("renders the split-panel brand layout", async ({ page }) => {
     await page.goto("/");
-    // Both panels contain METADASH — 2 matches expected
-    const metadash = page.getByText(/METADASH/);
-    await expect(metadash).toHaveCount(2);
+    // Both panels contain luredash — 2 matches expected
+    const luredash = page.getByText(/luredash/);
+    await expect(luredash).toHaveCount(2);
     // Tagline on the right card
-    await expect(page.getByText("META 廣告管理平台")).toBeVisible();
+    await expect(page.getByText("廣告管理平台")).toBeVisible();
   });
 
   test("advances to the unauth state within the 6s fallback", async ({ page }) => {
