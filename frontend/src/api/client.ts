@@ -1430,9 +1430,23 @@ export interface AgentCampaignDigest {
   clicks: number;
   ctr: number;
   cpc: number;
+  cpm?: number;
   frequency: number;
   msgs: number;
   msg_cost: number;
+  purchases?: number;
+  cost_per_purchase?: number;
+  roas?: number;
+  leads?: number;
+  cost_per_lead?: number;
+  add_to_cart?: number;
+  cost_per_add_to_cart?: number;
+  engagements?: number;
+  cost_per_engagement?: number;
+  link_clicks?: number;
+  cost_per_link_click?: number;
+  app_installs?: number;
+  cost_per_app_install?: number;
 }
 
 /** 403 detail body returned by tier-gated endpoints. */

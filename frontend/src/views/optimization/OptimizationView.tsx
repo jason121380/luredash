@@ -17,7 +17,17 @@ import {
 } from "@/components/UpgradeModal";
 import { Topbar } from "@/layout/Topbar";
 import { toLabel } from "@/lib/datePicker";
-import { getIns, getMsgCount } from "@/lib/insights";
+import {
+  getAtcCount,
+  getCostPerAtc,
+  getCostPerLinkClick,
+  getCostPerPurchase,
+  getLinkClicks,
+  getMsgCount,
+  getPurchaseCount,
+  getRoas,
+  getIns,
+} from "@/lib/insights";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useFiltersStore } from "@/stores/filtersStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -686,6 +696,37 @@ function toValidDate(value: string | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+const LEAD_ACTION_TYPES = [
+  "lead",
+  "onsite_conversion.lead_grouped",
+  "offsite_conversion.fb_pixel_lead",
+] as const;
+const ENGAGEMENT_ACTION_TYPES = [
+  "post_engagement",
+  "page_engagement",
+  "post_reaction",
+  "comment",
+  "like",
+  "link_click",
+] as const;
+const APP_INSTALL_ACTION_TYPES = [
+  "mobile_app_install",
+  "app_install",
+  "omni_app_install",
+] as const;
+
+function firstActionValue(
+  items: { action_type: string; value: string }[] | undefined,
+  candidates: readonly string[],
+): number {
+  if (!items) return 0;
+  for (const type of candidates) {
+    const hit = items.find((a) => a.action_type === type);
+    if (hit) return Number(hit.value) || 0;
+  }
+  return 0;
+}
+
 function buildDigests(
   campaigns: FbCampaign[],
   accounts: Array<{ id: string; name: string }>,
@@ -700,6 +741,12 @@ function buildDigests(
     const isPausedWithSpend = status === "PAUSED" && spend > 0;
     if (!isActive && !isPausedWithSpend) continue;
     const msgs = getMsgCount(c);
+    const purchases = getPurchaseCount(c);
+    const leads = firstActionValue(ins.actions, LEAD_ACTION_TYPES);
+    const addToCart = getAtcCount(c);
+    const engagements = firstActionValue(ins.actions, ENGAGEMENT_ACTION_TYPES);
+    const linkClicks = getLinkClicks(c);
+    const appInstalls = firstActionValue(ins.actions, APP_INSTALL_ACTION_TYPES);
     out.push({
       name: c.name,
       account_name: c._accountId ? (acctName.get(c._accountId) ?? c._accountName ?? "") : "",
@@ -710,9 +757,23 @@ function buildDigests(
       clicks: Number(ins.clicks) || 0,
       ctr: Number(ins.ctr) || 0,
       cpc: Number(ins.cpc) || 0,
+      cpm: Number(ins.cpm) || 0,
       frequency: Number(ins.frequency) || 0,
       msgs,
       msg_cost: msgs > 0 && spend > 0 ? spend / msgs : 0,
+      purchases,
+      cost_per_purchase: getCostPerPurchase(c),
+      roas: getRoas(c),
+      leads,
+      cost_per_lead: firstActionValue(ins.cost_per_action_type, LEAD_ACTION_TYPES),
+      add_to_cart: addToCart,
+      cost_per_add_to_cart: getCostPerAtc(c),
+      engagements,
+      cost_per_engagement: firstActionValue(ins.cost_per_action_type, ENGAGEMENT_ACTION_TYPES),
+      link_clicks: linkClicks,
+      cost_per_link_click: getCostPerLinkClick(c),
+      app_installs: appInstalls,
+      cost_per_app_install: firstActionValue(ins.cost_per_action_type, APP_INSTALL_ACTION_TYPES),
     });
   }
   return out;

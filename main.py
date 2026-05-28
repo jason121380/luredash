@@ -10694,9 +10694,23 @@ class CampaignDigest(BaseModel):
     clicks: float = 0
     ctr: float = 0
     cpc: float = 0
+    cpm: float = 0
     frequency: float = 0
     msgs: int = 0
     msg_cost: float = 0
+    purchases: int = 0
+    cost_per_purchase: float = 0
+    roas: float = 0
+    leads: int = 0
+    cost_per_lead: float = 0
+    add_to_cart: int = 0
+    cost_per_add_to_cart: float = 0
+    engagements: int = 0
+    cost_per_engagement: float = 0
+    link_clicks: int = 0
+    cost_per_link_click: float = 0
+    app_installs: int = 0
+    cost_per_app_install: float = 0
 
 
 class RunAgentsRequest(BaseModel):
@@ -10716,6 +10730,83 @@ def _format_campaign_status_for_prompt(status: Optional[str]) -> str:
         "ARCHIVED": "已封存",
         "DELETED": "已刪除",
     }.get(normalized, normalized or "未回傳")
+
+
+_OBJECTIVE_ADVICE_FAMILY = {
+    "MESSAGES": "訊息",
+    "OUTCOME_SALES": "轉換/銷售",
+    "CONVERSIONS": "轉換/銷售",
+    "CATALOG_SALES": "轉換/銷售",
+    "STORE_VISITS": "來店/轉換",
+    "OUTCOME_LEADS": "名單",
+    "LEAD_GENERATION": "名單",
+    "OUTCOME_ENGAGEMENT": "互動",
+    "POST_ENGAGEMENT": "互動",
+    "PAGE_LIKES": "互動",
+    "EVENT_RESPONSES": "互動",
+    "VIDEO_VIEWS": "互動/觀看",
+    "OUTCOME_TRAFFIC": "流量",
+    "LINK_CLICKS": "流量",
+    "OUTCOME_AWARENESS": "曝光/觸及",
+    "BRAND_AWARENESS": "曝光/觸及",
+    "REACH": "曝光/觸及",
+    "OUTCOME_APP_PROMOTION": "App",
+    "APP_INSTALLS": "App",
+}
+
+
+def _objective_family(raw: Optional[str]) -> str:
+    if not raw:
+        return "未指定"
+    return _OBJECTIVE_ADVICE_FAMILY.get(raw, _translate_objective(raw) or raw)
+
+
+def _fmt_prompt_money(v: float) -> str:
+    return f"${v:.0f}" if v and v > 0 else "-"
+
+
+def _primary_kpi_for_prompt(c: CampaignDigest) -> tuple[str, str, str]:
+    family = _objective_family(c.objective)
+    if family == "訊息":
+        return "私訊", str(c.msgs or 0), _fmt_prompt_money(c.msg_cost)
+    if family in {"轉換/銷售", "來店/轉換"}:
+        if c.purchases > 0 or c.cost_per_purchase > 0 or c.roas > 0:
+            cost = _fmt_prompt_money(c.cost_per_purchase)
+            if c.roas > 0:
+                cost = f"{cost} / ROAS {c.roas:.2f}"
+            return "購買/ROAS", str(c.purchases or 0), cost
+        return "加購", str(c.add_to_cart or 0), _fmt_prompt_money(c.cost_per_add_to_cart)
+    if family == "名單":
+        return "名單", str(c.leads or 0), _fmt_prompt_money(c.cost_per_lead)
+    if family in {"互動", "互動/觀看"}:
+        return "互動", str(c.engagements or 0), _fmt_prompt_money(c.cost_per_engagement)
+    if family == "流量":
+        clicks = c.link_clicks or int(c.clicks or 0)
+        cost = c.cost_per_link_click or c.cpc
+        return "連結點擊", str(clicks), _fmt_prompt_money(cost)
+    if family == "App":
+        return "App 安裝", str(c.app_installs or 0), _fmt_prompt_money(c.cost_per_app_install)
+    if family == "曝光/觸及":
+        return "曝光", f"{int(c.impressions):,}", f"CPM {_fmt_prompt_money(c.cpm)}"
+    return "主要KPI", "-", "-"
+
+
+def _secondary_signals_for_prompt(c: CampaignDigest) -> str:
+    bits = [
+        f"CTR {c.ctr:.2f}%",
+        f"CPC ${c.cpc:.2f}" if c.cpc > 0 else "CPC -",
+        f"頻次 {c.frequency:.2f}" if c.frequency > 0 else "頻次 -",
+    ]
+    family = _objective_family(c.objective)
+    if family != "訊息" and c.msgs > 0:
+        bits.append(f"私訊 {c.msgs}/成本 ${c.msg_cost:.0f}")
+    if family != "名單" and c.leads > 0:
+        bits.append(f"名單 {c.leads}/成本 ${c.cost_per_lead:.0f}" if c.cost_per_lead > 0 else f"名單 {c.leads}")
+    if family not in {"轉換/銷售", "來店/轉換"} and c.purchases > 0:
+        bits.append(f"購買 {c.purchases}/ROAS {c.roas:.2f}" if c.roas > 0 else f"購買 {c.purchases}")
+    if c.add_to_cart > 0:
+        bits.append(f"加購 {c.add_to_cart}")
+    return "、".join(bits)
 
 
 def _format_campaigns_for_prompt(campaigns: List[CampaignDigest]) -> str:
@@ -10744,26 +10835,27 @@ def _format_campaigns_for_prompt(campaigns: List[CampaignDigest]) -> str:
         rows_sorted = sorted(rows, key=lambda c: c.spend, reverse=True)
         shown_rows = rows_sorted[:max_rows_per_account]
         acct_spend = sum(r.spend for r in rows)
-        acct_msgs = sum(r.msgs for r in rows)
         acct_imp = sum(r.impressions for r in rows)
-        acct_avg_msg_cost = (acct_spend / acct_msgs) if acct_msgs > 0 else 0
+        objective_mix: dict[str, int] = {}
+        for r in rows:
+            fam = _objective_family(r.objective)
+            objective_mix[fam] = objective_mix.get(fam, 0) + 1
+        objective_mix_text = "、".join(f"{k} {v}" for k, v in sorted(objective_mix.items()))
         header = (
             f"### 帳號:{acct_name}\n"
             f"- 該帳號活動數: {len(rows)}  顯示活動: {len(shown_rows)} / {len(rows)}\n"
-            f"- 總花費: ${acct_spend:,.0f}  總曝光: {int(acct_imp):,}  "
-            f"總私訊: {acct_msgs}  平均私訊成本: "
-            f"{f'${acct_avg_msg_cost:.0f}' if acct_msgs > 0 else '-'}\n"
+            f"- 總花費: ${acct_spend:,.0f}  總曝光: {int(acct_imp):,}  目標組成: {objective_mix_text or '-'}\n"
         )
         table_lines = [
-            "| 活動 | 狀態 | 目標 | 花費 | CTR | CPC | 頻次 | 私訊 | 私訊成本 |",
-            "|---|---|---|---|---|---|---|---|---|",
+            "| 活動 | 狀態 | 目標 | 判斷主軸 | 花費 | 主KPI | 主成本/ROAS | 輔助訊號 |",
+            "|---|---|---|---|---|---|---|---|",
         ]
         for c in shown_rows:
+            kpi_name, kpi_value, kpi_cost = _primary_kpi_for_prompt(c)
             table_lines.append(
                 f"| {c.name} | {_format_campaign_status_for_prompt(c.status)} | {c.objective or '-'} "
-                f"| ${c.spend:,.0f} | {c.ctr:.2f}% | ${c.cpc:.2f} "
-                f"| {c.frequency:.2f} | {c.msgs} "
-                f"| {f'${c.msg_cost:.0f}' if c.msgs > 0 else '-'} |"
+                f"| {_objective_family(c.objective)} / {kpi_name} | ${c.spend:,.0f} "
+                f"| {kpi_value} | {kpi_cost} | {_secondary_signals_for_prompt(c)} |"
             )
         blocks.append(header + "\n".join(table_lines))
 
@@ -10793,7 +10885,13 @@ async def _call_one_agent(
         "全程繁中(術語 / 活動代號 / 數字保留原文)。\n\n"
         "# 嚴格範圍\n"
         "**只針對表現不好、有問題、需要介入的活動寫 to-do**。範例:\n"
-        "- CPC 過高 / 私訊成本太貴 → 暫停 / 換素材 / 縮受眾\n"
+        "- 訊息目標: 私訊成本太貴 / 有花費但無私訊 → 暫停 / 換素材 / 檢查私訊流程\n"
+        "- 轉換/銷售目標: 購買成本過高 / ROAS 低 / 有加購無購買 → 檢查追蹤 / 優化結帳漏斗 / 暫停\n"
+        "- 名單目標: 名單成本過高 / 有花費但無名單 → 換表單 / 檢查表單追蹤 / 暫停\n"
+        "- 互動目標: 互動成本過高 / 互動量低 / 頻次過高 → 換素材 / 擴受眾\n"
+        "- 流量目標: CPC 或連結點擊成本過高 / CTR 過低 → 換素材 / 換受眾 / 調 bid\n"
+        "- 曝光/觸及目標: CPM 過高 / 頻次過高 → 擴受眾 / 控頻 / 換素材\n"
+        "- App 目標: 安裝成本過高 / 有花費無安裝 → 檢查 App event / 換素材 / 暫停\n"
         "- 頻次過高(受眾疲勞)→ 換素材 / 擴受眾\n"
         "- CTR 過低 → 換素材 / 換目標\n"
         "- 花錢卻沒成效 → 暫停\n"
@@ -10801,6 +10899,22 @@ async def _call_one_agent(
         "不要建議「複製某活動因為 ROAS 高」、不要鼓勵 scale up。\n"
         "**每個帳戶都要出現一個 ## 帳戶區塊**。沒有待辦的帳戶只寫 `### 無待辦` "
         "和 `- 目前無需介入`,不要列好活動。\n\n"
+        "# 目標對應 KPI（必須遵守）\n"
+        "- MESSAGES / 訊息: 主看 私訊、私訊成本; CPC/CTR 只能當輔助,不能用私訊成本評估非訊息目標。\n"
+        "- OUTCOME_SALES / CONVERSIONS / CATALOG_SALES / STORE_VISITS: 主看 購買、購買成本、ROAS、加購漏斗。\n"
+        "- OUTCOME_LEADS / LEAD_GENERATION: 主看 名單數、名單成本。\n"
+        "- OUTCOME_ENGAGEMENT / POST_ENGAGEMENT / PAGE_LIKES / EVENT_RESPONSES / VIDEO_VIEWS: 主看 互動數、互動成本、頻次。\n"
+        "- OUTCOME_TRAFFIC / LINK_CLICKS: 主看 連結點擊、連結點擊成本、CPC、CTR。\n"
+        "- OUTCOME_AWARENESS / BRAND_AWARENESS / REACH: 主看 CPM、曝光量、頻次,不要用私訊或購買判斷。\n"
+        "- OUTCOME_APP_PROMOTION / APP_INSTALLS: 主看 App 安裝、安裝成本; 沒有安裝資料時才用 CPC/CTR 輔助。\n"
+        "- objective 未知時: 只用花費、CTR、CPC、頻次下保守建議,不要硬套私訊。\n"
+        "- 所有建議必須引用該目標的主KPI或表格中的輔助訊號,客觀下判斷; 不要因活動名稱含「私訊」就一律當私訊活動。\n\n"
+        "# 客觀判斷原則\n"
+        "- 先在同一帳戶、同一判斷主軸內比較成本與成效; 不同目標不要互相比私訊成本、購買成本或名單成本。\n"
+        "- 成本高於同帳戶同主軸明顯多數活動,且花費已足夠,才列待辦; 沒有足夠花費或資料缺漏時只列低風險觀察/檢查追蹤。\n"
+        "- 有花費但主KPI為 0 是高風險訊號; 若同時 CPC/CTR 也差,可列嚴重; 若 CPC/CTR 正常,優先建議檢查追蹤或漏斗。\n"
+        "- 頻次只代表疲勞/觸及飽和,不能單獨推論轉換差; 要搭配 CTR 下降、成本升高或主KPI不足。\n"
+        "- 不知道原因時用「檢查追蹤 / 檢查漏斗」,不要武斷寫暫停。\n\n"
         "# 輸出格式\n"
         "**只寫待辦,不寫分析、不寫診斷段落、不寫開場白、不寫總結。**\n"
         "固定使用「帳戶 → 嚴重程度 → 待辦」階層:\n\n"
