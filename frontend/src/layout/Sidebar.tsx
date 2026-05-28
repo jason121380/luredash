@@ -190,9 +190,11 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
     >
       {/* Logo header */}
       <div className="flex h-[50px] shrink-0 items-center gap-2 border-b border-border px-4 md:h-[60px]">
-        <div className="text-[15px] font-bold tracking-[-0.2px] text-ink">
-          METADASH <span className="text-orange">by LURE</span>
-        </div>
+        <img
+          src="/metadash-logo.svg"
+          alt="Metadash"
+          className="h-[22px] max-w-[132px] object-contain"
+        />
       </div>
 
       {/* Nav — owns the scroll so the user dropdown below stays
