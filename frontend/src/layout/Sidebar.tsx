@@ -2,6 +2,7 @@ import { useSubscription } from "@/api/hooks/useSubscription";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { BucuHeaderChip } from "@/components/BucuHeaderChip";
 import { TierBadge } from "@/components/TierBadge";
+import metadashLogoUrl from "@/assets/metadash-logo.svg";
 import { cn } from "@/lib/cn";
 import { withReloadOnChunkError } from "@/lib/chunkReload";
 import { prefetchView } from "@/router";
@@ -191,7 +192,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
       {/* Logo header */}
       <div className="flex h-[50px] shrink-0 items-center gap-2 border-b border-border px-4 md:h-[60px]">
         <img
-          src="/metadash-logo.svg"
+          src={metadashLogoUrl}
           alt="Metadash"
           className="h-[22px] max-w-[132px] object-contain"
         />
