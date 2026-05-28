@@ -9134,6 +9134,79 @@ def _security_test_match_from_record(raw: Any) -> Optional[dict]:
     }
 
 
+async def _matches_from_recent_manual_scan(
+    *, owner_uid: str, since_dt: datetime
+) -> list[dict]:
+    """Return matches from the most recent **manual** scan record by
+    `owner_uid`, formatted as raw match dicts that
+    `_filter_security_matches_for_config` understands.
+
+    Used by `_security_push_run_one` to bypass the backend scan when
+    a fresh manual scan exists — the manual record is what the user
+    sees in 待查看, so reusing it eliminates the auto/manual scan
+    divergence (auto returning 0 異常 while manual shows 2). Returns
+    `[]` if no manual record is fresh enough, so the caller can fall
+    back to the backend scan path.
+
+    Freshness window: the manual record must be from the same
+    `since_dt` window (i.e. within the current month) AND less than
+    24 hours old. The latter guards against pushing data the operator
+    last looked at days ago — if no recent manual scan exists, we'd
+    rather risk a 0-异常 auto scan than push stale snapshots.
+    """
+    if _db_pool is None:
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    try:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT matches, scanned_at
+                FROM security_scan_records
+                WHERE fb_user_id = $1
+                  AND trigger_type = 'manual'
+                  AND scanned_at >= $2
+                ORDER BY scanned_at DESC
+                LIMIT 1
+                """,
+                owner_uid,
+                cutoff,
+            )
+    except Exception as e:
+        print(f"[security-push] manual scan lookup failed: {e}", flush=True)
+        return []
+    if not row:
+        return []
+    raw_matches = _jsonb_list(row["matches"])
+    out: list[dict] = []
+    for raw in raw_matches:
+        if not isinstance(raw, dict):
+            continue
+        c = raw.get("campaign") or {}
+        if not isinstance(c, dict) or not c.get("id"):
+            continue
+        created_dt = _parse_fb_created_time(c.get("created_time"))
+        if not created_dt or created_dt <= since_dt:
+            continue
+        # Mirror the shape that `_collect_security_matches` returns so
+        # `_filter_security_matches_for_config` can sort + filter it.
+        # Anomalies stay as the user computed them client-side; the
+        # filter step strips ones that don't match cfg.anomaly_filters.
+        out.append(
+            {
+                "campaign": c,
+                "account_id": raw.get("account_id") or "",
+                "account_name": raw.get("account_name") or "",
+                "anomalies": list(raw.get("anomalies") or []),
+                "creator": raw.get("creator"),
+                "spend": raw.get("spend"),
+                "spend_range_label": raw.get("spend_range_label"),
+                "_created_dt": created_dt,
+            }
+        )
+    return out
+
+
 async def _latest_security_scan_matches_for_test(
     conn: Any,
     *,
@@ -10330,9 +10403,29 @@ async def _security_push_run_one(cfg: dict) -> dict:
     ctx_token = _current_fb_user_id.set(owner_uid)
     try:
         scan_cfg = {**cfg, "account_ids": account_ids}
-        matches = await _collect_security_matches_cached(
-            scan_cfg, since_dt, require_anomaly=True, limit=None
+        # First try the latest *manual* scan record for this owner
+        # within the current `since_dt` window. The manual scan is
+        # what the user sees in 待查看 (computed in the browser from
+        # the same /api/overview the auto-scan calls), so reusing it
+        # eliminates the auto/manual divergence where backend scan
+        # returns 0 異常 while the browser shows 2. See
+        # 「套手動的邏輯就好啦」 — 2026-05-28.
+        manual_matches = await _matches_from_recent_manual_scan(
+            owner_uid=owner_uid, since_dt=since_dt
         )
+        if manual_matches:
+            matches = _filter_security_matches_for_config(
+                manual_matches,
+                cfg,
+                since_dt,
+                require_anomaly=True,
+                limit=None,
+                safe_ids=await _load_safe_campaign_ids(),
+            )
+        else:
+            matches = await _collect_security_matches_cached(
+                scan_cfg, since_dt, require_anomaly=True, limit=None
+            )
         if not matches:
             return {
                 "matches_count": 0,
