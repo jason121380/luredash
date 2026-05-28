@@ -194,7 +194,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
         <img
           src={metadashLogoUrl}
           alt="Metadash"
-          className="h-[22px] max-w-[132px] object-contain"
+          className="h-[18px] max-w-[106px] object-contain"
         />
       </div>
 
