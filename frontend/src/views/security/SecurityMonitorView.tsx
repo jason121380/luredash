@@ -157,7 +157,14 @@ export function SecurityMonitorView() {
   const [tab, setTab] = useState<SecurityTab>("pending");
   const [pushModalOpen, setPushModalOpen] = useState(false);
   const sharedQuery = useSharedSettings();
-  const autoScanEnabled = sharedQuery.data?.security_push_master_enabled === true;
+  const securityPushIntervalRaw = sharedQuery.data?.security_push_interval_hours;
+  const securityPushIntervalHours =
+    typeof securityPushIntervalRaw === "number"
+      ? securityPushIntervalRaw
+      : Number(securityPushIntervalRaw ?? 0);
+  const autoScanEnabled =
+    [1, 2, 6, 12, 24].includes(securityPushIntervalHours) ||
+    sharedQuery.data?.security_push_master_enabled === true;
 
   // 「立即掃描」 gate — flipping this to true triggers the
   // useMultiAccountOverview query below. Default false so just

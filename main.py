@@ -865,6 +865,29 @@ async def lifespan(app: FastAPI):
                     ON security_push_logs (config_id, run_at DESC)
                     """
                 )
+                # Delivery de-dupe: auto-scan intentionally re-runs a
+                # full month-to-date snapshot every scheduled tick, but
+                # LINE should not receive the same campaign alert every
+                # hour. Track successful delivery per config/group/
+                # campaign so each group gets each campaign at most once.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS security_push_deliveries (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        config_id UUID NOT NULL REFERENCES security_push_configs(id) ON DELETE CASCADE,
+                        group_id TEXT NOT NULL,
+                        campaign_id TEXT NOT NULL,
+                        first_pushed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        UNIQUE (config_id, group_id, campaign_id)
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_sec_push_deliveries_config_group
+                    ON security_push_deliveries (config_id, group_id)
+                    """
+                )
                 # `security_scan_records`: full snapshot of WHAT was found
                 # in each scan (specific campaigns + anomalies + budget /
                 # spend), not just the count. Lets the team go back later
@@ -10015,6 +10038,55 @@ def _filter_security_matches_for_config(
     return out
 
 
+def _security_match_campaign_id(m: dict) -> str:
+    campaign = m.get("campaign") or {}
+    return str(campaign.get("id") or m.get("campaign_id") or m.get("id") or "")
+
+
+async def _security_delivered_campaign_ids(
+    config_id: Any,
+    group_ids: list[str],
+) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {str(gid): set() for gid in group_ids}
+    if _db_pool is None or not group_ids:
+        return out
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT group_id, campaign_id
+            FROM security_push_deliveries
+            WHERE config_id = $1 AND group_id = ANY($2::text[])
+            """,
+            config_id,
+            list(group_ids),
+        )
+    for r in rows:
+        gid = str(r["group_id"])
+        out.setdefault(gid, set()).add(str(r["campaign_id"]))
+    return out
+
+
+async def _record_security_deliveries(
+    config_id: Any,
+    group_id: str,
+    campaign_ids: list[str],
+) -> None:
+    if _db_pool is None or not campaign_ids:
+        return
+    campaign_ids = list(dict.fromkeys([cid for cid in campaign_ids if cid]))
+    if not campaign_ids:
+        return
+    async with _db_pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO security_push_deliveries (config_id, group_id, campaign_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (config_id, group_id, campaign_id) DO NOTHING
+            """,
+            [(config_id, group_id, cid) for cid in campaign_ids],
+        )
+
+
 async def _collect_security_matches_cached(
     cfg: dict,
     since_dt: datetime,
@@ -10297,8 +10369,8 @@ async def _collect_security_matches(
 
 
 async def _security_push_run_one(cfg: dict) -> dict:
-    """Process a single security_push_configs row: fetch campaigns
-    created since last_run_at, flag matches, push LINE message.
+    """Process a single security_push_configs row: run a month-to-date
+    scan, flag matches, and push only not-yet-delivered LINE alerts.
 
     Returns ``{matches_count, pushed_groups, matches}``. The caller
     persists the count + summary into ``security_push_logs`` AND
@@ -10341,21 +10413,40 @@ async def _security_push_run_one(cfg: dict) -> dict:
                 "account_ids": account_ids,
             }
 
-        # Flex card carousel — one bubble per campaign. Matches the
-        # shape the test endpoint sends so the production push looks
-        # identical to what the user saw in the test preview.
-        flex = line_client.build_security_alert_flex(
-            matches,
-            tz_name=str(_scheduler_tz()),
-            view_url=_security_view_url(),
-        )
-        for gid in cfg.get("group_ids") or []:
+        # Auto-scan re-runs the full month-to-date window each tick so
+        # the scan record matches the manual「立即掃描」surface. LINE
+        # delivery is different: once a group has received a campaign
+        # alert from this config, don't spam the same campaign every
+        # hour. De-dupe per group so a failed group can still receive
+        # the campaign on a later tick.
+        group_ids = [str(gid) for gid in (cfg.get("group_ids") or []) if gid]
+        delivered_by_group = await _security_delivered_campaign_ids(cfg["id"], group_ids)
+        for gid in group_ids:
+            delivered = delivered_by_group.get(gid, set())
+            pending_pairs = [
+                (m, cid)
+                for m in matches
+                if (cid := _security_match_campaign_id(m)) and cid not in delivered
+            ]
+            pending_matches = [m for m, _cid in pending_pairs]
+            if not pending_matches:
+                continue
+            flex = line_client.build_security_alert_flex(
+                pending_matches,
+                tz_name=str(_scheduler_tz()),
+                view_url=_security_view_url(),
+            )
             try:
                 await line_client.line_push(
                     _http_client,
                     gid,
                     [flex],
                     access_token=access_token,
+                )
+                await _record_security_deliveries(
+                    cfg["id"],
+                    gid,
+                    [cid for _m, cid in pending_pairs],
                 )
                 pushed_groups += 1
             except line_client.LinePushError as e:
