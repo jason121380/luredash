@@ -643,17 +643,22 @@ function ChannelShareModal({
       onOpenChange={(v) => !v && onClose()}
       title={`共享「${channel.name}」`}
       subtitle="輸入對方的 Facebook User ID 邀請共同管理此 OA。對方確認後即可看到底下的群組與推播設定。"
+      width={520}
     >
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
           <span className="text-[11px] font-semibold text-gray-500">邀請新使用者</span>
-          <div className="flex items-stretch gap-1.5">
+          {/* Wrap on narrow widths — the FB user id is a 17-digit
+              string and the select + button can't share a 320-360px
+              row without being clipped. On ≥sm everything still fits
+              on one line. */}
+          <div className="flex flex-wrap items-stretch gap-1.5">
             <input
               type="text"
               value={inviteId}
               onChange={(e) => setInviteId(e.currentTarget.value)}
               placeholder="Facebook User ID(對方登入後可在右上角頭像取得)"
-              className="flex-1 rounded border border-border bg-bg px-2.5 py-1.5 text-[13px] outline-none focus:border-orange focus:bg-white"
+              className="min-w-0 flex-1 basis-full rounded border border-border bg-bg px-2.5 py-1.5 text-[13px] outline-none focus:border-orange focus:bg-white sm:basis-auto"
             />
             <select
               value={inviteRole}
