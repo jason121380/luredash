@@ -653,7 +653,7 @@ function ChannelShareModal({
               value={inviteId}
               onChange={(e) => setInviteId(e.currentTarget.value)}
               placeholder="Facebook User ID(對方登入後可在右上角頭像取得)"
-              className="flex-1 rounded border border-border bg-bg px-2.5 py-1.5 text-[13px] outline-none focus:border-orange focus:bg-white"
+              className="min-w-0 flex-1 rounded border border-border bg-bg px-2.5 py-1.5 text-[13px] outline-none focus:border-orange focus:bg-white"
             />
             <select
               value={inviteRole}
