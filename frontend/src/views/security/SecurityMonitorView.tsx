@@ -415,6 +415,7 @@ export function SecurityMonitorView() {
         out.push({
           id: c.id,
           name: c.name,
+          status: c.status ?? null,
           created_time: c.created_time ?? r.createdAt.toISOString(),
           daily_budget: effectiveDailyBudget(c),
           spend: displaySpendByCampaignId.get(c.id) ?? null,

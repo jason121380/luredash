@@ -133,6 +133,7 @@ export interface SecurityPushConfig {
 export interface SecurityPushTestCard {
   id: string;
   name: string;
+  status?: string | null;
   /** ISO 8601 from FB, e.g. "2026-05-23T01:46:00+0000". */
   created_time: string;
   /** Raw FB value (same scale dashboard renders directly). */

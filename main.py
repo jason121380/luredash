@@ -96,6 +96,7 @@ _http_client: Optional[httpx.AsyncClient] = None
 # empty / 503 rather than crashing, so the rest of the app stays usable.
 _db_pool: Optional[asyncpg.Pool] = None
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+DEFAULT_PUBLIC_SITE_URL = "https://luredash.lure.com.tw"
 
 # Limit concurrent outbound FB API calls. Keep this deliberately below
 # "what the server can handle": FB BUCU is dominated by processing time
@@ -4613,8 +4614,8 @@ async def create_checkout(payload: CheckoutPayload):
     site = (os.getenv("PUBLIC_SITE_URL") or "").rstrip("/")
     if not site:
         # Use the request scheme/host as a last resort. Manual setting
-        # is preferred (PUBLIC_SITE_URL=https://metadash.zeabur.app).
-        site = "https://metadash.zeabur.app"
+        # is preferred (PUBLIC_SITE_URL=https://luredash.lure.com.tw).
+        site = DEFAULT_PUBLIC_SITE_URL
 
     body = {
         "products": [cfg["polar_product_id"]],
@@ -6724,7 +6725,7 @@ _SHARE_DATE_PRESET = {
     "month_to_yesterday": "this_month",
 }
 
-PUBLIC_SITE_URL = os.getenv("PUBLIC_SITE_URL", "").rstrip("/")
+PUBLIC_SITE_URL = (os.getenv("PUBLIC_SITE_URL") or DEFAULT_PUBLIC_SITE_URL).rstrip("/")
 
 
 def _security_view_url() -> Optional[str]:
@@ -9074,6 +9075,7 @@ async def list_security_scan_records(
 class _TestCardPayload(BaseModel):
     id: str
     name: str
+    status: Optional[str] = None
     created_time: str
     daily_budget: Optional[int] = None  # raw FB value, same scale as dashboard
     # Raw FB spend string from `insights.data[0].spend` (account currency
@@ -9215,6 +9217,7 @@ async def test_security_push_config(
                 "campaign": {
                     "id": c.id,
                     "name": c.name,
+                    "status": c.status,
                     "created_time": c.created_time,
                     "daily_budget": str(c.daily_budget) if c.daily_budget else None,
                 },
