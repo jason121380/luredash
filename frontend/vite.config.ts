@@ -21,7 +21,7 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["favicon.png", "icon-192.png", "icon-512.png"],
       manifest: {
-        name: "luredash 廣告管理平台",
+        name: "luredash | Meta AI 廣告智能平台",
         short_name: "luredash",
         description: "Facebook Ads management dashboard",
         theme_color: "#FF6B2C",
