@@ -184,6 +184,23 @@ describe("buildAccountRows", () => {
     expect(rows[0]?.plus).toBe(1650); // (1000+500) * 1.1
   });
 
+  it("sums campaign-level 花費+% so row markup overrides affect account totals", () => {
+    const insights = {
+      act_1: { spend: "3000" },
+      act_2: { spend: "500" },
+    };
+    const camps = [
+      campaign("1", "act_1", "A", 1000),
+      campaign("2", "act_1", "B", 2000),
+      campaign("3", "act_2", "C", 500),
+    ];
+    const rows = buildAccountRows([accA, accB], insights, camps, { "2": 20 }, 10);
+
+    expect(rows[1]?.spend).toBe(3000);
+    expect(rows[1]?.plus).toBe(3500); // 1000*1.1 + 2000*1.2
+    expect(rows[0]?.plus).toBe(4050); // account totals sum campaign-level plus
+  });
+
   it("falls back to campaign sum when insights missing", () => {
     const insights: Record<string, FbInsights | null> = { act_1: null };
     const camps = [campaign("1", "act_1", "A", 300), campaign("2", "act_1", "B", 200)];

@@ -235,8 +235,14 @@ export function buildAccountRows(
 ): FinAccountRow[] {
   const perAccount: FinAccountRow[] = accounts.map((acc) => {
     const spend = accountSpend(acc.id, insights, campaigns);
-    const m = markupFor(acc.id, rowMarkups, defaultMarkup);
-    const plus = spend * (1 + m / 100);
+    const accountCampaigns = campaigns.filter((c) => c._accountId === acc.id);
+    const plus =
+      accountCampaigns.length > 0
+        ? accountCampaigns.reduce((sum, c) => {
+            const m = markupFor(c.id, rowMarkups, defaultMarkup);
+            return sum + spendPlus(spendOf(c), m);
+          }, 0)
+        : spendPlus(spend, defaultMarkup);
     const loaded = insights[acc.id] !== undefined;
     return {
       id: acc.id,
