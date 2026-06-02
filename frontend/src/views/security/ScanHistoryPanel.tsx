@@ -226,7 +226,8 @@ export function ScanHistoryPanel() {
                         {formatExact(r.scanned_at)}
                       </span>
                       <span className="mt-1 block text-[11px] text-gray-500">
-                        {r.account_ids.length} 帳戶 · {r.matches_count} 異常 ·{" "}
+                        {r.account_ids.length} 帳戶 · {r.matches_count}{" "}
+                        {r.trigger_type === "manual" ? "待查看" : "異常"} ·{" "}
                         {(r.duration_ms / 1000).toFixed(1)}s
                       </span>
                     </button>
@@ -257,7 +258,11 @@ export function ScanHistoryPanel() {
                   {isOpen && (
                     <div className="border-t border-border px-3 py-2">
                       {r.matches.length === 0 ? (
-                        <div className="text-[12px] text-gray-400">該次掃描無異常活動</div>
+                        <div className="text-[12px] text-gray-400">
+                          {r.trigger_type === "manual"
+                            ? "該次掃描無待查看活動"
+                            : "該次掃描無異常活動"}
+                        </div>
                       ) : (
                         <ul className="flex flex-col gap-1.5">
                           {r.matches.map((m) => (
