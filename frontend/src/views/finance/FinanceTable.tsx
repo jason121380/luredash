@@ -166,6 +166,9 @@ export function FinanceTable({ campaigns, multiAcct, search, hideZero, date }: F
               const m = markupFor(camp.id, rowMarkups, defaultMarkup);
               const plus = spendPlus(sp, m);
               const isPinned = pinnedIds.includes(camp.id);
+              const nick = nicknames[camp.id];
+              const label = formatNickname(nick);
+              const hasNickname = Boolean(label);
               return (
                 <tr
                   key={camp.id}
@@ -195,16 +198,13 @@ export function FinanceTable({ campaigns, multiAcct, search, hideZero, date }: F
                       <span
                         className={cn(
                           "min-w-0 flex-1 truncate",
+                          !hasNickname && "font-bold text-orange",
                           multiAcct
                             ? "max-w-[160px] md:max-w-[260px]"
                             : "max-w-[200px] md:max-w-[300px]",
                         )}
                       >
-                        {(() => {
-                          const nick = nicknames[camp.id];
-                          const label = formatNickname(nick);
-                          return showNicknames && label ? label : camp.name;
-                        })()}
+                        {showNicknames && label ? label : camp.name}
                       </span>
                       <button
                         type="button"
