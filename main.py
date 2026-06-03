@@ -5402,6 +5402,13 @@ async def get_account_activities(
     account_id: str,
     since: int = Query(..., description="Unix timestamp (inclusive) lower bound"),
     until: int = Query(..., description="Unix timestamp (exclusive) upper bound"),
+    object_id: Optional[str] = Query(
+        None,
+        description=(
+            "Optional FB object id (campaign/adset/ad). When set, ask FB to "
+            "return activities for that object instead of walking the whole account log."
+        ),
+    ),
     event_types: Optional[str] = Query(
         None,
         description=(
@@ -5413,8 +5420,10 @@ async def get_account_activities(
 ):
     """Proxy the FB Activity Log for an ad account.
 
-    Powers the 安全監控 view's per-campaign edit-history expand. Returns
-    raw activity rows so the frontend can group by ``object_id``.
+    Powers the 安全監控 view's per-campaign edit-history expand. When
+    ``object_id`` is provided we first ask FB to narrow the account log
+    to that campaign/ad object (``oid``). Returns raw activity rows so
+    the frontend can still defensively group by ``object_id``.
 
     Activity fields requested: who (actor_name), what (event_type +
     translated_event_type), when (event_time), which object
@@ -5423,6 +5432,9 @@ async def get_account_activities(
     changes (FB's shape is unstable so we surface it verbatim).
 
     Two modes:
+      - ``object_id`` set (row expand): apply FB-side object narrowing,
+        max_pages=1. This avoids walking the whole account log for the
+        common "show me this campaign's edits" action.
       - ``event_types`` set (e.g. creator-name prefetch): apply FB-side
         ``filtering`` so we only walk through hits, plus max_pages=2.
         High-activity accounts that previously fanned out to 10+ pages
@@ -5441,6 +5453,11 @@ async def get_account_activities(
         ),
         "limit": "500",
     }
+    if object_id:
+        # FB's ad-account Activity Log accepts object narrowing as `oid`
+        # on supported object types. Keep `object_id` as our public API
+        # name because it matches the returned field.
+        params["oid"] = object_id
     if event_types:
         types_list = [t.strip() for t in event_types.split(",") if t.strip()]
         if types_list:
@@ -5449,12 +5466,30 @@ async def get_account_activities(
             )
             max_pages = 2
         else:
-            max_pages = 3
+            max_pages = 1 if object_id else 3
+    elif object_id:
+        max_pages = 1
     else:
         max_pages = 3
-    data = await fb_get_paginated(
-        f"{account_id}/activities", params, max_pages=max_pages
-    )
+    try:
+        data = await fb_get_paginated(
+            f"{account_id}/activities", params, max_pages=max_pages
+        )
+    except HTTPException as exc:
+        detail = str(exc.detail or "")
+        is_param_error = exc.status_code == 400 and (
+            "[code=100" in detail
+            or "Invalid parameter" in detail
+            or "Unsupported" in detail
+            or "unknown field" in detail.lower()
+        )
+        if not object_id or not is_param_error:
+            raise
+        fallback_params = dict(params)
+        fallback_params.pop("oid", None)
+        data = await fb_get_paginated(
+            f"{account_id}/activities", fallback_params, max_pages=3
+        )
     return {"data": data}
 
 

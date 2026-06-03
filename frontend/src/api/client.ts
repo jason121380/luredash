@@ -612,12 +612,14 @@ export const api = {
       accountId: string,
       since: number,
       until: number,
+      objectId?: string,
       eventTypes?: string,
     ) => {
       const query: Record<string, string> = {
         since: String(since),
         until: String(until),
       };
+      if (objectId) query.object_id = objectId;
       if (eventTypes) query.event_types = eventTypes;
       return request<{ data: FbActivity[] }>(
         "GET",

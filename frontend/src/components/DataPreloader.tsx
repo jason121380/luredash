@@ -26,8 +26,8 @@ import { useEffect, useRef, useState } from "react";
  *     it generously without thinking about FB rate limits here.
  *
  * After all accounts resolve, the preloader seeds:
- *   - Per-account cache: `["overview", "act_X", date, true]`
- *   - Batch cache: `["overview", "act_1,act_2,...", date, true]`
+ *   - Per-account cache: `["overview", "act_X", date, true, false]`
+ *   - Batch cache: `["overview", "act_1,act_2,...", date, true, false]`
  * so both Dashboard (single-account) and Alerts/Finance (all-accounts)
  * get instant cache hits on first render.
  */
@@ -157,10 +157,10 @@ export function DataPreloader({ onComplete }: { onComplete: () => void }) {
           allResults[acc.id] = bundle;
 
           // Seed per-account cache (for Dashboard single-select)
-          queryClient.setQueryData(["overview", acc.id, date, true], {
+          queryClient.setQueryData(["overview", acc.id, date, true, false], {
             data: { [acc.id]: bundle },
           });
-          queryClient.setQueryData(["overview-lite", acc.id, date, true], {
+          queryClient.setQueryData(["overview-lite", acc.id, date, true, false], {
             data: { [acc.id]: bundle },
           });
         }
@@ -194,8 +194,8 @@ export function DataPreloader({ onComplete }: { onComplete: () => void }) {
       const sortedIds = [...accounts.map((a) => a.id)].sort();
       const idsKey = sortedIds.join(",");
       const batchData = { data: allResults };
-      queryClient.setQueryData(["overview", idsKey, date, true], batchData);
-      queryClient.setQueryData(["overview-lite", idsKey, date, true], batchData);
+      queryClient.setQueryData(["overview", idsKey, date, true, false], batchData);
+      queryClient.setQueryData(["overview-lite", idsKey, date, true, false], batchData);
 
       didPreload = true;
       setDone(true);

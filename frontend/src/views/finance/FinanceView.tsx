@@ -13,6 +13,8 @@ import { useAccountsStore } from "@/stores/accountsStore";
 import { useFiltersStore } from "@/stores/filtersStore";
 import { useFinanceStore } from "@/stores/financeStore";
 import { useUiStore } from "@/stores/uiStore";
+import type { FbCampaign, FbInsights } from "@/types/fb";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { FinanceAccountPanel } from "./FinanceAccountPanel";
@@ -23,6 +25,21 @@ import {
   filterFinanceRows,
   sortFinanceRows,
 } from "./financeData";
+
+interface OverviewCacheData {
+  data?: Record<
+    string,
+    {
+      campaigns?: FbCampaign[];
+      insights?: FbInsights | null;
+      error?: string | null;
+    }
+  >;
+}
+
+function sameDateConfig(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
 
 /**
  * Finance view (費用中心) — left account panel + toolbar + campaign
@@ -35,6 +52,7 @@ import {
  * the browser via a data URL anchor click (matches legacy).
  */
 export function FinanceView() {
+  const queryClient = useQueryClient();
   const accountsQuery = useAccounts();
   const allAccounts = accountsQuery.data ?? [];
   const visible = useAccountsStore((s) => s.visibleAccounts)(allAccounts);
@@ -94,6 +112,53 @@ export function FinanceView() {
     source: "finance",
   });
 
+  const cachedAccountData = useMemo(() => {
+    const visibleIds = new Set(visible.map((a) => a.id));
+    const campaigns: FbCampaign[] = [];
+    const insights: Record<string, FbInsights | null> = {};
+    const seenCampaignIds = new Set<string>();
+
+    for (const [key, value] of queryClient.getQueriesData<OverviewCacheData>({
+      queryKey: ["overview"],
+    })) {
+      if (!Array.isArray(key)) continue;
+      const [, , keyDate, includeArchived, includeAdsets] = key;
+      if (includeArchived !== true) continue;
+      if (includeAdsets === true) continue;
+      if (!sameDateConfig(keyDate, date)) continue;
+
+      const data = value?.data ?? {};
+      for (const acc of visible) {
+        const bundle = data[acc.id];
+        if (!bundle || bundle.error) continue;
+
+        insights[acc.id] = bundle.insights ?? null;
+        for (const campaign of bundle.campaigns ?? []) {
+          if (seenCampaignIds.has(campaign.id)) continue;
+          seenCampaignIds.add(campaign.id);
+          campaigns.push({
+            ...campaign,
+            _accountId: campaign._accountId ?? acc.id,
+            _accountName: campaign._accountName ?? acc.name,
+          });
+        }
+      }
+    }
+
+    for (const campaign of overview.campaigns) {
+      const accountId = campaign._accountId;
+      if (!accountId || !visibleIds.has(accountId)) continue;
+      if (seenCampaignIds.has(campaign.id)) continue;
+      seenCampaignIds.add(campaign.id);
+      campaigns.push(campaign);
+    }
+    for (const [accountId, insight] of Object.entries(overview.insights)) {
+      if (visibleIds.has(accountId)) insights[accountId] = insight;
+    }
+
+    return { campaigns, insights };
+  }, [date, overview.campaigns, overview.insights, queryClient, visible]);
+
   // Slice campaigns for the right-side table based on selection
   const tableCampaigns = useMemo(() => {
     if (selectedId === null) return overview.campaigns;
@@ -103,8 +168,14 @@ export function FinanceView() {
   // Build left-panel rows (always across ALL visible accounts)
   const accountRows = useMemo(
     () =>
-      buildAccountRows(visible, overview.insights, overview.campaigns, rowMarkups, defaultMarkup),
-    [visible, overview.insights, overview.campaigns, rowMarkups, defaultMarkup],
+      buildAccountRows(
+        visible,
+        cachedAccountData.insights,
+        cachedAccountData.campaigns,
+        rowMarkups,
+        defaultMarkup,
+      ),
+    [visible, cachedAccountData.insights, cachedAccountData.campaigns, rowMarkups, defaultMarkup],
   );
 
   const onDownloadCsv = () => {

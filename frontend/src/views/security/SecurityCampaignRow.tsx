@@ -119,6 +119,7 @@ export function SecurityCampaignRow({
     accountId,
     activitiesSince,
     activitiesUntil,
+    campaign.id,
     expanded,
   );
 
