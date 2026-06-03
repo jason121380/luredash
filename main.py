@@ -14,6 +14,7 @@ import traceback
 import base64
 import hashlib
 import hmac
+import json
 import math
 import httpx
 import os
@@ -82,6 +83,7 @@ _current_fb_user_id: contextvars.ContextVar[Optional[str]] = contextvars.Context
 _fb_call_source: contextvars.ContextVar[str] = contextvars.ContextVar(
     "fb_call_source", default="unknown"
 )
+
 # In-memory set of FB user ids that have successfully completed
 # `POST /api/auth/token`. Persisted to `shared_settings._fb_known_users`
 # so it survives restarts. Used by `_assert_known_user()` to reject
@@ -109,6 +111,22 @@ def _env_int(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
 
+
+_SESSION_SECRET = os.getenv("SESSION_SECRET") or APP_SECRET or ""
+_SESSION_TTL_SECONDS = _env_int("SESSION_TTL_SECONDS", 7 * 24 * 60 * 60)
+_LEGACY_FB_USER_HEADER_AUTH = os.getenv("LEGACY_FB_USER_HEADER_AUTH", "0") == "1"
+if not _SESSION_SECRET:
+    print(
+        "[startup] WARNING: SESSION_SECRET and FB_APP_SECRET are unset — "
+        "signed sessions will be rejected. Set SESSION_SECRET in production.",
+        flush=True,
+    )
+elif os.getenv("SESSION_SECRET") is None:
+    print(
+        "[startup] WARNING: SESSION_SECRET unset — using FB_APP_SECRET for session signing. "
+        "Set a dedicated SESSION_SECRET before multi-user production.",
+        flush=True,
+    )
 
 _FB_GLOBAL_CONCURRENCY = _env_int("FB_GLOBAL_CONCURRENCY", 12)
 _fb_semaphore: asyncio.Semaphore = asyncio.Semaphore(_FB_GLOBAL_CONCURRENCY)
@@ -1277,6 +1295,86 @@ app.add_middleware(
 print(f"[startup] CORS origins: {_CORS_ORIGINS}", flush=True)
 
 
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(raw: str) -> bytes:
+    return base64.urlsafe_b64decode(raw + ("=" * (-len(raw) % 4)))
+
+
+def _issue_session_token(uid: str) -> tuple[str, int]:
+    if not _SESSION_SECRET:
+        raise HTTPException(status_code=503, detail="SESSION_SECRET not configured")
+    now = int(time.time())
+    exp = now + _SESSION_TTL_SECONDS
+    payload = {"sub": uid, "iat": now, "exp": exp, "v": 1}
+    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    sig = hmac.new(_SESSION_SECRET.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).digest()
+    return f"v1.{payload_b64}.{_b64url_encode(sig)}", exp
+
+
+def _verify_session_token(token: str) -> Optional[str]:
+    if not token or not _SESSION_SECRET:
+        return None
+    try:
+        version, payload_b64, sig_b64 = token.split(".", 2)
+        if version != "v1":
+            return None
+        expected = hmac.new(
+            _SESSION_SECRET.encode("utf-8"),
+            payload_b64.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        supplied = _b64url_decode(sig_b64)
+        if not hmac.compare_digest(supplied, expected):
+            return None
+        payload = json.loads(_b64url_decode(payload_b64))
+        if int(payload.get("exp") or 0) < int(time.time()):
+            return None
+        uid = str(payload.get("sub") or "").strip()
+        return uid or None
+    except Exception:
+        return None
+
+
+def _bearer_token(request: Request) -> str:
+    auth = request.headers.get("authorization", "").strip()
+    if not auth.lower().startswith("bearer "):
+        return ""
+    return auth[7:].strip()
+
+
+def _is_public_api_request(request: Request) -> bool:
+    path = request.url.path
+    method = request.method.upper()
+    if method == "OPTIONS":
+        return True
+    if not path.startswith("/api/"):
+        return True
+    if path in {"/api/_status", "/api/auth/token", "/api/auth/me", "/api/pricing/config"}:
+        return True
+    if path == "/api/billing/webhook":
+        return True
+    if path.startswith("/api/line/webhook"):
+        return True
+    if path == "/api/proxy-asset" and method == "GET":
+        return True
+    # Public share reports (/r/...) load these read-only FB proxy endpoints
+    # with the server's persisted runtime token and no browser login.
+    if method == "GET" and (
+        path.startswith("/api/campaigns/")
+        or path.startswith("/api/adsets/")
+        or path == "/api/breakdown"
+        or path.startswith("/api/videos/")
+        or path.startswith("/api/posts/")
+        or path.startswith("/api/creatives/")
+        or path.startswith("/api/pages/")
+    ):
+        return True
+    return False
+
+
 # Security headers — applied to every response. CSP allows our own
 # origin plus FB CDN for ad creative thumbnails (signed URLs, never
 # escape the value with HTML escapers — see CLAUDE.md).
@@ -1315,27 +1413,30 @@ async def _security_headers(request: Request, call_next):
     return resp
 
 
-# Per-request user-context middleware. Pulls fb_user_id from the
-# query string (or `x-fb-user-id` header for non-GET callers) and sets
-# the `_current_fb_user_id` contextvar so every fb_get / fb_post inside
-# the request handler routes through THAT user's FB token. Without
-# this every call would still hit the legacy `_runtime_token` global
-# (the last user to log in). Reset in `finally` so adjacent requests
-# in the same task pool don't leak context.
-#
-# Spoofing note: anyone who knows another user's fb_user_id can pass
-# it here and use that user's token. This is the SAME trust model as
-# the rest of the app today (most endpoints already trust query-param
-# fb_user_id without a real session). Tightening this requires a
-# proper signed-session layer — out of scope for the multi-tenant
-# data-isolation work.
+# Per-request user-context middleware. Normal authenticated app calls
+# carry an `Authorization: Bearer <signed-session>` header issued by
+# `/api/auth/token`; the signed payload is the only trusted source for
+# `_current_fb_user_id`. Legacy `fb_user_id` query/header context is
+# available only when LEGACY_FB_USER_HEADER_AUTH=1.
 @app.middleware("http")
 async def _user_context_middleware(request: Request, call_next):
-    uid = (
-        request.query_params.get("fb_user_id")
-        or request.headers.get("x-fb-user-id")
-        or ""
-    ).strip()
+    uid = ""
+    bearer = _bearer_token(request)
+    if bearer:
+        verified_uid = _verify_session_token(bearer)
+        if not verified_uid:
+            if not _is_public_api_request(request):
+                return JSONResponse(status_code=401, content={"detail": "登入憑證無效或已過期,請重新登入"})
+        else:
+            uid = verified_uid
+    elif not _is_public_api_request(request):
+        return JSONResponse(status_code=401, content={"detail": "請先登入"})
+    elif _LEGACY_FB_USER_HEADER_AUTH:
+        uid = (
+            request.query_params.get("fb_user_id")
+            or request.headers.get("x-fb-user-id")
+            or ""
+        ).strip()
     # Frontend tags requests with X-Fb-Source so the engineering panel
     # can attribute「這個 FB call 是因為我做了什麼事」(立即掃描 vs
     # dashboard 載入 vs DataPreloader vs ...) rather than lumping all
@@ -2930,13 +3031,17 @@ async def _persist_known_user(uid: str) -> None:
 
 
 def _assert_known_user(uid: str) -> None:
-    """Raise 401 if `uid` is not in the set of FB user ids that have
-    successfully logged in via `POST /api/auth/token`. This is the
-    single-tenant agency tool's substitute for a real session — it
-    blocks random callers from probing read endpoints with arbitrary
-    fb_user_id query params."""
+    """Raise unless the signed session belongs to `uid`.
+
+    `_KNOWN_FB_USERS` remains as a cheap sanity check, but the
+    authoritative identity is `_current_fb_user_id`, populated from the
+    HMAC-signed session token by middleware.
+    """
+    session_uid = _current_fb_user_id.get()
     if not uid or uid not in _KNOWN_FB_USERS:
         raise HTTPException(status_code=401, detail="未登入或登入已過期")
+    if session_uid != uid:
+        raise HTTPException(status_code=403, detail="不能存取其他使用者的資料")
 
 
 # Per-user rate limit for the AI 幕僚 endpoints. The Gemini quota is
@@ -3099,12 +3204,15 @@ async def set_token(payload: TokenPayload):
         if uid:
             _user_token_cache[uid] = payload.token
             _KNOWN_FB_USERS.add(uid)
+        session_token, session_expires_at = _issue_session_token(uid)
         return {
             "ok": True,
             "name": me_cached.get("name"),
             "id": me_cached.get("id"),
             "pictureUrl": me_cached.get("picture", {}).get("data", {}).get("url"),
             "cached": True,
+            "sessionToken": session_token,
+            "sessionExpiresAt": session_expires_at,
         }
 
     if _http_client is None:
@@ -3146,12 +3254,15 @@ async def set_token(payload: TokenPayload):
             if uid:
                 _user_token_cache[uid] = payload.token
                 _KNOWN_FB_USERS.add(uid)
+            session_token, session_expires_at = _issue_session_token(uid)
             return {
                 "ok": True,
                 "name": me_cached.get("name"),
                 "id": me_cached.get("id"),
                 "pictureUrl": me_cached.get("picture", {}).get("data", {}).get("url"),
                 "cached": True,
+                "sessionToken": session_token,
+                "sessionExpiresAt": session_expires_at,
             }
         try:
             return await _verify_token_with_fb(payload.token, cache_key)
@@ -3269,7 +3380,15 @@ async def _verify_token_with_fb(token: str, cache_key: str) -> dict:
         # failure.
         _AUTH_VERIFY_CACHE[cache_key] = (time.time(), me)
         await _auth_verify_pg_store(cache_key, me)
-        return {"ok": True, "name": me.get("name"), "id": me.get("id"), "pictureUrl": pic}
+        session_token, session_expires_at = _issue_session_token(uid)
+        return {
+            "ok": True,
+            "name": me.get("name"),
+            "id": me.get("id"),
+            "pictureUrl": pic,
+            "sessionToken": session_token,
+            "sessionExpiresAt": session_expires_at,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -3287,7 +3406,7 @@ async def clear_token(fb_user_id: Optional[str] = None):
     global _runtime_token
     _runtime_token = None
     await _persist_runtime_token(None)
-    uid = (fb_user_id or "").strip()
+    uid = (fb_user_id or _current_fb_user_id.get() or "").strip()
     if uid:
         _user_token_cache.pop(uid, None)
         await _persist_user_token(uid, None)
@@ -3418,6 +3537,7 @@ class SettingsValuePayload(BaseModel):
 
 @app.get("/api/settings/user/{fb_user_id}")
 async def get_user_settings(fb_user_id: str):
+    _assert_known_user(fb_user_id)
     if _db_pool is None:
         return {"data": {}}
     async with _db_pool.acquire() as conn:
@@ -3437,6 +3557,7 @@ async def get_user_settings(fb_user_id: str):
 
 @app.post("/api/settings/user/{fb_user_id}/{key}")
 async def upsert_user_setting(fb_user_id: str, key: str, payload: SettingsValuePayload):
+    _assert_known_user(fb_user_id)
     pool = _require_db()
     # Tier-limit gate on selected_accounts: cap the number of
     # enabled ad accounts at the user's plan limit. The limit is
@@ -3474,6 +3595,7 @@ async def upsert_user_setting(fb_user_id: str, key: str, payload: SettingsValueP
 
 @app.delete("/api/settings/user/{fb_user_id}/{key}")
 async def delete_user_setting(fb_user_id: str, key: str):
+    _assert_known_user(fb_user_id)
     pool = _require_db()
     async with pool.acquire() as conn:
         await conn.execute(

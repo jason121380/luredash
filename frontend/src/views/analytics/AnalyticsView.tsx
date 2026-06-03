@@ -1,5 +1,7 @@
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
+import { Button } from "@/components/Button";
+import { confirm } from "@/components/ConfirmDialog";
 import { DatePicker } from "@/components/DatePicker";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadingState } from "@/components/LoadingState";
@@ -65,18 +67,32 @@ export function AnalyticsView() {
   const date = useFiltersStore((s) => s.date.shared);
   const setDate = useFiltersStore((s) => s.setDate);
   const settingsReady = useUiStore((s) => s.settingsReady);
+  const [loadRequested, setLoadRequested] = useState(false);
+
+  const queryAccounts = useMemo(() => (loadRequested ? visible : []), [loadRequested, visible]);
 
   // Single batch request for campaigns + per-account insights —
   // replaces the old `useMultiAccountCampaigns` + `useMultiAccountInsights`
   // pair so we only hit the backend once instead of 2 × N times.
-  const overview = useMultiAccountOverview(visible, date, { includeArchived: true });
+  const overview = useMultiAccountOverview(queryAccounts, date, { includeArchived: true });
 
   const data = useMemo(
-    () => computeAnalyticsData(overview.campaigns, overview.insights, visible),
-    [overview.campaigns, overview.insights, visible],
+    () => computeAnalyticsData(overview.campaigns, overview.insights, queryAccounts),
+    [overview.campaigns, overview.insights, queryAccounts],
   );
 
   const isLoading = overview.isLoading || overview.insightsPending;
+
+  const handleLoad = async () => {
+    if (visible.length > 5) {
+      const ok = await confirm(
+        `這會載入 ${visible.length} 個廣告帳戶的活動與成效資料,可能需要較久時間並增加 Meta API 用量。是否繼續?`,
+        { title: "載入全部帳戶資料", icon: "!" },
+      );
+      if (!ok) return;
+    }
+    setLoadRequested(true);
+  };
 
   return (
     <>
@@ -95,6 +111,12 @@ export function AnalyticsView() {
           />
         ) : visible.length === 0 ? (
           <EmptyState>請先在設定中啟用廣告帳戶</EmptyState>
+        ) : !loadRequested ? (
+          <AnalyticsLoadGate
+            accountCount={visible.length}
+            periodLabel={toLabel(date)}
+            onLoad={() => void handleLoad()}
+          />
         ) : isLoading ? (
           <LoadingState
             title="分析資料中..."
@@ -102,10 +124,34 @@ export function AnalyticsView() {
             total={overview.totalCount}
           />
         ) : (
-          <AnalyticsBody data={data} visible={visible} periodLabel={toLabel(date)} />
+          <AnalyticsBody data={data} visible={queryAccounts} periodLabel={toLabel(date)} />
         )}
       </div>
     </>
+  );
+}
+
+function AnalyticsLoadGate({
+  accountCount,
+  periodLabel,
+  onLoad,
+}: {
+  accountCount: number;
+  periodLabel: string;
+  onLoad: () => void;
+}) {
+  return (
+    <section className="mx-auto flex min-h-[320px] max-w-[560px] flex-col items-center justify-center rounded-2xl border border-border bg-white px-5 py-8 text-center">
+      <div className="mb-3 text-[13px] font-semibold text-orange">跨帳戶集合分析</div>
+      <h2 className="text-[20px] font-bold text-ink">載入數據圖表</h2>
+      <p className="mt-3 max-w-[420px] text-[13px] leading-relaxed text-gray-500">
+        這頁會彙整 {accountCount} 個已啟用廣告帳戶，期間為 {periodLabel}。按下後才會載入
+        Meta 活動與成效資料。
+      </p>
+      <Button variant="primary" className="mt-5 !h-10" onClick={onLoad}>
+        載入數據圖表
+      </Button>
+    </section>
   );
 }
 
