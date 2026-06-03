@@ -1,4 +1,4 @@
-import { ApiError, api, setApiUserId } from "@/api/client";
+import { ApiError, api, setApiSessionToken, setApiUserId } from "@/api/client";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
@@ -186,15 +186,21 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
               id?: string;
               name?: string;
               pictureUrl?: string;
+              sessionToken?: string;
+              sessionExpiresAt?: number;
               at?: number;
             };
             if (
               parsed.token === token &&
               parsed.id &&
+              parsed.sessionToken &&
+              typeof parsed.sessionExpiresAt === "number" &&
+              parsed.sessionExpiresAt * 1000 > Date.now() + 60_000 &&
               typeof parsed.at === "number" &&
               Date.now() - parsed.at < VERIFY_CACHE_TTL
             ) {
               setApiUserId(parsed.id);
+              setApiSessionToken(parsed.sessionToken);
               setUser({
                 id: parsed.id,
                 name: parsed.name ?? "User",
@@ -216,12 +222,26 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
         const name = result.name ?? "User";
         const id = result.id ?? "";
         const pictureUrl = result.pictureUrl;
+        const sessionToken = result.sessionToken ?? "";
+        const sessionExpiresAt = result.sessionExpiresAt ?? 0;
 
         try {
           localStorage.setItem(
             VERIFY_CACHE_KEY,
-            JSON.stringify({ token, id, name, pictureUrl, at: Date.now() }),
+            JSON.stringify({
+              token,
+              id,
+              name,
+              pictureUrl,
+              sessionToken,
+              sessionExpiresAt,
+              at: Date.now(),
+            }),
           );
+          if (sessionToken) localStorage.setItem("meta_dash_session_token", sessionToken);
+          if (sessionExpiresAt) {
+            localStorage.setItem("meta_dash_session_expires_at", String(sessionExpiresAt));
+          }
         } catch {
           /* quota — ignore */
         }
@@ -233,6 +253,7 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
         // _runtime_token. This is the actual fix for the PWA
         // first-login empty-data bug.
         setApiUserId(id);
+        setApiSessionToken(sessionToken);
 
         setUser({ id, name, pictureUrl });
         setStatus("auth");
@@ -252,7 +273,10 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
         queryClient.resetQueries();
       } catch (err) {
         localStorage.removeItem("meta_dash_fb_token");
+        localStorage.removeItem("meta_dash_session_token");
+        localStorage.removeItem("meta_dash_session_expires_at");
         setApiUserId(null);
+        setApiSessionToken(null);
         const msg = err instanceof ApiError ? err.detail : (err as Error).message;
         if (err instanceof ApiError && err.status === 429) {
           setCooldownUntil(rememberAuthCooldown(msg));
@@ -352,10 +376,13 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
       /* ignore */
     }
     localStorage.removeItem("meta_dash_fb_token");
+    localStorage.removeItem("meta_dash_session_token");
+    localStorage.removeItem("meta_dash_session_expires_at");
     localStorage.removeItem("meta_dash_fb_verified");
     localStorage.removeItem(AUTH_COOLDOWN_KEY);
     setCooldownUntil(null);
     setApiUserId(null);
+    setApiSessionToken(null);
     setUser(null);
     setStatus("unauth");
   }, []);

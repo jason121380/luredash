@@ -230,9 +230,14 @@ let refreshPromise: Promise<void> | null = null;
 // "PWA 第一次登入資料空白" bug. Header (not query param) so it
 // applies uniformly to all ~50 endpoints without touching call sites.
 let _apiFbUserId: string | null = null;
+let _apiSessionToken: string | null = null;
 
 export function setApiUserId(id: string | null): void {
   _apiFbUserId = id && id.trim() ? id.trim() : null;
+}
+
+export function setApiSessionToken(token: string | null): void {
+  _apiSessionToken = token && token.trim() ? token.trim() : null;
 }
 
 // Cross-tab refresh lock. Without this, every open tab independently
@@ -332,12 +337,34 @@ function refreshBackendToken(): Promise<void> {
         FB.getLoginStatus((resp) => {
           const accessToken = resp.authResponse?.accessToken;
           if (resp.status === "connected" && accessToken) {
-            request<{ ok: boolean }>("POST", "/api/auth/token", {
+            request<{
+              ok: boolean;
+              id?: string;
+              sessionToken?: string;
+              sessionExpiresAt?: number;
+            }>("POST", "/api/auth/token", {
               body: { token: accessToken },
               skipAuthRefresh: true,
               source: "auth",
             })
-              .then(() => resolve())
+              .then((resp) => {
+                if (resp.id) setApiUserId(resp.id);
+                if (resp.sessionToken) {
+                  setApiSessionToken(resp.sessionToken);
+                  try {
+                    localStorage.setItem("meta_dash_session_token", resp.sessionToken);
+                    if (resp.sessionExpiresAt) {
+                      localStorage.setItem(
+                        "meta_dash_session_expires_at",
+                        String(resp.sessionExpiresAt),
+                      );
+                    }
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                resolve();
+              })
               .catch((err) => {
                 if (err instanceof ApiError && err.status === 429) {
                   rememberAuthCooldown(err.detail);
@@ -445,6 +472,7 @@ async function request<T>(
 
   const headers: Record<string, string> = {};
   if (options?.body) headers["Content-Type"] = "application/json";
+  if (_apiSessionToken) headers.Authorization = `Bearer ${_apiSessionToken}`;
   // Always advertise the caller's FB user id so the backend resolves
   // the right per-user token (Phase A). Endpoints that also take
   // fb_user_id as an explicit query/path param still work — the
@@ -548,7 +576,14 @@ export interface AuthMeResponse {
 export const api = {
   auth: {
     setToken: (token: string) =>
-      request<{ ok: boolean; name?: string; id?: string; pictureUrl?: string }>(
+      request<{
+        ok: boolean;
+        name?: string;
+        id?: string;
+        pictureUrl?: string;
+        sessionToken?: string;
+        sessionExpiresAt?: number;
+      }>(
         "POST",
         "/api/auth/token",
         {
