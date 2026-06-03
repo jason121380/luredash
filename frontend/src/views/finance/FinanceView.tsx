@@ -13,7 +13,7 @@ import { useAccountsStore } from "@/stores/accountsStore";
 import { useFiltersStore } from "@/stores/filtersStore";
 import { useFinanceStore } from "@/stores/financeStore";
 import { useUiStore } from "@/stores/uiStore";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { FinanceAccountPanel } from "./FinanceAccountPanel";
 import { FinanceTable } from "./FinanceTable";
@@ -45,6 +45,7 @@ export function FinanceView() {
   const finSelectedAcctIds = useUiStore((s) => s.finSelectedAcctIds);
   const setFinSelectedAcctIds = useUiStore((s) => s.setFinSelectedAcctIds);
   const settingsReady = useUiStore((s) => s.settingsReady);
+  const [initialScopeReady, setInitialScopeReady] = useState(false);
 
   const rowMarkups = useFinanceStore((s) => s.rowMarkups);
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
@@ -60,15 +61,38 @@ export function FinanceView() {
   const [hideZero, setHideZero] = useState(true);
   const navigate = useNavigate();
 
+  useEffect(() => {
+    if (visible.length === 0) {
+      setInitialScopeReady(true);
+      return;
+    }
+    const currentId = finSelectedAcctIds.length === 1 ? finSelectedAcctIds[0] : null;
+    const first = visible[0];
+    if (!initialScopeReady && currentId === null && first) {
+      setFinSelectedAcctIds([first.id]);
+      setInitialScopeReady(true);
+      return;
+    }
+    if (currentId !== null && !visible.some((a) => a.id === currentId)) {
+      setFinSelectedAcctIds(first ? [first.id] : []);
+    }
+    setInitialScopeReady(true);
+  }, [finSelectedAcctIds, initialScopeReady, setFinSelectedAcctIds, visible]);
+
+  const selectedId = finSelectedAcctIds.length === 1 ? (finSelectedAcctIds[0] ?? null) : null;
+  const queryAccounts = useMemo(() => {
+    if (!initialScopeReady) return [];
+    if (selectedId === null) return visible;
+    return visible.filter((a) => a.id === selectedId);
+  }, [initialScopeReady, selectedId, visible]);
+
   // Single batch request replaces useMultiAccountCampaigns +
   // useMultiAccountInsights. include_archived: true because the
   // Finance table wants every status (matches legacy behavior).
-  const overview = useMultiAccountOverview(visible, date, {
+  const overview = useMultiAccountOverview(queryAccounts, date, {
     includeArchived: true,
     source: "finance",
   });
-
-  const selectedId = finSelectedAcctIds.length === 1 ? (finSelectedAcctIds[0] ?? null) : null;
 
   // Slice campaigns for the right-side table based on selection
   const tableCampaigns = useMemo(() => {
@@ -245,6 +269,8 @@ export function FinanceView() {
                 <LoadingState title="載入財務資料中..." />
               ) : visible.length === 0 ? (
                 <EmptyState>請先在設定中啟用廣告帳戶</EmptyState>
+              ) : !initialScopeReady ? (
+                <LoadingState title="準備帳戶中..." />
               ) : overview.isLoading || overview.insightsPending ? (
                 <LoadingState title="載入財務資料中..." />
               ) : (
