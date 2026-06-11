@@ -63,6 +63,10 @@ export interface LinePushConfig {
    *  bubble per id, title = adset name). Empty = campaign-level
    *  single bubble. Capped server-side at 10 (LINE carousel limit 12). */
   adset_ids: string[];
+  /** When non-empty, the push reports per-campaign (one Flex carousel
+   *  bubble per id, title = campaign nickname/name). Mutually
+   *  exclusive with adset_ids; capped server-side at 10. */
+  campaign_ids: string[];
   /** ISO YYYY-MM-DD; populated only when date_range === "custom". */
   date_from?: string | null;
   date_to?: string | null;
@@ -98,6 +102,9 @@ export interface LinePushConfigInput {
   campaign_name?: string;
   /** Optional list of adset ids to scope the report to. Empty = whole campaign. */
   adset_ids?: string[];
+  /** Optional list of campaign ids — one carousel bubble per campaign
+   *  (以行銷活動播報). Mutually exclusive with adset_ids. */
+  campaign_ids?: string[];
   /** ISO YYYY-MM-DD; required when date_range === "custom". */
   date_from?: string;
   date_to?: string;
