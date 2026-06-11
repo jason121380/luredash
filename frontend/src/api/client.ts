@@ -63,6 +63,10 @@ export interface LinePushConfig {
    *  bubble per id, title = adset name). Empty = campaign-level
    *  single bubble. Capped server-side at 10 (LINE carousel limit 12). */
   adset_ids: string[];
+  /** When non-empty, the push reports per-AD (3rd level, one carousel
+   *  bubble per id, title = ad name). Mutually exclusive with
+   *  adset_ids; capped server-side at 10. */
+  ad_ids: string[];
   /** ISO YYYY-MM-DD; populated only when date_range === "custom". */
   date_from?: string | null;
   date_to?: string | null;
@@ -98,6 +102,9 @@ export interface LinePushConfigInput {
   campaign_name?: string;
   /** Optional list of adset ids to scope the report to. Empty = whole campaign. */
   adset_ids?: string[];
+  /** Optional list of ad ids (3rd level) — one carousel bubble per ad
+   *  (以廣告播報). Mutually exclusive with adset_ids. */
+  ad_ids?: string[];
   /** ISO YYYY-MM-DD; required when date_range === "custom". */
   date_from?: string;
   date_to?: string;
@@ -766,6 +773,15 @@ export const api = {
         },
         source: opts?.source ?? "drill-adsets",
       }),
+    /** Flat ad list (3rd level) under a campaign — name/status
+     *  metadata only, no insights. Backs the LINE-push 以廣告播報
+     *  multi-picker so the operator doesn't drill through adsets. */
+    ads: (campaignId: string) =>
+      request<{ data: Array<{ id: string; name: string; status: string }> }>(
+        "GET",
+        `/api/campaigns/${campaignId}/ads`,
+        { source: "line-push-ad-picker" },
+      ),
     setStatus: (campaignId: string, status: string) =>
       request<FbBaseEntity>("POST", `/api/campaigns/${campaignId}/status`, {
         query: { status },
