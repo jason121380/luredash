@@ -749,17 +749,20 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS adset_ids TEXT[] NOT NULL DEFAULT '{}'
                     """
                 )
-                # Migration (2026-06-11): per-campaign scoping (以行銷
-                # 活動播報). When this array is non-empty, the LINE flex
-                # push reports each selected campaign as its own bubble
-                # in a carousel (title = campaign nickname/name, KPI =
-                # that campaign's insights). Mutually exclusive with
-                # adset_ids — the POST endpoint rejects configs that set
-                # both. Empty array preserves the original behaviour.
+                # Migration (2026-06-11): per-AD scoping (以廣告播報).
+                # When this array is non-empty, the LINE flex push
+                # reports each selected ad (3rd level) as its own
+                # carousel bubble (title = ad name, KPI = that ad's
+                # insights). Mutually exclusive with adset_ids — the
+                # POST endpoint rejects configs that set both. Empty
+                # array preserves the original behaviour.
+                # (campaign_ids from the reverted 以行銷活動播報
+                # attempt may still exist in production DBs; it is
+                # ignored by the code.)
                 await conn.execute(
                     """
                     ALTER TABLE campaign_line_push_configs
-                    ADD COLUMN IF NOT EXISTS campaign_ids TEXT[] NOT NULL DEFAULT '{}'
+                    ADD COLUMN IF NOT EXISTS ad_ids TEXT[] NOT NULL DEFAULT '{}'
                     """
                 )
                 # `line_push_logs`: audit trail per push attempt, keeps
@@ -5778,6 +5781,20 @@ async def get_adsets(
     return data
 
 
+@app.get("/api/campaigns/{campaign_id}/ads")
+async def get_campaign_ads(campaign_id: str):
+    """All ads (3rd level) under a campaign — name/status metadata
+    only, no insights. Backs the LINE-push「以廣告播報」multi-picker,
+    which needs the flat ad list without the operator drilling
+    through each adset. FB exposes the /ads edge directly on the
+    campaign node so this is a single paginate-free call for typical
+    campaign sizes (limit 500)."""
+    return await fb_get(f"{campaign_id}/ads", {
+        "fields": "id,name,status",
+        "limit": "500",
+    })
+
+
 @app.post("/api/adsets/{adset_id}/status")
 async def update_adset_status(adset_id: str, status: str = Query(...)):
     return await fb_post(adset_id, {"status": status}, invalidate_entity=adset_id)
@@ -7338,149 +7355,6 @@ def _kpis_from_insights(
     }
 
 
-def _campaign_status_chip(camp: dict) -> "tuple[str, str]":
-    """(label, hex color) for the flex header status chip.
-
-    For PAUSED the label is prefixed with M/D parsed from
-    `updated_time` (FB doesn't expose a dedicated paused-at timestamp
-    without the Activity Log endpoint, but updated_time is the last
-    modification — close enough for "paused since").
-    """
-    status_raw = (camp.get("status") or "").upper()
-    status_color_map = {
-        "ACTIVE": "#16A34A",   # green
-        "PAUSED": "#DC2626",   # red
-        "ARCHIVED": "#888888", # grey
-        "DELETED": "#888888",  # grey
-    }
-    status_label_map = {
-        "ACTIVE": "進行中",
-        "PAUSED": "已暫停",
-        "ARCHIVED": "已封存",
-        "DELETED": "已刪除",
-    }
-    status_label = status_label_map.get(status_raw, status_raw or "")
-    status_color = status_color_map.get(status_raw, "#888888")
-    if status_raw == "PAUSED":
-        updated_raw = camp.get("updated_time") or ""
-        try:
-            # FB returns "2026-04-12T08:30:00+0000" — parse to local M/D
-            dt = datetime.fromisoformat(updated_raw.replace("+0000", "+00:00"))
-            status_label = f"{dt.month}/{dt.day} {status_label}"
-        except (TypeError, ValueError):
-            pass
-    return status_label, status_color
-
-
-async def _build_campaign_carousel_for_config(
-    cfg: dict,
-    campaign_ids: "list[str]",
-    fields: str,
-    date_range: str,
-    date_from: Optional[str],
-    date_to: Optional[str],
-) -> Optional[dict]:
-    """One Flex carousel bubble per selected campaign (以行銷活動播報).
-
-    Mirrors the per-adset carousel: campaigns are fetched in parallel,
-    each bubble re-derives objective / nickname / markup / KPI /
-    recommendations from its own campaign so numbers and the status
-    chip are scoped per campaign. Returns None when EVERY lookup
-    failed so the caller can fall back to the single-campaign bubble
-    instead of dropping the push.
-    """
-    account_id = cfg["account_id"]
-    selected = list(cfg.get("report_fields") or [])
-    concrete_range = _date_range_concrete(date_range, date_from, date_to)
-    range_label = concrete_range or _date_range_label(date_range, date_from, date_to)
-    subtitle = f"報告區間: {concrete_range}" if concrete_range else range_label
-
-    camp_results = await asyncio.gather(
-        *[fb_get(cid, {"fields": fields}) for cid in campaign_ids],
-        return_exceptions=True,
-    )
-    bubbles: "list[dict]" = []
-    for cid, res in zip(campaign_ids, camp_results):
-        if isinstance(res, BaseException):
-            # Skip campaigns FB can't return — better to ship a partial
-            # carousel than to fail the entire push because one
-            # campaign got deleted.
-            print(f"[flex] skip campaign {cid}: {res}", flush=True)
-            continue
-        camp = res if isinstance(res, dict) else {}
-        objective = camp.get("objective")
-        traffic_mode = _is_traffic_objective(objective)
-        objective_label = _translate_objective(objective)
-        markup_pct = await _markup_for_campaign(cid)
-        ins_list = (camp.get("insights") or {}).get("data") or []
-        ins = ins_list[0] if ins_list else {}
-        kpis, raw = _kpis_from_insights(
-            ins, traffic_mode=traffic_mode, selected=selected, markup_pct=markup_pct
-        )
-        recs = (
-            _evaluate_alert_recommendations(
-                spend=raw["spend"],
-                msgs=raw["msgs"],
-                msg_cost=raw["msg_cost"],
-                cpc=raw["cpc"],
-                frequency=raw["frequency"],
-                objective=objective,
-                purchases=raw["purchases"],
-                cost_per_purchase=raw["cost_per_purchase"],
-                roas=raw["roas"],
-                add_to_cart=raw["add_to_cart"],
-                cost_per_add_to_cart=raw["cost_per_add_to_cart"],
-                link_clicks=raw["link_clicks"],
-                cost_per_link_click=raw["cost_per_link_click"],
-                selected_fields=selected,
-            )
-            if cfg.get("include_recommendations")
-            else None
-        )
-        nickname = await _campaign_nickname_display(cid)
-        title = nickname or camp.get("name", cid)
-        status_label, status_color = _campaign_status_chip(camp)
-        if cfg.get("include_report_button"):
-            use_spend_plus = "spend_plus" in selected
-            if selected:
-                share_fields = selected
-            else:
-                share_fields = ["spend", "impressions", "clicks", "ctr", "cpc"]
-                if not traffic_mode:
-                    share_fields += ["msgs", "msg_cost"]
-            report_url = _share_url_for_config(
-                account_id,
-                cid,
-                date_range,
-                date_from,
-                date_to,
-                include_recommendations=bool(cfg.get("include_recommendations")),
-                use_spend_plus=use_spend_plus,
-                markup_pct=markup_pct,
-                selected_fields=share_fields,
-            )
-        else:
-            report_url = None
-        bubbles.append(
-            line_client._build_flex_report_bubble(
-                title=title,
-                subtitle=subtitle,
-                objective_label=objective_label,
-                status_label=status_label,
-                status_color=status_color,
-                kpis=kpis,
-                recommendations=recs,
-                report_url=report_url,
-            )
-        )
-    if not bubbles:
-        return None
-    return line_client.build_flex_report_carousel(
-        bubbles=bubbles,
-        alt_text=f"行銷活動成效報告({len(bubbles)}) {range_label}",
-    )
-
-
 async def _build_flex_for_config(cfg: dict) -> dict:
     """Produce the LINE Flex Message for one push config row.
 
@@ -7495,11 +7369,11 @@ async def _build_flex_for_config(cfg: dict) -> dict:
     one Flex carousel bubble per selected adset, KPI scoped to that
     adset's own insights, bubble title = adset name.
 
-    When `cfg["campaign_ids"]` is non-empty (以行銷活動播報), the push
-    reports per-campaign instead: one carousel bubble per selected
-    campaign, each with its own status chip / objective / nickname /
-    markup / KPI / recommendations. Mutually exclusive with adset_ids
-    (enforced at save time).
+    When `cfg["ad_ids"]` is non-empty (以廣告播報), same carousel shape
+    but one bubble per selected AD (3rd level) — the FB request is
+    identical (`GET /{ad_id}?fields=id,name,status,insights...`), so
+    both modes share the member loop below. Mutually exclusive with
+    adset_ids (enforced at save time).
     """
     account_id = cfg["account_id"]
     campaign_id = cfg["campaign_id"]
@@ -7516,17 +7390,6 @@ async def _build_flex_for_config(cfg: dict) -> dict:
         time_range,
     )
     fields = f"id,name,status,objective,daily_budget,lifetime_budget,updated_time,{ins_clause}"
-
-    campaign_ids = [c for c in (cfg.get("campaign_ids") or []) if c]
-    if campaign_ids:
-        flex = await _build_campaign_carousel_for_config(
-            cfg, campaign_ids, fields, date_range, date_from, date_to
-        )
-        if flex is not None:
-            return flex
-        # Every campaign lookup failed — fall through to the original
-        # single-campaign path so the operator still gets a push.
-
     try:
         camp = await fb_get(campaign_id, {"fields": fields})
     except HTTPException:
@@ -7602,8 +7465,33 @@ async def _build_flex_for_config(cfg: dict) -> dict:
 
     # Status chip in header top-right — recipients can tell at a glance
     # whether the campaign behind these numbers is still ACTIVE or has
-    # been paused / archived.
-    status_label, status_color = _campaign_status_chip(camp)
+    # been paused / archived. For PAUSED we also prepend M/D parsed
+    # from `updated_time` (FB doesn't expose a dedicated paused-at
+    # timestamp without the Activity Log endpoint, but updated_time
+    # is the last modification — close enough for "paused since").
+    status_raw = (camp.get("status") or "").upper()
+    status_color_map = {
+        "ACTIVE": "#16A34A",   # green
+        "PAUSED": "#DC2626",   # red
+        "ARCHIVED": "#888888", # grey
+        "DELETED": "#888888",  # grey
+    }
+    status_label_map = {
+        "ACTIVE": "進行中",
+        "PAUSED": "已暫停",
+        "ARCHIVED": "已封存",
+        "DELETED": "已刪除",
+    }
+    status_label = status_label_map.get(status_raw, status_raw or "")
+    status_color = status_color_map.get(status_raw, "#888888")
+    if status_raw == "PAUSED":
+        updated_raw = camp.get("updated_time") or ""
+        try:
+            # FB returns "2026-04-12T08:30:00+0000" — parse to local M/D
+            dt = datetime.fromisoformat(updated_raw.replace("+0000", "+00:00"))
+            status_label = f"{dt.month}/{dt.day} {status_label}"
+        except (TypeError, ValueError):
+            pass
 
     # Footer button is opt-in per config (column added 2026-04-29).
     # Pass date_from / date_to so the share page lands on the same
@@ -7642,8 +7530,14 @@ async def _build_flex_for_config(cfg: dict) -> dict:
         else None
     )
 
+    # Member scoping: adset_ids (以廣告組合播報) or ad_ids (以廣告播報).
+    # Mutually exclusive (enforced at save time); the FB request shape
+    # is identical for both levels so they share one loop.
     adset_ids = list(cfg.get("adset_ids") or [])
-    if not adset_ids:
+    ad_ids = list(cfg.get("ad_ids") or [])
+    member_ids = adset_ids if adset_ids else ad_ids
+    member_kind = "adset" if adset_ids else "ad"
+    if not member_ids:
         return line_client.build_flex_report(
             title=title,
             subtitle=subtitle,
@@ -7656,46 +7550,46 @@ async def _build_flex_for_config(cfg: dict) -> dict:
             alt_text=f"{title} {concrete_range or _date_range_label(date_range, date_from, date_to)}",
         )
 
-    # Per-adset carousel: one bubble per selected adset. Title = adset
-    # name (campaign name moves into the subtitle as context). Each
-    # bubble re-derives KPI from that adset's own insights so the
-    # numbers are scoped, not pro-rated. Adsets are fetched in parallel
-    # because FB rate-limits per-edge, not per-account.
-    adset_fields = f"id,name,status,{ins_clause}"
-    adset_tasks = [
-        fb_get(aid, {"fields": adset_fields}) for aid in adset_ids
+    # Per-member carousel: one bubble per selected adset / ad. Title =
+    # member name (campaign name moves into the subtitle as context).
+    # Each bubble re-derives KPI from that member's own insights so the
+    # numbers are scoped, not pro-rated. Members are fetched in
+    # parallel because FB rate-limits per-edge, not per-account.
+    member_fields = f"id,name,status,{ins_clause}"
+    member_tasks = [
+        fb_get(mid, {"fields": member_fields}) for mid in member_ids
     ]
-    adset_results = await asyncio.gather(*adset_tasks, return_exceptions=True)
+    member_results = await asyncio.gather(*member_tasks, return_exceptions=True)
     bubbles: list[dict] = []
-    for aid, res in zip(adset_ids, adset_results):
+    for mid, res in zip(member_ids, member_results):
         if isinstance(res, BaseException):
-            # Skip adsets that FB can't return — better to ship a
+            # Skip members that FB can't return — better to ship a
             # partial carousel than to fail the entire push because
-            # one adset got archived.
-            print(f"[flex] skip adset {aid}: {res}", flush=True)
+            # one adset / ad got archived.
+            print(f"[flex] skip {member_kind} {mid}: {res}", flush=True)
             continue
-        adset_data = res if isinstance(res, dict) else {}
-        adset_name = adset_data.get("name") or aid
-        adset_ins_list = (adset_data.get("insights") or {}).get("data") or []
-        adset_ins = adset_ins_list[0] if adset_ins_list else {}
-        adset_kpis, adset_raw = _kpis_from_insights(
-            adset_ins, traffic_mode=traffic_mode, selected=selected, markup_pct=markup_pct
+        member_data = res if isinstance(res, dict) else {}
+        member_name = member_data.get("name") or mid
+        member_ins_list = (member_data.get("insights") or {}).get("data") or []
+        member_ins = member_ins_list[0] if member_ins_list else {}
+        member_kpis, member_raw = _kpis_from_insights(
+            member_ins, traffic_mode=traffic_mode, selected=selected, markup_pct=markup_pct
         )
-        adset_recs = (
+        member_recs = (
             _evaluate_alert_recommendations(
-                spend=adset_raw["spend"],
-                msgs=adset_raw["msgs"],
-                msg_cost=adset_raw["msg_cost"],
-                cpc=adset_raw["cpc"],
-                frequency=adset_raw["frequency"],
+                spend=member_raw["spend"],
+                msgs=member_raw["msgs"],
+                msg_cost=member_raw["msg_cost"],
+                cpc=member_raw["cpc"],
+                frequency=member_raw["frequency"],
                 objective=objective,
-                purchases=adset_raw["purchases"],
-                cost_per_purchase=adset_raw["cost_per_purchase"],
-                roas=adset_raw["roas"],
-                add_to_cart=adset_raw["add_to_cart"],
-                cost_per_add_to_cart=adset_raw["cost_per_add_to_cart"],
-                link_clicks=adset_raw["link_clicks"],
-                cost_per_link_click=adset_raw["cost_per_link_click"],
+                purchases=member_raw["purchases"],
+                cost_per_purchase=member_raw["cost_per_purchase"],
+                roas=member_raw["roas"],
+                add_to_cart=member_raw["add_to_cart"],
+                cost_per_add_to_cart=member_raw["cost_per_add_to_cart"],
+                link_clicks=member_raw["link_clicks"],
+                cost_per_link_click=member_raw["cost_per_link_click"],
                 selected_fields=selected,
             )
             if cfg.get("include_recommendations")
@@ -7703,18 +7597,18 @@ async def _build_flex_for_config(cfg: dict) -> dict:
         )
         bubbles.append(
             line_client._build_flex_report_bubble(
-                title=adset_name,
+                title=member_name,
                 subtitle=f"{title} · {concrete_range or _date_range_label(date_range, date_from, date_to)}",
                 objective_label=objective_label,
                 status_label=status_label,
                 status_color=status_color,
-                kpis=adset_kpis,
-                recommendations=adset_recs,
+                kpis=member_kpis,
+                recommendations=member_recs,
                 report_url=report_url,
             )
         )
     if not bubbles:
-        # All adset lookups failed — fall back to the campaign-level
+        # All member lookups failed — fall back to the campaign-level
         # bubble rather than raise, so the operator still gets a push.
         return line_client.build_flex_report(
             title=title,
@@ -8809,10 +8703,10 @@ class LinePushConfigPayload(BaseModel):
     # own bubble in a carousel (title = adset name). Empty = campaign-
     # level single bubble (original behaviour).
     adset_ids: List[str] = []
-    # When non-empty, the flex push reports each selected campaign as
-    # its own bubble in a carousel (title = campaign nickname/name).
+    # When non-empty, the flex push reports each selected AD (3rd
+    # level) as its own bubble in a carousel (title = ad name).
     # Mutually exclusive with adset_ids.
-    campaign_ids: List[str] = []
+    ad_ids: List[str] = []
 
 
 def _config_row_to_dict(r: asyncpg.Record) -> dict:
@@ -8833,7 +8727,7 @@ def _config_row_to_dict(r: asyncpg.Record) -> dict:
         "include_recommendations": bool(r["include_recommendations"]),
         "campaign_name": r["campaign_name"] or "",
         "adset_ids": list(r["adset_ids"] or []),
-        "campaign_ids": list(r["campaign_ids"] or []),
+        "ad_ids": list(r["ad_ids"] or []),
         "date_from": r["date_from"].isoformat() if r["date_from"] else None,
         "date_to": r["date_to"].isoformat() if r["date_to"] else None,
         "last_run_at": r["last_run_at"].isoformat() if r["last_run_at"] else None,
@@ -8959,11 +8853,11 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
             return out
 
         adset_ids_clean = _clean_id_list(payload.adset_ids)
-        campaign_ids_clean = _clean_id_list(payload.campaign_ids)
-        if adset_ids_clean and campaign_ids_clean:
+        ad_ids_clean = _clean_id_list(payload.ad_ids)
+        if adset_ids_clean and ad_ids_clean:
             raise HTTPException(
                 status_code=400,
-                detail="「以行銷活動播報」與「以廣告組合播報」只能擇一",
+                detail="「以廣告播報」與「以廣告組合播報」只能擇一",
             )
         if payload.id:
             row = await conn.fetchrow(
@@ -8975,7 +8869,7 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                     report_fields = $11, include_report_button = $12,
                     include_recommendations = $13, campaign_name = $14,
                     date_from = $15, date_to = $16, adset_ids = $17,
-                    campaign_ids = $18,
+                    ad_ids = $18,
                     next_run_at = $19, fail_count = 0, last_error = NULL,
                     updated_at = NOW()
                 WHERE id = $20::uuid
@@ -8998,7 +8892,7 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                 date_from_val,
                 date_to_val,
                 adset_ids_clean,
-                campaign_ids_clean,
+                ad_ids_clean,
                 next_run,
                 payload.id,
             )
@@ -9015,7 +8909,7 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                     frequency, weekdays, month_day, hour, minute,
                     date_range, enabled, report_fields, include_report_button,
                     include_recommendations, campaign_name,
-                    date_from, date_to, adset_ids, campaign_ids, next_run_at
+                    date_from, date_to, adset_ids, ad_ids, next_run_at
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                 ON CONFLICT (campaign_id, group_id, frequency) DO UPDATE
@@ -9033,7 +8927,7 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                     date_from = EXCLUDED.date_from,
                     date_to = EXCLUDED.date_to,
                     adset_ids = EXCLUDED.adset_ids,
-                    campaign_ids = EXCLUDED.campaign_ids,
+                    ad_ids = EXCLUDED.ad_ids,
                     next_run_at = EXCLUDED.next_run_at,
                     fail_count = 0,
                     last_error = NULL,
@@ -9057,7 +8951,7 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                 date_from_val,
                 date_to_val,
                 adset_ids_clean,
-                campaign_ids_clean,
+                ad_ids_clean,
                 next_run,
             )
     return {"ok": True, "data": _config_row_to_dict(row)}
