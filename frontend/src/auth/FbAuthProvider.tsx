@@ -1,4 +1,5 @@
 import { ApiError, api, setApiSessionToken, setApiUserId } from "@/api/client";
+import { useAccountsStore } from "@/stores/accountsStore";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
@@ -95,6 +96,33 @@ let sdkReady = false;
 const sdkCallbacks: Array<() => void> = [];
 const AUTH_COOLDOWN_KEY = "meta_dash_fb_auth_cooldown_until";
 const AUTH_COOLDOWN_FALLBACK_MS = 10 * 60_000;
+// FB uid bound to the CURRENT app session — written on successful
+// token exchange, cleared on every logout (manual or forced). When a
+// later exchange resolves to a different uid while this key still
+// exists, the FB cookie session changed hands outside the app (the
+// user switched accounts on facebook.com) and we force a logout.
+const SESSION_UID_KEY = "meta_dash_fb_uid";
+// Last uid that ever completed a login in this browser. Survives
+// logout — used to wipe per-user ephemeral UI state (dashboard
+// active-account selection) when a DIFFERENT user logs in, without
+// punishing the common "same user logs back in" case.
+const LAST_UID_KEY = "meta_dash_fb_uid_last";
+
+/**
+ * Drop per-user ephemeral UI state when the browser changes hands
+ * between FB accounts. `fb_active_accounts` (and the in-memory
+ * accounts store) hold the PREVIOUS user's account ids; the new
+ * user's token can't read those accounts, so leaking them produces
+ * the "logged in but every panel is empty" state.
+ */
+function clearPerUserUiState(): void {
+  try {
+    localStorage.removeItem("fb_active_accounts");
+  } catch {
+    /* ignore */
+  }
+  useAccountsStore.setState({ activeIds: [], selectedIds: [], order: [] });
+}
 
 function ensureSdkLoaded(): Promise<void> {
   if (sdkReady) return Promise.resolve();
@@ -224,6 +252,59 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
         const pictureUrl = result.pictureUrl;
         const sessionToken = result.sessionToken ?? "";
         const sessionExpiresAt = result.sessionExpiresAt ?? 0;
+
+        // ── FB account-switch detection ──────────────────────────
+        // The FB cookie session now belongs to a DIFFERENT account
+        // than the one this app session was established under.
+        // Silently adopting the new identity keeps the previous
+        // user's store state + cached queries around → "still logged
+        // in, but every panel is empty". Force a clean logout
+        // instead; the next manual 登入 enters as the new account.
+        let sessionUid: string | null = null;
+        try {
+          sessionUid = localStorage.getItem(SESSION_UID_KEY);
+        } catch {
+          /* ignore */
+        }
+        if (id && sessionUid && sessionUid !== id) {
+          try {
+            localStorage.removeItem("meta_dash_fb_token");
+            localStorage.removeItem("meta_dash_session_token");
+            localStorage.removeItem("meta_dash_session_expires_at");
+            localStorage.removeItem("meta_dash_fb_verified");
+            localStorage.removeItem(SESSION_UID_KEY);
+          } catch {
+            /* ignore */
+          }
+          clearPerUserUiState();
+          setApiUserId(null);
+          setApiSessionToken(null);
+          setUser(null);
+          // clear() (not resetQueries) — drop the previous user's
+          // cached data entirely so nothing flashes for the next one.
+          queryClient.clear();
+          setStatus("unauth");
+          setError("偵測到 Facebook 已切換帳號,為避免資料錯置已自動登出,請重新登入。");
+          return;
+        }
+        if (id) {
+          let lastUid: string | null = null;
+          try {
+            lastUid = localStorage.getItem(LAST_UID_KEY);
+          } catch {
+            /* ignore */
+          }
+          // A different user is logging in on this browser (after a
+          // normal logout) — their dashboard must not inherit the
+          // previous user's active-account selection.
+          if (lastUid && lastUid !== id) clearPerUserUiState();
+          try {
+            localStorage.setItem(SESSION_UID_KEY, id);
+            localStorage.setItem(LAST_UID_KEY, id);
+          } catch {
+            /* ignore */
+          }
+        }
 
         try {
           localStorage.setItem(
@@ -380,6 +461,10 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem("meta_dash_session_expires_at");
     localStorage.removeItem("meta_dash_fb_verified");
     localStorage.removeItem(AUTH_COOLDOWN_KEY);
+    // Unbind the session uid so the next login (any account) starts
+    // fresh. LAST_UID_KEY is intentionally kept — it lets the next
+    // login decide whether to wipe per-user ephemeral UI state.
+    localStorage.removeItem(SESSION_UID_KEY);
     setCooldownUntil(null);
     setApiUserId(null);
     setApiSessionToken(null);
