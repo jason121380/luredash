@@ -240,6 +240,20 @@ export function setApiSessionToken(token: string | null): void {
   _apiSessionToken = token && token.trim() ? token.trim() : null;
 }
 
+/**
+ * Auth headers for the few call sites that must use raw `fetch()`
+ * instead of `request()` — the NDJSON streaming endpoint and the
+ * engineering health pings. The backend's session middleware 401s
+ * ("請先登入") any non-public /api request without the Bearer header,
+ * so every raw fetch to a protected endpoint MUST spread these in.
+ */
+export function apiAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (_apiSessionToken) headers.Authorization = `Bearer ${_apiSessionToken}`;
+  if (_apiFbUserId) headers["x-fb-user-id"] = _apiFbUserId;
+  return headers;
+}
+
 // Cross-tab refresh lock. Without this, every open tab independently
 // fires POST /api/auth/token on the SAME mass 401 event(typically a
 // Zeabur redeploy that wiped backend `_runtime_token`); N tabs × one
@@ -470,14 +484,8 @@ async function request<T>(
       : undefined;
   const signal = composeSignals(options?.signal, timeoutSignal);
 
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...apiAuthHeaders() };
   if (options?.body) headers["Content-Type"] = "application/json";
-  if (_apiSessionToken) headers.Authorization = `Bearer ${_apiSessionToken}`;
-  // Always advertise the caller's FB user id so the backend resolves
-  // the right per-user token (Phase A). Endpoints that also take
-  // fb_user_id as an explicit query/path param still work — the
-  // middleware prefers the query param, header is the fallback.
-  if (_apiFbUserId) headers["x-fb-user-id"] = _apiFbUserId;
   if (options?.source) headers["x-fb-source"] = options.source;
 
   let response: Response;
@@ -842,6 +850,11 @@ export const api = {
       request<{
         name: string | null;
         picture_url: string | null;
+        /** Raw `displayed_message_response_time` from the Page node —
+         *  the responsiveness the page DISPLAYS to visitors, often the
+         *  literal "AUTOMATIC". Format with formatPageResponseTime()
+         *  before showing; null when FB withholds the field. */
+        displayed_response_time: string | null;
         error: string | null;
       }>("GET", `/api/pages/${pageId}/info`, { source: "media" }),
   },
@@ -1306,7 +1319,10 @@ export const api = {
     ): Promise<void> => {
       const resp = await fetch("/api/optimization/run-agents-stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        // Raw fetch (streaming) bypasses request() — the session
+        // Bearer header must be attached manually or the backend's
+        // auth middleware 401s before the stream starts.
+        headers: { "Content-Type": "application/json", ...apiAuthHeaders() },
         body: JSON.stringify({
           fb_user_id: input.fbUserId,
           date_label: input.dateLabel,

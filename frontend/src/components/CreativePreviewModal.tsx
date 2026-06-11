@@ -5,6 +5,7 @@ import { useVideoSource } from "@/api/hooks/useVideoSource";
 import { Modal } from "@/components/Modal";
 import { Spinner } from "@/components/Spinner";
 import { fbPostLinkFromStoryId, isFrontPostCreative, pageIdFromStoryId } from "@/lib/fbLinks";
+import { formatPageResponseTime } from "@/lib/format";
 import type { FbCreativeEntity } from "@/types/fb";
 import { useEffect, useState } from "react";
 
@@ -290,7 +291,13 @@ export function CreativePreviewModal({ creative, campaignName, onClose }: Creati
   // reads blank.
   const headerName = pageQuery.data?.name ?? (igPostUrl ? "Instagram" : (creative?.name ?? ""));
   const headerAvatar = pageQuery.data?.picture_url ?? null;
-  const headerSubtitle = postPlatform ? `贊助 · ${postPlatform}` : "贊助 · 廣告";
+  // The page's displayed responsiveness (「通常於幾分鐘內回覆」) when
+  // FB exposes it — appended to the subtitle so operators see how the
+  // page presents its reply speed without leaving the modal.
+  const pageResponseTime = formatPageResponseTime(pageQuery.data?.displayed_response_time);
+  const headerSubtitle = `${postPlatform ? `贊助 · ${postPlatform}` : "贊助 · 廣告"}${
+    pageResponseTime ? ` · ${pageResponseTime}` : ""
+  }`;
 
   // The "view post" CTA lives in the sticky header row via Modal's
   // titleAction slot. The label is now platform-neutral ("查看

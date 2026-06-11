@@ -60,6 +60,38 @@ export function fF(n: Numeric): string {
 }
 
 /**
+ * Format a Page's `displayed_message_response_time` for display.
+ *
+ * This is the responsiveness value the page DISPLAYS to visitors
+ * (the「一般會在幾分鐘內回覆」badge source) — NOT the live measured
+ * response time from Business Suite. Observed raw values: the
+ * literal "AUTOMATIC" (page lets FB decide — nothing concrete to
+ * show, return null), a number of minutes as digits, or a bucket
+ * enum. Unknown values return null so we never surface raw English
+ * enum strings in the UI.
+ */
+export function formatPageResponseTime(v: string | null | undefined): string | null {
+  if (!v) return null;
+  const upper = v.toUpperCase();
+  if (upper === "AUTOMATIC") return null;
+  if (/^\d+$/.test(v)) {
+    const mins = Number(v);
+    if (mins <= 0) return null;
+    if (mins >= 1440) return `通常於 ${Math.round(mins / 1440)} 天內回覆`;
+    if (mins >= 60) return `通常於 ${Math.round(mins / 60)} 小時內回覆`;
+    return `通常於 ${mins} 分鐘內回覆`;
+  }
+  const buckets: Record<string, string> = {
+    FEW_MINUTES: "通常於幾分鐘內回覆",
+    WITHIN_AN_HOUR: "通常於 1 小時內回覆",
+    FEW_HOURS: "通常於幾小時內回覆",
+    WITHIN_A_DAY: "通常於 1 天內回覆",
+    FEW_DAYS: "通常於幾天內回覆",
+  };
+  return buckets[upper] ?? null;
+}
+
+/**
  * Escape HTML special characters. React usually handles this for us,
  * but we need a string version for chart tooltip callbacks and
  * `dangerouslySetInnerHTML` cases.

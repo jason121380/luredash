@@ -6084,26 +6084,51 @@ async def get_page_info(page_id: str):
     ``pages_read_engagement`` which is what Graph requires to read
     arbitrary Page metadata.
     """
-    try:
-        # Page name + avatar are slow-moving; cache 1h instead of the
-        # default 5min. The dashboard 3rd level renders a page chip on
-        # every creative row, so this path is hit far more often than
-        # when only the preview modal used it — a short TTL would burn
-        # the page-level (code 32) rate-limit bucket for no benefit.
-        data = await fb_get(
-            page_id,
-            {"fields": "name,picture.width(80).height(80)"},
-            cache_ttl=3600,
-        )
-    except HTTPException as exc:
-        return {"name": None, "picture_url": None, "error": str(exc.detail)}
+    # Page name + avatar are slow-moving; cache 1h instead of the
+    # default 5min. The dashboard 3rd level renders a page chip on
+    # every creative row, so this path is hit far more often than
+    # when only the preview modal used it — a short TTL would burn
+    # the page-level (code 32) rate-limit bucket for no benefit.
+    #
+    # Tier 1 additionally asks for `displayed_message_response_time` —
+    # the responsiveness value the page DISPLAYS to visitors (「一般會
+    # 在幾分鐘內回覆」). It often returns the literal string
+    # "AUTOMATIC" (page lets FB decide) and is NOT the live measured
+    # response time from Business Suite's 每日回覆情況 — there is no
+    # public API for that (nor for response RATE). Some tokens /
+    # pages reject the extra field, so tier 2 retries without it
+    # rather than losing name + avatar.
+    data: Optional[dict] = None
+    last_error: Optional[str] = None
+    for fields in (
+        "name,picture.width(80).height(80),displayed_message_response_time",
+        "name,picture.width(80).height(80)",
+    ):
+        try:
+            data = await fb_get(page_id, {"fields": fields}, cache_ttl=3600)
+            break
+        except HTTPException as exc:
+            last_error = str(exc.detail)
+    if data is None:
+        return {
+            "name": None,
+            "picture_url": None,
+            "displayed_response_time": None,
+            "error": last_error,
+        }
     picture = data.get("picture")
     picture_url = None
     if isinstance(picture, dict):
         inner = picture.get("data")
         if isinstance(inner, dict):
             picture_url = inner.get("url")
-    return {"name": data.get("name"), "picture_url": picture_url, "error": None}
+    response_time = data.get("displayed_message_response_time")
+    return {
+        "name": data.get("name"),
+        "picture_url": picture_url,
+        "displayed_response_time": response_time if isinstance(response_time, str) else None,
+        "error": None,
+    }
 
 
 @app.post("/api/ads/{ad_id}/status")
