@@ -1,9 +1,10 @@
 import { mutationErrorMessage, useEntityStatusMutation } from "@/api/hooks/useEntityMutations";
+import { usePageInfo } from "@/api/hooks/usePageInfo";
 import { Badge } from "@/components/Badge";
 import { confirm } from "@/components/ConfirmDialog";
 import { toast } from "@/components/Toast";
 import { Toggle } from "@/components/Toggle";
-import { isFrontPostCreative } from "@/lib/fbLinks";
+import { isFrontPostCreative, pageIdFromStoryId } from "@/lib/fbLinks";
 import { fM, fN, fP } from "@/lib/format";
 import { getIns, getMsgCount } from "@/lib/insights";
 import type { FbCreativeEntity, FbEntityStatus } from "@/types/fb";
@@ -49,6 +50,15 @@ function CreativeRowInner({ creative, multiAcct, campaignName, extras }: Creativ
   const mutation = useEntityStatusMutation();
   const thumb = creative.creative?.thumbnail_url;
   const isFrontPost = creative.creative ? isFrontPostCreative(creative.creative) : false;
+  // Which FB Page this ad publishes under. `effective_object_story_id`
+  // is present on virtually every ad (FB creates a dark post even for
+  // inline creatives), so the chip renders for both front- and
+  // back-stage ads. React Query dedupes by pageId across rows and the
+  // backend caches page info for 1h, so a 50-row adset costs at most
+  // one FB call per distinct page.
+  const pageId = pageIdFromStoryId(creative.creative?.effective_object_story_id);
+  const pageQuery = usePageInfo(pageId, true);
+  const page = pageQuery.data;
   const [previewOpen, setPreviewOpen] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<FbEntityStatus | null>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: trigger-only dep — clear optimistic override whenever server status changes
@@ -85,7 +95,7 @@ function CreativeRowInner({ creative, multiAcct, campaignName, extras }: Creativ
       >
         <td />
         <td>
-          <div className="flex max-w-[240px] items-center gap-1.5 pl-[72px]">
+          <div className="flex max-w-[340px] items-center gap-1.5 pl-[72px]">
             {thumb ? (
               // NOTE: do NOT wrap the URL in escHtml(). The legacy
               // the original design did so because it injected the <img> via
@@ -114,6 +124,20 @@ function CreativeRowInner({ creative, multiAcct, campaignName, extras }: Creativ
                 title="這支廣告是從既有的 FB/IG 貼文建立"
               >
                 前台貼文
+              </span>
+            )}
+            {page?.name && (
+              <span className="flex shrink-0 items-center gap-1" title={`粉絲專頁：${page.name}`}>
+                {page.picture_url && (
+                  <img
+                    src={page.picture_url}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                    className="h-4 w-4 shrink-0 rounded-full border border-border object-cover"
+                  />
+                )}
+                <span className="max-w-[90px] truncate text-[11px] text-gray-300">{page.name}</span>
               </span>
             )}
           </div>

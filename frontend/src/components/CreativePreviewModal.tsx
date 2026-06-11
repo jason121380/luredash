@@ -4,7 +4,7 @@ import { usePostMedia } from "@/api/hooks/usePostMedia";
 import { useVideoSource } from "@/api/hooks/useVideoSource";
 import { Modal } from "@/components/Modal";
 import { Spinner } from "@/components/Spinner";
-import { fbPostLinkFromStoryId, isFrontPostCreative } from "@/lib/fbLinks";
+import { fbPostLinkFromStoryId, isFrontPostCreative, pageIdFromStoryId } from "@/lib/fbLinks";
 import type { FbCreativeEntity } from "@/types/fb";
 import { useEffect, useState } from "react";
 
@@ -59,14 +59,6 @@ export interface CreativePreviewModalProps {
    *  Falls back to the creative's own name when omitted. */
   campaignName?: string;
   onClose: () => void;
-}
-
-/** Pull `pageId` out of `effective_object_story_id` = `"{pageId}_{postId}"`. */
-function extractPageId(storyId: string | undefined): string | null {
-  if (!storyId) return null;
-  const i = storyId.indexOf("_");
-  if (i <= 0) return null;
-  return storyId.slice(0, i);
 }
 
 /** Build a filesystem-safe filename for the downloaded asset. The
@@ -208,7 +200,7 @@ export function CreativePreviewModal({ creative, campaignName, onClose }: Creati
   }, [creativeId]);
 
   const storyId = creative?.creative?.effective_object_story_id;
-  const pageId = extractPageId(storyId);
+  const pageId = pageIdFromStoryId(storyId);
   const pageQuery = usePageInfo(pageId, isOpen);
 
   const isFrontPost = creative?.creative ? isFrontPostCreative(creative.creative) : false;

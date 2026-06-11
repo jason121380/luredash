@@ -1694,6 +1694,70 @@ def _bucu_snapshot_expires_in() -> int:
     return max(0, int(_BUCU_USAGE_STALE_SECONDS - (time.time() - newest)))
 
 
+# ── X-App-Usage(app / user / page 層級 rate limit)──────────────────
+# Codes 4 / 17 / 32 hit buckets broader than one ad account (whole
+# app, one user, one page). BUCU above only covers per-ad-account
+# buckets, so relying on it alone means the first sign of app/user
+# pressure is FB returning code 4/17 — which costs a 10-minute global
+# cooldown. FB reports live usage for these buckets in the
+# `X-App-Usage` header (% of the sliding one-hour budget); track it
+# and shed load BEFORE crossing 100%.
+_app_usage: dict[str, Any] = {}
+_APP_USAGE_STALE_SECONDS = _env_int("FB_APP_USAGE_STALE_SECONDS", 5 * 60)
+_APP_USAGE_LIVE_GATE_PCT = _env_int("FB_APP_USAGE_LIVE_GATE_PCT", 92)
+_APP_USAGE_BACKGROUND_GATE_PCT = _env_int("FB_APP_USAGE_BACKGROUND_GATE_PCT", 75)
+
+
+def _parse_app_usage_header(raw: Optional[str]) -> None:
+    """Parse `X-App-Usage` into `_app_usage`.
+
+    Header is a flat JSON object — {"call_count": N, "total_time": N,
+    "total_cputime": N} — where each value is percent-of-budget for
+    the sliding one-hour window. Missing/malformed headers are
+    ignored; FB doesn't promise the header on every response.
+    """
+    if not raw:
+        return
+    try:
+        parsed = _json.loads(raw)
+    except Exception:
+        return
+    if not isinstance(parsed, dict):
+        return
+    snapshot: dict[str, Any] = {"observed_at": time.time()}
+    for k in ("call_count", "total_time", "total_cputime"):
+        try:
+            snapshot[k] = int(parsed.get(k, 0) or 0)
+        except (TypeError, ValueError):
+            snapshot[k] = 0
+    _app_usage.clear()
+    _app_usage.update(snapshot)
+
+
+def _peak_app_usage_pct() -> int:
+    """Highest X-App-Usage metric from the last fresh snapshot, or 0.
+
+    Stale snapshots (no FB call within _APP_USAGE_STALE_SECONDS) read
+    as 0 so a self-imposed gate always re-opens for a probe call after
+    the quiet period — by then the sliding-hour budget has partially
+    decayed and the probe refreshes the snapshot either way.
+    """
+    observed = float(_app_usage.get("observed_at") or 0)
+    if observed <= 0 or (time.time() - observed) > _APP_USAGE_STALE_SECONDS:
+        return 0
+    return max(
+        int(_app_usage.get(k, 0) or 0)
+        for k in ("call_count", "total_time", "total_cputime")
+    )
+
+
+def _app_usage_snapshot_expires_in() -> int:
+    observed = float(_app_usage.get("observed_at") or 0)
+    if observed <= 0:
+        return 0
+    return max(0, int(_APP_USAGE_STALE_SECONDS - (time.time() - observed)))
+
+
 def _live_bucu_gate_reason() -> Optional[str]:
     """Reason to block live FB calls, or None when live traffic is OK."""
     regain = _peak_regain_minutes()
@@ -1702,6 +1766,9 @@ def _live_bucu_gate_reason() -> Optional[str]:
     peak = _peak_bucu_pct()
     if peak >= _BUCU_LIVE_GATE_PCT:
         return f"self-throttle: BUCU peak {peak}% ≥ {_BUCU_LIVE_GATE_PCT}%"
+    app_peak = _peak_app_usage_pct()
+    if app_peak >= _APP_USAGE_LIVE_GATE_PCT:
+        return f"self-throttle: app usage {app_peak}% ≥ {_APP_USAGE_LIVE_GATE_PCT}%"
     return None
 
 
@@ -1709,7 +1776,9 @@ def _live_bucu_gate_wait_seconds() -> int:
     regain = _peak_regain_minutes()
     if regain > 0:
         return max(60, regain * 60)
-    return max(60, _bucu_snapshot_expires_in())
+    if _peak_bucu_pct() >= _BUCU_LIVE_GATE_PCT:
+        return max(60, _bucu_snapshot_expires_in())
+    return max(60, _app_usage_snapshot_expires_in())
 
 
 # Self-imposed BUCU ceiling for background tasks (warm loop + scheduler
@@ -1734,6 +1803,9 @@ def _background_gate_reason() -> Optional[str]:
     peak = _peak_bucu_pct()
     if peak >= _BUCU_BACKGROUND_GATE_PCT:
         return f"self-throttle: BUCU peak {peak}% ≥ {_BUCU_BACKGROUND_GATE_PCT}%"
+    app_peak = _peak_app_usage_pct()
+    if app_peak >= _APP_USAGE_BACKGROUND_GATE_PCT:
+        return f"self-throttle: app usage {app_peak}% ≥ {_APP_USAGE_BACKGROUND_GATE_PCT}%"
     return None
 
 
@@ -1895,10 +1967,56 @@ def _cache_get(key: str) -> Any:
         return None
     inserted_at, data, ttl = entry
     if (time.monotonic() - inserted_at) > ttl:
-        _fb_cache.pop(key, None)
-        _fb_cache_locks.pop(key, None)
+        # Expired for normal reads, but intentionally NOT popped: the
+        # entry stays addressable for _cache_get_stale() so throttle
+        # gates can degrade to stale data instead of a hard 429. The
+        # LRU cap in _cache_put keeps total entries bounded, and
+        # _cache_invalidate still drops entries after mutations.
         return None
     return data
+
+
+# How old a cache entry may be and still be served as a degraded
+# fallback while FB throttle gates are active. One hour matches the
+# sliding-hour window of the app/user-level limits — anything we
+# fetched within the current window is better than a blank dashboard.
+_STALE_FALLBACK_MAX_AGE_SECONDS = _env_int("FB_STALE_FALLBACK_MAX_AGE_SECONDS", 3600)
+
+
+def _cache_get_stale(key: Optional[str]) -> Any:
+    """Expired-but-recent cache entry for throttle degradation."""
+    if key is None:
+        return None
+    entry = _fb_cache.get(key)
+    if entry is None:
+        return None
+    inserted_at, data, _ttl = entry
+    if (time.monotonic() - inserted_at) > _STALE_FALLBACK_MAX_AGE_SECONDS:
+        return None
+    return data
+
+
+def _stale_response_for_throttle(cache_key: Optional[str], path: str, method: str) -> Any:
+    """Stale cache payload to serve while a throttle gate is active.
+
+    Returns None when nothing usable is cached (caller raises its 429
+    as before). Logged as a cache hit so the engineering panel's
+    cache-hit-rate reflects that the user still got data.
+    """
+    if method != "GET":
+        return None
+    stale = _cache_get_stale(cache_key)
+    if stale is None:
+        return None
+    _log_fb_call(
+        path=path,
+        account_id=_extract_account_id_from_path(path),
+        method=method,
+        ms=0,
+        status=200,
+        cache_hit=True,
+    )
+    return stale
 
 
 def _cache_put(key: str, data: Any, ttl: float = _CACHE_TTL_SECONDS) -> None:
@@ -2083,6 +2201,7 @@ async def _fb_request(
     data_payload: Optional[dict] = None,
     *,
     slow_ok: bool = False,
+    cache_ttl: Optional[float] = None,
 ) -> dict:
     """Send a request to FB Graph API and convert ALL failure modes to HTTPException
     with a JSON body so the frontend can always parse and display the error.
@@ -2132,6 +2251,9 @@ async def _fb_request(
 
     global_remaining = _global_throttle_remaining()
     if global_remaining > 0:
+        stale = _stale_response_for_throttle(cache_key, path, method)
+        if stale is not None:
+            return stale
         _log_fb_call(
             path=path,
             account_id=_extract_account_id_from_path(path),
@@ -2151,6 +2273,9 @@ async def _fb_request(
 
     live_gate_reason = _live_bucu_gate_reason()
     if live_gate_reason:
+        stale = _stale_response_for_throttle(cache_key, path, method)
+        if stale is not None:
+            return stale
         wait = _live_bucu_gate_wait_seconds()
         _log_fb_call(
             path=path,
@@ -2164,7 +2289,7 @@ async def _fb_request(
         raise HTTPException(
             status_code=429,
             detail=(
-                f"FB BUCU 保護模式啟動({live_gate_reason}),約 {wait} 秒後可重試。"
+                f"FB 用量保護模式啟動({live_gate_reason}),約 {wait} 秒後可重試。"
                 f"期間只允許既有快取,不再送出新的 FB Graph API 呼叫 "
                 f"[code=4 self_bucu_gate=1 retry_after_seconds={wait}]"
             ),
@@ -2180,6 +2305,9 @@ async def _fb_request(
     acct_for_gate = _extract_account_id_from_path(path)
     remaining = _account_throttle_remaining(acct_for_gate)
     if remaining > 0:
+        stale = _stale_response_for_throttle(cache_key, path, method)
+        if stale is not None:
+            return stale
         _log_fb_call(
             path=path,
             account_id=acct_for_gate,
@@ -2216,12 +2344,25 @@ async def _fb_request(
                     cache_hit=True,
                 )
                 return cached
-            return await _fb_fetch_with_retry(
-                method, path, params, data_payload, token, cache_key, get_timeout
-            )
+            try:
+                return await _fb_fetch_with_retry(
+                    method, path, params, data_payload, token, cache_key, get_timeout,
+                    cache_ttl=cache_ttl,
+                )
+            except HTTPException as exc:
+                # The call itself tripped a rate limit (fresh 80004 or
+                # code 4/17/32/613). The throttle memory is already
+                # recorded; degrade THIS response to stale cache so the
+                # user keeps seeing data instead of an error toast.
+                if exc.status_code == 429:
+                    stale = _stale_response_for_throttle(cache_key, path, method)
+                    if stale is not None:
+                        return stale
+                raise
 
     return await _fb_fetch_with_retry(
-        method, path, params, data_payload, token, cache_key, get_timeout
+        method, path, params, data_payload, token, cache_key, get_timeout,
+        cache_ttl=cache_ttl,
     )
 
 
@@ -2233,6 +2374,8 @@ async def _fb_fetch_with_retry(
     token: str,
     cache_key: Optional[str],
     get_timeout: float,
+    *,
+    cache_ttl: Optional[float] = None,
 ) -> dict:
     """Wrap :func:`_fb_fetch_and_cache` with a single retry on
     transient upstream errors (5xx / network timeout / connect reset).
@@ -2257,6 +2400,7 @@ async def _fb_fetch_with_retry(
                 cache_key,
                 get_timeout,
                 retried=(attempt > 0),
+                cache_ttl=cache_ttl,
             )
         except HTTPException as e:
             last_exc = e
@@ -2289,10 +2433,12 @@ async def _fb_fetch_and_cache(
     get_timeout: float = _GET_TIMEOUT_FAST,
     *,
     retried: bool = False,
+    cache_ttl: Optional[float] = None,
 ) -> dict:
     """Inner FB call — issues the actual httpx request, handles the
     usual error pathways, and writes the result to the cache when
-    ``cache_key`` is provided.
+    ``cache_key`` is provided. ``cache_ttl`` overrides the default
+    5-minute TTL for slow-moving data (e.g. page name / avatar).
     """
     url = f"{BASE_URL}/{path}"
     # Two-layer throttle: per-account first (cap 4 same-account
@@ -2341,6 +2487,7 @@ async def _fb_fetch_and_cache(
         # is present on error responses too and is how we know when it's
         # safe to retry.
         _parse_bucu_header(r.headers.get("x-business-use-case-usage"))
+        _parse_app_usage_header(r.headers.get("x-app-usage"))
         # Try to parse JSON response
         try:
             body = r.json()
@@ -2400,7 +2547,7 @@ async def _fb_fetch_and_cache(
             raise HTTPException(status_code=http_status, detail=detail)
         # Cache successful GET responses
         if cache_key is not None:
-            _cache_put(cache_key, body)
+            _cache_put(cache_key, body, ttl=cache_ttl if cache_ttl is not None else _CACHE_TTL_SECONDS)
         _log_fb_call(
             path=path,
             account_id=account_id,
@@ -2415,8 +2562,14 @@ async def _fb_fetch_and_cache(
         raise
 
 
-async def fb_get(path: str, params: Optional[dict] = None, *, slow_ok: bool = False) -> dict:
-    return await _fb_request("GET", path, params=params, slow_ok=slow_ok)
+async def fb_get(
+    path: str,
+    params: Optional[dict] = None,
+    *,
+    slow_ok: bool = False,
+    cache_ttl: Optional[float] = None,
+) -> dict:
+    return await _fb_request("GET", path, params=params, slow_ok=slow_ok, cache_ttl=cache_ttl)
 
 
 async def fb_post(
@@ -2491,6 +2644,9 @@ async def fb_get_paginated(
 
     global_remaining = _global_throttle_remaining()
     if global_remaining > 0:
+        stale = _stale_response_for_throttle(cache_key, path, "GET")
+        if stale is not None:
+            return stale
         _log_fb_call(
             path=path,
             account_id=_extract_account_id_from_path(path),
@@ -2510,6 +2666,9 @@ async def fb_get_paginated(
 
     live_gate_reason = _live_bucu_gate_reason()
     if live_gate_reason:
+        stale = _stale_response_for_throttle(cache_key, path, "GET")
+        if stale is not None:
+            return stale
         wait = _live_bucu_gate_wait_seconds()
         _log_fb_call(
             path=path,
@@ -2523,7 +2682,7 @@ async def fb_get_paginated(
         raise HTTPException(
             status_code=429,
             detail=(
-                f"FB BUCU 保護模式啟動({live_gate_reason}),約 {wait} 秒後可重試。"
+                f"FB 用量保護模式啟動({live_gate_reason}),約 {wait} 秒後可重試。"
                 f"期間只允許既有快取,不再送出新的 FB Graph API 呼叫 "
                 f"[code=4 self_bucu_gate=1 retry_after_seconds={wait}]"
             ),
@@ -2535,6 +2694,9 @@ async def fb_get_paginated(
     acct_for_gate = _extract_account_id_from_path(path)
     remaining = _account_throttle_remaining(acct_for_gate)
     if remaining > 0:
+        stale = _stale_response_for_throttle(cache_key, path, "GET")
+        if stale is not None:
+            return stale
         _log_fb_call(
             path=path,
             account_id=acct_for_gate,
@@ -2567,9 +2729,19 @@ async def fb_get_paginated(
                 cache_hit=True,
             )
             return cached
-        return await _fb_get_paginated_fetch(
-            path, params, token, cache_key, ttl, max_pages=max_pages
-        )
+        try:
+            return await _fb_get_paginated_fetch(
+                path, params, token, cache_key, ttl, max_pages=max_pages
+            )
+        except HTTPException as exc:
+            # Same degrade-to-stale as `_fb_request`: a fresh rate
+            # limit mid-walk shouldn't blank a list the user saw
+            # minutes ago.
+            if exc.status_code == 429:
+                stale = _stale_response_for_throttle(cache_key, path, "GET")
+                if stale is not None:
+                    return stale
+            raise
 
 
 async def _fb_get_paginated_fetch(
@@ -2630,6 +2802,7 @@ async def _fb_get_paginated_fetch(
                 page_status = 502
             else:
                 _parse_bucu_header(r.headers.get("x-business-use-case-usage"))
+                _parse_app_usage_header(r.headers.get("x-app-usage"))
                 try:
                     data = r.json()
                 except Exception:
@@ -4903,6 +5076,8 @@ async def get_fb_usage():
         "data": _fb_usage,
         "peak_regain_minutes": _peak_regain_minutes(),
         "peak_bucu_pct": _peak_bucu_pct(),
+        "app_usage": dict(_app_usage),
+        "peak_app_usage_pct": _peak_app_usage_pct(),
         "live_gate_reason": live_gate_reason,
         "live_gate_retry_after_seconds": _live_bucu_gate_wait_seconds()
         if live_gate_reason
@@ -5910,7 +6085,16 @@ async def get_page_info(page_id: str):
     arbitrary Page metadata.
     """
     try:
-        data = await fb_get(page_id, {"fields": "name,picture.width(80).height(80)"})
+        # Page name + avatar are slow-moving; cache 1h instead of the
+        # default 5min. The dashboard 3rd level renders a page chip on
+        # every creative row, so this path is hit far more often than
+        # when only the preview modal used it — a short TTL would burn
+        # the page-level (code 32) rate-limit bucket for no benefit.
+        data = await fb_get(
+            page_id,
+            {"fields": "name,picture.width(80).height(80)"},
+            cache_ttl=3600,
+        )
     except HTTPException as exc:
         return {"name": None, "picture_url": None, "error": str(exc.detail)}
     picture = data.get("picture")
@@ -10659,7 +10843,11 @@ async def _security_push_tick() -> None:
 _WARM_TICK_SECONDS = 60
 _WARM_RECENT_ACCESS_S = 600  # only refresh entries seen in last 10min
 _WARM_REFRESH_WINDOW_S = 90  # refresh when ≤90s of TTL remains
-_WARM_MAX_PER_TICK = 5
+# 3/min (was 5) — warm traffic burns the same app/user-level hourly
+# budget that code 4/17 throttles enforce; with stale-cache fallback
+# in place a cold cache entry is no longer catastrophic, so spend
+# less of the budget on speculative refreshes.
+_WARM_MAX_PER_TICK = _env_int("WARM_MAX_PER_TICK", 3)
 _WARM_THROTTLE_BACKOFF_S = 600
 
 
