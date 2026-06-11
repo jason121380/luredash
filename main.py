@@ -6090,45 +6090,28 @@ async def get_page_info(page_id: str):
     # when only the preview modal used it — a short TTL would burn
     # the page-level (code 32) rate-limit bucket for no benefit.
     #
-    # Tier 1 additionally asks for `displayed_message_response_time` —
-    # the responsiveness value the page DISPLAYS to visitors (「一般會
-    # 在幾分鐘內回覆」). It often returns the literal string
-    # "AUTOMATIC" (page lets FB decide) and is NOT the live measured
-    # response time from Business Suite's 每日回覆情況 — there is no
-    # public API for that (nor for response RATE). Some tokens /
-    # pages reject the extra field, so tier 2 retries without it
-    # rather than losing name + avatar.
-    data: Optional[dict] = None
-    last_error: Optional[str] = None
-    for fields in (
-        "name,picture.width(80).height(80),displayed_message_response_time",
-        "name,picture.width(80).height(80)",
-    ):
-        try:
-            data = await fb_get(page_id, {"fields": fields}, cache_ttl=3600)
-            break
-        except HTTPException as exc:
-            last_error = str(exc.detail)
-    if data is None:
-        return {
-            "name": None,
-            "picture_url": None,
-            "displayed_response_time": None,
-            "error": last_error,
-        }
+    # NOTE: `displayed_message_response_time` was tried here
+    # (2026-06-11) and removed the same day — every page the team
+    # manages uses automatic responsiveness, so FB only ever returned
+    # the literal "AUTOMATIC", never a usable number. The measured
+    # 回覆率/回覆時間 in Business Suite has no public API; the only
+    # route is computing it from /{page}/conversations (needs
+    # pages_messaging + page-admin tokens + App Review).
+    try:
+        data = await fb_get(
+            page_id,
+            {"fields": "name,picture.width(80).height(80)"},
+            cache_ttl=3600,
+        )
+    except HTTPException as exc:
+        return {"name": None, "picture_url": None, "error": str(exc.detail)}
     picture = data.get("picture")
     picture_url = None
     if isinstance(picture, dict):
         inner = picture.get("data")
         if isinstance(inner, dict):
             picture_url = inner.get("url")
-    response_time = data.get("displayed_message_response_time")
-    return {
-        "name": data.get("name"),
-        "picture_url": picture_url,
-        "displayed_response_time": response_time if isinstance(response_time, str) else None,
-        "error": None,
-    }
+    return {"name": data.get("name"), "picture_url": picture_url, "error": None}
 
 
 @app.post("/api/ads/{ad_id}/status")

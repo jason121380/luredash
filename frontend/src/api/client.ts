@@ -850,11 +850,6 @@ export const api = {
       request<{
         name: string | null;
         picture_url: string | null;
-        /** Raw `displayed_message_response_time` from the Page node —
-         *  the responsiveness the page DISPLAYS to visitors, often the
-         *  literal "AUTOMATIC". Format with formatPageResponseTime()
-         *  before showing; null when FB withholds the field. */
-        displayed_response_time: string | null;
         error: string | null;
       }>("GET", `/api/pages/${pageId}/info`, { source: "media" }),
   },
