@@ -5,7 +5,7 @@ import { confirm } from "@/components/ConfirmDialog";
 import { toast } from "@/components/Toast";
 import { Toggle } from "@/components/Toggle";
 import { isFrontPostCreative, pageIdFromStoryId } from "@/lib/fbLinks";
-import { fM, fN, fP } from "@/lib/format";
+import { fM, fN, fP, formatPageResponseTime } from "@/lib/format";
 import { getIns, getMsgCount } from "@/lib/insights";
 import type { FbCreativeEntity, FbEntityStatus } from "@/types/fb";
 import { Suspense, lazy, memo, useEffect, useState } from "react";
@@ -59,6 +59,7 @@ function CreativeRowInner({ creative, multiAcct, campaignName, extras }: Creativ
   const pageId = pageIdFromStoryId(creative.creative?.effective_object_story_id);
   const pageQuery = usePageInfo(pageId, true);
   const page = pageQuery.data;
+  const pageResponseTime = formatPageResponseTime(page?.displayed_response_time);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<FbEntityStatus | null>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: trigger-only dep — clear optimistic override whenever server status changes
@@ -127,7 +128,10 @@ function CreativeRowInner({ creative, multiAcct, campaignName, extras }: Creativ
               </span>
             )}
             {page?.name && (
-              <span className="flex shrink-0 items-center gap-1" title={`粉絲專頁：${page.name}`}>
+              <span
+                className="flex shrink-0 items-center gap-1"
+                title={`粉絲專頁：${page.name}${pageResponseTime ? ` · ${pageResponseTime}` : ""}`}
+              >
                 {page.picture_url && (
                   <img
                     src={page.picture_url}
