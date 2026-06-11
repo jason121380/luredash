@@ -43,6 +43,19 @@ export function fbCampaignLink(
  * return to decide whether to render the "在 Facebook 開啟原始貼文"
  * link at all.
  */
+/**
+ * Pull the page id out of `effective_object_story_id` =
+ * `"{pageId}_{postId}"`. Returns null when the input is missing or
+ * doesn't have the expected shape. Shared by the dashboard 3rd-level
+ * page chip and the creative preview modal header.
+ */
+export function pageIdFromStoryId(storyId: string | undefined): string | null {
+  if (!storyId) return null;
+  const i = storyId.indexOf("_");
+  if (i <= 0) return null;
+  return storyId.slice(0, i);
+}
+
 export function fbPostLinkFromStoryId(storyId: string | undefined): string | null {
   if (!storyId) return null;
   const underscoreAt = storyId.indexOf("_");
