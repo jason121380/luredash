@@ -25,7 +25,10 @@ describe("App scaffold", () => {
     // so use getAllByText and assert on the count.
     const headings = screen.getAllByText(/luredash/i);
     expect(headings.length).toBeGreaterThanOrEqual(2);
-    // Tagline renders only in the auth-checking state
-    expect(screen.getByText(/廣告管理平台/)).toBeInTheDocument();
+    // Tagline renders only in the auth-checking state. Like the
+    // brand name above, it appears in BOTH the dark brand panel
+    // (「廣告管理平台，統一掌握成效數據與異常警示。」) and the login
+    // card subtitle, so match-all and assert presence.
+    expect(screen.getAllByText(/廣告管理平台/).length).toBeGreaterThanOrEqual(1);
   });
 });
