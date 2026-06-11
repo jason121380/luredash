@@ -1,4 +1,4 @@
-import { api } from "@/api/client";
+import { api, apiAuthHeaders } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { useShowBucuInHeader } from "@/components/BucuHeaderChip";
@@ -1528,7 +1528,10 @@ interface PingResult {
 async function pingPath(path: string): Promise<PingResult> {
   const started = performance.now();
   try {
-    const r = await fetch(path, { method: "GET" });
+    // Raw fetch (we want raw latency, not request()'s retry/refresh
+    // machinery) — but protected /api paths still need the session
+    // Bearer header or the ping just measures the 401 short-circuit.
+    const r = await fetch(path, { method: "GET", headers: apiAuthHeaders() });
     const ms = Math.round(performance.now() - started);
     let detail: string | undefined;
     if (!r.ok) {
