@@ -7355,6 +7355,42 @@ def _kpis_from_insights(
     }
 
 
+def _entity_status_chip(entity: dict) -> "tuple[str, str]":
+    """(label, hex color) for the flex header status chip. Works for
+    any FB entity carrying `status` (campaign / adset / ad).
+
+    For PAUSED the label is prefixed with M/D parsed from
+    `updated_time` when present (FB doesn't expose a dedicated
+    paused-at timestamp without the Activity Log endpoint, but
+    updated_time is the last modification — close enough for
+    "paused since").
+    """
+    status_raw = (entity.get("status") or "").upper()
+    status_color_map = {
+        "ACTIVE": "#16A34A",   # green
+        "PAUSED": "#DC2626",   # red
+        "ARCHIVED": "#888888", # grey
+        "DELETED": "#888888",  # grey
+    }
+    status_label_map = {
+        "ACTIVE": "進行中",
+        "PAUSED": "已暫停",
+        "ARCHIVED": "已封存",
+        "DELETED": "已刪除",
+    }
+    status_label = status_label_map.get(status_raw, status_raw or "")
+    status_color = status_color_map.get(status_raw, "#888888")
+    if status_raw == "PAUSED":
+        updated_raw = entity.get("updated_time") or ""
+        try:
+            # FB returns "2026-04-12T08:30:00+0000" — parse to local M/D
+            dt = datetime.fromisoformat(updated_raw.replace("+0000", "+00:00"))
+            status_label = f"{dt.month}/{dt.day} {status_label}"
+        except (TypeError, ValueError):
+            pass
+    return status_label, status_color
+
+
 async def _build_flex_for_config(cfg: dict) -> dict:
     """Produce the LINE Flex Message for one push config row.
 
@@ -7464,34 +7500,9 @@ async def _build_flex_for_config(cfg: dict) -> dict:
     )
 
     # Status chip in header top-right — recipients can tell at a glance
-    # whether the campaign behind these numbers is still ACTIVE or has
-    # been paused / archived. For PAUSED we also prepend M/D parsed
-    # from `updated_time` (FB doesn't expose a dedicated paused-at
-    # timestamp without the Activity Log endpoint, but updated_time
-    # is the last modification — close enough for "paused since").
-    status_raw = (camp.get("status") or "").upper()
-    status_color_map = {
-        "ACTIVE": "#16A34A",   # green
-        "PAUSED": "#DC2626",   # red
-        "ARCHIVED": "#888888", # grey
-        "DELETED": "#888888",  # grey
-    }
-    status_label_map = {
-        "ACTIVE": "進行中",
-        "PAUSED": "已暫停",
-        "ARCHIVED": "已封存",
-        "DELETED": "已刪除",
-    }
-    status_label = status_label_map.get(status_raw, status_raw or "")
-    status_color = status_color_map.get(status_raw, "#888888")
-    if status_raw == "PAUSED":
-        updated_raw = camp.get("updated_time") or ""
-        try:
-            # FB returns "2026-04-12T08:30:00+0000" — parse to local M/D
-            dt = datetime.fromisoformat(updated_raw.replace("+0000", "+00:00"))
-            status_label = f"{dt.month}/{dt.day} {status_label}"
-        except (TypeError, ValueError):
-            pass
+    # whether the entity behind these numbers is still ACTIVE or has
+    # been paused / archived.
+    status_label, status_color = _entity_status_chip(camp)
 
     # Footer button is opt-in per config (column added 2026-04-29).
     # Pass date_from / date_to so the share page lands on the same
@@ -7555,7 +7566,8 @@ async def _build_flex_for_config(cfg: dict) -> dict:
     # Each bubble re-derives KPI from that member's own insights so the
     # numbers are scoped, not pro-rated. Members are fetched in
     # parallel because FB rate-limits per-edge, not per-account.
-    member_fields = f"id,name,status,{ins_clause}"
+    # `updated_time` feeds the per-member status chip's「M/D 已暫停」.
+    member_fields = f"id,name,status,updated_time,{ins_clause}"
     member_tasks = [
         fb_get(mid, {"fields": member_fields}) for mid in member_ids
     ]
@@ -7595,13 +7607,18 @@ async def _build_flex_for_config(cfg: dict) -> dict:
             if cfg.get("include_recommendations")
             else None
         )
+        # Each bubble shows ITS OWN entity's status — a paused ad must
+        # render「已暫停」even when the parent campaign is still ACTIVE
+        # (using the campaign chip here was the bug where a paused ad
+        # showed a green 進行中 chip).
+        member_status_label, member_status_color = _entity_status_chip(member_data)
         bubbles.append(
             line_client._build_flex_report_bubble(
                 title=member_name,
                 subtitle=f"{title} · {concrete_range or _date_range_label(date_range, date_from, date_to)}",
                 objective_label=objective_label,
-                status_label=status_label,
-                status_color=status_color,
+                status_label=member_status_label,
+                status_color=member_status_color,
                 kpis=member_kpis,
                 recommendations=member_recs,
                 report_url=report_url,
