@@ -4,6 +4,13 @@ import type { DateConfig } from "@/lib/datePicker";
 import type { FbCreativeEntity } from "@/types/fb";
 import { useQuery } from "@tanstack/react-query";
 
+/** Shared key builder — see adsetsQueryKey for why this must be the
+ *  single source of truth (ComparisonTable subscribes to these same
+ *  cache entries read-only). */
+export function creativesQueryKey(adsetId: string | null, date: DateConfig) {
+  return ["creatives", adsetId, date] as const;
+}
+
 /**
  * Fetch creatives (the 3rd tree level) for an adset. Lazily enabled
  * when the user expands an adset row.
@@ -15,7 +22,7 @@ import { useQuery } from "@tanstack/react-query";
 export function useCreatives(adsetId: string | null, date: DateConfig, enabled: boolean) {
   const { status } = useFbAuth();
   return useQuery({
-    queryKey: ["creatives", adsetId, date],
+    queryKey: creativesQueryKey(adsetId, date),
     queryFn: async (): Promise<FbCreativeEntity[]> => {
       if (!adsetId) return [];
       const res = await api.adsets.creatives(adsetId, date);

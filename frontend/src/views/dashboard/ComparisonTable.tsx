@@ -1,4 +1,6 @@
 import { api } from "@/api/client";
+import { adsetsQueryKey } from "@/api/hooks/useAdsets";
+import { creativesQueryKey } from "@/api/hooks/useCreatives";
 import { cn } from "@/lib/cn";
 import type { DateConfig } from "@/lib/datePicker";
 import { fM, fN } from "@/lib/format";
@@ -52,7 +54,7 @@ export function ComparisonTable({ multiAcct, date, searchTerm }: ComparisonTable
   // so the components re-render when the cache changes.
   const adsetsQueries = useQueries({
     queries: expandedCamps.map((campId) => ({
-      queryKey: ["adsets", campId, date] as const,
+      queryKey: adsetsQueryKey(campId, date),
       queryFn: async (): Promise<FbAdset[]> => {
         const res = await api.campaigns.adsets(campId, date);
         return res.data ?? [];
@@ -97,7 +99,7 @@ export function ComparisonTable({ multiAcct, date, searchTerm }: ComparisonTable
   // always a cache hit rather than a fresh FB round-trip.
   const queries = useQueries({
     queries: visibleAdsetIds.map((adsetId) => ({
-      queryKey: ["creatives", adsetId, date] as const,
+      queryKey: creativesQueryKey(adsetId, date),
       queryFn: async (): Promise<FbCreativeEntity[]> => {
         const res = await api.adsets.creatives(adsetId, date);
         return res.data ?? [];
