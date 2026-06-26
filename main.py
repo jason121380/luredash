@@ -11954,8 +11954,68 @@ def _cost_center_num(v: float):
     return int(f) if f == int(f) else round(f, 2)
 
 
+async def _cost_center_accounts_for_uid(uid: Optional[str]) -> List[dict]:
+    """List `me/adaccounts` using a specific user's FB token (uid=None →
+    the legacy runtime token). Sets the contextvar so `get_token()` (and
+    everything it reaches) resolves to that user's token, then restores
+    it. FB errors are swallowed → empty list, so one revoked token never
+    breaks the sweep."""
+    reset = _current_fb_user_id.set(uid) if uid else None
+    try:
+        return await fb_get_paginated(
+            "me/adaccounts",
+            {"fields": "id,name", "limit": "500"},
+            ttl=_ACCOUNTS_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        return []
+    finally:
+        if reset is not None:
+            _current_fb_user_id.reset(reset)
+
+
+async def _cost_center_resolve(target_names: List[str]) -> dict:
+    """Locate each target ad-account by display name across every FB
+    token we hold — the runtime token first, then each cached per-user
+    token (multi-tenant). The M2M endpoint has no logged-in session, so
+    a single token often can't see all accounts; this sweep finds, per
+    account, the token context that CAN.
+
+    Returns ``{"matched": {name: {"id", "uid"}}, "sources": [...],
+    "all_names": [...]}``. ``uid`` is the token owner to use when
+    fetching that account's campaigns (None = runtime token)."""
+    matched: dict = {}
+    sources: list = []
+    all_names: set = set()
+    # Runtime token (None) first, then every cached per-user token.
+    candidates: List[Optional[str]] = [None, *list(_user_token_cache.keys())]
+    for uid in candidates:
+        if all(n in matched for n in target_names):
+            break
+        accounts = await _cost_center_accounts_for_uid(uid)
+        matched_here: list = []
+        for a in accounts:
+            nm = (a.get("name") or "").strip()
+            if not nm:
+                continue
+            all_names.add(nm)
+            if nm in target_names and nm not in matched:
+                matched[nm] = {"id": a.get("id"), "uid": uid}
+                matched_here.append(nm)
+        sources.append(
+            {
+                "token": "runtime" if uid is None else f"user:{uid}",
+                "account_count": len(accounts),
+                "matched_here": matched_here,
+            }
+        )
+    return {"matched": matched, "sources": sources, "all_names": sorted(all_names)}
+
+
 @app.get("/api/cost-center")
-async def get_cost_center(request: Request, month: Optional[str] = None):
+async def get_cost_center(
+    request: Request, month: Optional[str] = None, debug: int = 0
+):
     """唯讀費用中心匯出（機器對機器，給 lurefin）。見上方註解。"""
     # ── Auth：環境變數裡的靜態 bearer token，不走 FB 使用者登入 ──
     expected = os.getenv("AD_SPEND_API_TOKEN", "")
@@ -11971,32 +12031,38 @@ async def get_cost_center(request: Request, month: Optional[str] = None):
 
     _fb_call_source.set("cost-center")
 
-    # 兩個顯示名稱 → act_ id（從 FB 帳號清單對應）
-    accounts = await fb_get_paginated(
-        "me/adaccounts",
-        {"fields": "id,name", "limit": "500"},
-        ttl=_ACCOUNTS_CACHE_TTL_SECONDS,
-    )
-    by_name: dict = {}
-    for a in accounts:
-        nm = (a.get("name") or "").strip()
-        if nm and nm not in by_name:
-            by_name[nm] = a.get("id")
+    # 兩個顯示名稱 → (act_id, 該帳號看得到的 token uid)。M2M 沒有使用者
+    # session，單一 runtime token 常常看不到全部帳號，所以掃過 runtime +
+    # 每個 per-user token 找到「看得到這個帳號」的那把 token。
+    resolution = await _cost_center_resolve(COST_CENTER_ACCOUNT_NAMES)
+    matched = resolution["matched"]
 
     row_markups, default_markup, pinned = await _cost_center_finance_settings()
 
     out_accounts: list = []
+    acct_diags: list = []
     for name in COST_CENTER_ACCOUNT_NAMES:
-        acct_id = by_name.get(name)
+        info = matched.get(name)
         rows_out: list = []
-        if acct_id:
+        diag: dict = {"account": name, "found": bool(info)}
+        if info:
+            acct_id = info["id"]
+            uid = info["uid"]
+            diag["account_id"] = acct_id
+            diag["token"] = "runtime" if uid is None else f"user:{uid}"
+            # 用「看得到這個帳號」的 token context 抓 campaigns
+            reset = _current_fb_user_id.set(uid) if uid else None
             try:
                 campaigns = await _fetch_campaigns_for_account(
                     acct_id, "last_30d", time_range,
                     include_archived=True, include_adsets=False,
                 )
-            except HTTPException:
+            except HTTPException as e:
                 campaigns = []
+                diag["fetch_error"] = str(e.detail)
+            finally:
+                if reset is not None:
+                    _current_fb_user_id.reset(reset)
             nick_map = await _cost_center_nicknames(
                 [c.get("id") for c in campaigns if c.get("id")]
             )
@@ -12027,9 +12093,39 @@ async def get_cost_center(request: Request, month: Optional[str] = None):
                 }
                 (pinned_rows if is_pinned else unpinned_rows).append(row)
             rows_out = [*pinned_rows, *unpinned_rows]
+            diag["campaigns_total"] = len(campaigns)
+            diag["rows_after_filter"] = len(rows_out)
         out_accounts.append({"account": name, "rows": rows_out})
+        acct_diags.append(diag)
 
-    return {"month": label, "accounts": out_accounts}
+    # Always log a one-line diagnostic to server stdout so empty-row
+    # incidents are debuggable from Zeabur logs without ?debug=1.
+    print(
+        "[cost-center] month=%s range=%s..%s sources=%s accounts=%s"
+        % (
+            label,
+            since,
+            until,
+            resolution["sources"],
+            [{k: d.get(k) for k in ("account", "found", "token",
+                                    "campaigns_total", "rows_after_filter",
+                                    "fetch_error") if k in d}
+             for d in acct_diags],
+        ),
+        flush=True,
+    )
+
+    result: dict = {"month": label, "accounts": out_accounts}
+    if debug:
+        result["_debug"] = {
+            "date_range": {"since": since, "until": until},
+            "time_range": time_range,
+            "token_sources": resolution["sources"],
+            "accounts": acct_diags,
+            "all_visible_account_names": resolution["all_names"],
+            "finance_default_markup": default_markup,
+        }
+    return result
 
 
 # ── SPA catch-all (MUST be registered last) ─────────────────────────
