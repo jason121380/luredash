@@ -11854,6 +11854,7 @@ async def run_optimization_agents_stream(req: RunAgentsRequest):
 COST_CENTER_ACCOUNTS = [
     {"label": "L吸引力", "fb_name": "!L 吸引力 LURE - 月結"},
     {"label": "b新城區廣告帳號", "fb_name": "!B 新城區 - 月結"},
+    {"label": "L2寰宇", "fb_name": "! L2 寰宇 - 月結"},
 ]
 COST_CENTER_FB_NAMES = [a["fb_name"] for a in COST_CENTER_ACCOUNTS]
 
