@@ -11878,7 +11878,7 @@ async def run_optimization_agents_stream(req: RunAgentsRequest):
 # of FB's messy display names) to the real FB ad-account display name we
 # match on. Update `fb_name` here if an account is renamed in FB.
 COST_CENTER_ACCOUNTS = [
-    {"label": "L吸引力", "fb_name": "吸引力"},
+    {"label": "L吸引力", "fb_name": "!L 吸引力 LURE - 月結"},
     {"label": "b新城區廣告帳號", "fb_name": "!B 新城區 - 月結"},
 ]
 COST_CENTER_FB_NAMES = [a["fb_name"] for a in COST_CENTER_ACCOUNTS]
@@ -12078,11 +12078,11 @@ async def _cost_center_compute(month: Optional[str]) -> tuple:
     out_accounts: list = []
     acct_diags: list = []
     for acct in COST_CENTER_ACCOUNTS:
-        label = acct["label"]
+        acct_label = acct["label"]
         fb_name = acct["fb_name"]
         info = matched.get(fb_name)
         rows_out: list = []
-        diag: dict = {"account": label, "fb_name": fb_name, "found": bool(info)}
+        diag: dict = {"account": acct_label, "fb_name": fb_name, "found": bool(info)}
         if info:
             acct_id = info["id"]
             uid = info["uid"]
@@ -12133,7 +12133,7 @@ async def _cost_center_compute(month: Optional[str]) -> tuple:
             rows_out = [*pinned_rows, *unpinned_rows]
             diag["campaigns_total"] = len(campaigns)
             diag["rows_after_filter"] = len(rows_out)
-        out_accounts.append({"account": label, "rows": rows_out})
+        out_accounts.append({"account": acct_label, "rows": rows_out})
         acct_diags.append(diag)
 
     print(
@@ -12162,10 +12162,39 @@ async def _cost_center_compute(month: Optional[str]) -> tuple:
 
 async def _cost_center_capture(month: str) -> dict:
     """Compute one month live and upsert it into cost_center_snapshots.
-    Returns the compute debug dict."""
+    Returns the compute debug dict.
+
+    Anti-clobber: a capture that comes back empty for an account (FB
+    throttle, a transient token sweep that didn't see the account, etc.)
+    must NOT wipe an account that already has rows in the stored
+    snapshot. We preserve the previous rows for any account whose fresh
+    capture is empty. Within a month spend only accumulates, so an
+    account that legitimately has 0 spend was never non-empty to begin
+    with; month boundaries use a different row, so nothing goes stale
+    across months."""
     accounts, debug = await _cost_center_compute(month)
     label = debug["month"]
     if _db_pool is not None:
+        prev = await _cost_center_read_snapshot(label)
+        if prev:
+            prev_rows = {
+                a.get("account"): (a.get("rows") or [])
+                for a in prev["accounts"]
+                if isinstance(a, dict)
+            }
+            diag_by = {d.get("account"): d for d in debug.get("accounts", [])}
+            for a in accounts:
+                name = a.get("account")
+                if not a.get("rows") and prev_rows.get(name):
+                    a["rows"] = prev_rows[name]
+                    d = diag_by.get(name)
+                    if d is not None:
+                        d["preserved_prior_rows"] = len(a["rows"])
+                    print(
+                        f"[cost-center] {label}: kept prior {len(a['rows'])} rows "
+                        f"for {name} (fresh capture was empty)",
+                        flush=True,
+                    )
         async with _db_pool.acquire() as conn:
             await conn.execute(
                 """
