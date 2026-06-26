@@ -1374,6 +1374,11 @@ def _is_public_api_request(request: Request) -> bool:
         return True
     if path.startswith("/api/line/webhook"):
         return True
+    # Machine-to-machine 費用中心匯出 (lurefin)。Bypasses the FB session
+    # middleware because it does its own static Bearer-token check against
+    # AD_SPEND_API_TOKEN — see get_cost_center().
+    if path == "/api/cost-center" and method == "GET":
+        return True
     if path == "/api/proxy-asset" and method == "GET":
         return True
     # Public share reports (/r/...) load these read-only FB proxy endpoints
@@ -11818,6 +11823,215 @@ async def run_optimization_agents_stream(req: RunAgentsRequest):
         # which defeats the entire point of streaming.
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
+# ── 費用中心唯讀匯出 API（機器對機器，給 lurefin 每月同步用）──────────
+#
+# GET /api/cost-center?month=YYYY-MM
+#
+# 外部系統 lurefin 以 server-to-server 方式呼叫，把「費用中心」裡
+# L吸引力 / b新城區廣告帳號 兩個帳號的表格資料同步進它自己的 DB。
+#
+#   - 驗證：Authorization: Bearer <token>，token 由環境變數
+#     AD_SPEND_API_TOKEN 提供（不寫死、.env 不 commit）。純機器對機器，
+#     不走一般使用者 FB 登入；FB 呼叫沿用 runtime token（與 /r 分享頁同源）。
+#   - 唯讀，只回 JSON，不需要 CORS。
+#   - month 省略時預設「當月」（SCHEDULER_TZ，預設 Asia/Taipei）。
+#
+# 欄位對應（費用中心表格 → JSON）與 FinanceTable.tsx / financeData.ts 對齊：
+#   暱稱   → nickname            formatNickname（店家 · 設計師）；無暱稱時
+#                               回行銷活動名稱，與表格那一格實際顯示一致
+#   花費   → spend              FB 原始 spend（真正的 number，不四捨五入）
+#   %     → percent            per-row 月% override，否則 finance_default_markup
+#   花費+% → spend_with_percent  ceil(spend × (1 + percent/100))，與 spendPlus 一致
+#   pin   → pin                置頂回 "置頂"，否則 null（表格 pin 只有「有無置頂」）
+#   請款單 → invoice            系統未儲存任何請款單資料，一律 null
+#
+# 顯示順序 / 篩選比照費用中心預設：置頂列在前 + 其餘照 FB 原始順序，並
+# 隱藏零花費列（表格「有花費」預設開）。
+
+COST_CENTER_ACCOUNT_NAMES = ["L吸引力", "b新城區廣告帳號"]
+
+
+def _cost_center_month_range(month: Optional[str]) -> tuple:
+    """Resolve ``month`` (``YYYY-MM``, default 當月 in SCHEDULER_TZ) to
+    ``(label, since_iso, until_iso)``. ``until`` is capped at today
+    (local tz) so the current month never asks FB for future days."""
+    tz = _scheduler_tz()
+    today = datetime.now(timezone.utc).astimezone(tz).date()
+    if month:
+        try:
+            y, m = month.split("-")
+            year, mon = int(y), int(m)
+            if not (1 <= mon <= 12):
+                raise ValueError
+        except (ValueError, AttributeError):
+            raise HTTPException(status_code=400, detail="month 格式錯誤,請用 YYYY-MM")
+    else:
+        year, mon = today.year, today.month
+    first = date(year, mon, 1)
+    nxt = date(year + 1, 1, 1) if mon == 12 else date(year, mon + 1, 1)
+    last = nxt - timedelta(days=1)
+    if last > today:
+        last = today  # 當月：截到今天，不要跟 FB 要未來的日子
+    if last < first:
+        last = first  # 整個月都在未來時的保險
+    return f"{year:04d}-{mon:02d}", first.isoformat(), last.isoformat()
+
+
+async def _cost_center_finance_settings() -> tuple:
+    """Load team-wide finance settings once: (row_markups, default_markup,
+    pinned_ids set). Mirrors financeStore + _markup_for_campaign."""
+    row_markups: dict = {}
+    default_markup: float = 0.0
+    pinned: set = set()
+    if _db_pool is None:
+        return row_markups, default_markup, pinned
+    try:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT key, value FROM shared_settings WHERE key = ANY($1)",
+                ["finance_row_markups", "finance_default_markup", "finance_pinned_ids"],
+            )
+    except Exception:
+        return row_markups, default_markup, pinned
+    for r in rows:
+        v = r["value"]
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except Exception:
+                continue
+        if r["key"] == "finance_row_markups" and isinstance(v, dict):
+            row_markups = v
+        elif r["key"] == "finance_default_markup":
+            try:
+                default_markup = float(v)
+            except (TypeError, ValueError):
+                pass
+        elif r["key"] == "finance_pinned_ids" and isinstance(v, list):
+            pinned = {str(x) for x in v}
+    return row_markups, default_markup, pinned
+
+
+async def _cost_center_nicknames(campaign_ids: List[str]) -> dict:
+    """Batch-load store/designer nicknames → {campaign_id: "店家 · 設計師"}.
+    Mirrors the frontend's formatNickname()."""
+    if _db_pool is None or not campaign_ids:
+        return {}
+    try:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT campaign_id, store, designer FROM campaign_nicknames "
+                "WHERE campaign_id = ANY($1)",
+                campaign_ids,
+            )
+    except Exception:
+        return {}
+    out: dict = {}
+    for r in rows:
+        store = (r["store"] or "").strip()
+        designer = (r["designer"] or "").strip()
+        label = f"{store} · {designer}" if store and designer else (store or designer)
+        if label:
+            out[r["campaign_id"]] = label
+    return out
+
+
+def _cost_center_spend(campaign: dict) -> float:
+    """Extract the campaign's spend from the stitched insights row."""
+    ins = (campaign.get("insights") or {}).get("data") or []
+    if not ins:
+        return 0.0
+    try:
+        return float(ins[0].get("spend") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _cost_center_num(v: float):
+    """Emit a clean JSON number: int when whole (12345, not 12345.0),
+    otherwise a 2-decimal float — matches the agreed example shape."""
+    f = float(v)
+    return int(f) if f == int(f) else round(f, 2)
+
+
+@app.get("/api/cost-center")
+async def get_cost_center(request: Request, month: Optional[str] = None):
+    """唯讀費用中心匯出（機器對機器，給 lurefin）。見上方註解。"""
+    # ── Auth：環境變數裡的靜態 bearer token，不走 FB 使用者登入 ──
+    expected = os.getenv("AD_SPEND_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="AD_SPEND_API_TOKEN 未設定")
+    auth = request.headers.get("authorization") or ""
+    provided = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    label, since, until = _cost_center_month_range(month)
+    time_range = json.dumps({"since": since, "until": until}, separators=(",", ":"))
+
+    _fb_call_source.set("cost-center")
+
+    # 兩個顯示名稱 → act_ id（從 FB 帳號清單對應）
+    accounts = await fb_get_paginated(
+        "me/adaccounts",
+        {"fields": "id,name", "limit": "500"},
+        ttl=_ACCOUNTS_CACHE_TTL_SECONDS,
+    )
+    by_name: dict = {}
+    for a in accounts:
+        nm = (a.get("name") or "").strip()
+        if nm and nm not in by_name:
+            by_name[nm] = a.get("id")
+
+    row_markups, default_markup, pinned = await _cost_center_finance_settings()
+
+    out_accounts: list = []
+    for name in COST_CENTER_ACCOUNT_NAMES:
+        acct_id = by_name.get(name)
+        rows_out: list = []
+        if acct_id:
+            try:
+                campaigns = await _fetch_campaigns_for_account(
+                    acct_id, "last_30d", time_range,
+                    include_archived=True, include_adsets=False,
+                )
+            except HTTPException:
+                campaigns = []
+            nick_map = await _cost_center_nicknames(
+                [c.get("id") for c in campaigns if c.get("id")]
+            )
+            # 隱藏零花費 + 置頂列在前，其餘照 FB 原始順序（= 費用中心預設視圖）
+            pinned_rows: list = []
+            unpinned_rows: list = []
+            for c in campaigns:
+                spend = _cost_center_spend(c)
+                if spend <= 0:
+                    continue
+                cid = c.get("id") or ""
+                pct_raw = row_markups.get(cid)
+                if pct_raw is None:
+                    pct = default_markup
+                else:
+                    try:
+                        pct = float(pct_raw)
+                    except (TypeError, ValueError):
+                        pct = default_markup
+                is_pinned = cid in pinned
+                row = {
+                    "nickname": nick_map.get(cid) or (c.get("name") or ""),
+                    "spend": _cost_center_num(spend),
+                    "percent": _cost_center_num(pct),
+                    "spend_with_percent": math.ceil(spend * (1 + pct / 100)),
+                    "pin": "置頂" if is_pinned else None,
+                    "invoice": None,
+                }
+                (pinned_rows if is_pinned else unpinned_rows).append(row)
+            rows_out = [*pinned_rows, *unpinned_rows]
+        out_accounts.append({"account": name, "rows": rows_out})
+
+    return {"month": label, "accounts": out_accounts}
+
+
 # ── SPA catch-all (MUST be registered last) ─────────────────────────
 # React Router uses client-side paths like /dashboard, /analytics, /finance.
 # A browser hard-refresh on those paths hits FastAPI, which otherwise 404s.
