@@ -11874,7 +11874,14 @@ async def run_optimization_agents_stream(req: RunAgentsRequest):
 # 顯示順序 / 篩選比照費用中心預設：置頂列在前 + 其餘照 FB 原始順序，並
 # 隱藏零花費列（表格「有花費」預設開）。
 
-COST_CENTER_ACCOUNT_NAMES = ["L吸引力", "b新城區廣告帳號"]
+# Maps the stable label lurefin wants as the table title (kept regardless
+# of FB's messy display names) to the real FB ad-account display name we
+# match on. Update `fb_name` here if an account is renamed in FB.
+COST_CENTER_ACCOUNTS = [
+    {"label": "L吸引力", "fb_name": "吸引力"},
+    {"label": "b新城區廣告帳號", "fb_name": "!B 新城區 - 月結"},
+]
+COST_CENTER_FB_NAMES = [a["fb_name"] for a in COST_CENTER_ACCOUNTS]
 # How stale a month's snapshot may get before the scheduler recaptures it.
 COST_CENTER_REFRESH_HOURS = _env_int("COST_CENTER_REFRESH_HOURS", 6)
 
@@ -12064,16 +12071,18 @@ async def _cost_center_compute(month: Optional[str]) -> tuple:
     # 兩個顯示名稱 → (act_id, 該帳號看得到的 token uid)。M2M 沒有使用者
     # session，單一 runtime token 常常看不到全部帳號，所以掃過 runtime +
     # 每個 per-user token 找到「看得到這個帳號」的那把 token。
-    resolution = await _cost_center_resolve(COST_CENTER_ACCOUNT_NAMES)
+    resolution = await _cost_center_resolve(COST_CENTER_FB_NAMES)
     matched = resolution["matched"]
     row_markups, default_markup, pinned = await _cost_center_finance_settings()
 
     out_accounts: list = []
     acct_diags: list = []
-    for name in COST_CENTER_ACCOUNT_NAMES:
-        info = matched.get(name)
+    for acct in COST_CENTER_ACCOUNTS:
+        label = acct["label"]
+        fb_name = acct["fb_name"]
+        info = matched.get(fb_name)
         rows_out: list = []
-        diag: dict = {"account": name, "found": bool(info)}
+        diag: dict = {"account": label, "fb_name": fb_name, "found": bool(info)}
         if info:
             acct_id = info["id"]
             uid = info["uid"]
@@ -12124,7 +12133,7 @@ async def _cost_center_compute(month: Optional[str]) -> tuple:
             rows_out = [*pinned_rows, *unpinned_rows]
             diag["campaigns_total"] = len(campaigns)
             diag["rows_after_filter"] = len(rows_out)
-        out_accounts.append({"account": name, "rows": rows_out})
+        out_accounts.append({"account": label, "rows": rows_out})
         acct_diags.append(diag)
 
     print(
@@ -12263,7 +12272,7 @@ async def get_cost_center(
         # 尚未抓過這個月（剛部署 / 太舊）。回穩定的空殼，不打 FB。
         result = {
             "month": label,
-            "accounts": [{"account": n, "rows": []} for n in COST_CENTER_ACCOUNT_NAMES],
+            "accounts": [{"account": a["label"], "rows": []} for a in COST_CENTER_ACCOUNTS],
             "captured_at": None,
         }
     if debug:
