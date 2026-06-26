@@ -828,6 +828,20 @@ async def lifespan(app: FastAPI):
                     ON security_push_configs (owner_fb_user_id)
                     """
                 )
+                # Cost-center snapshots — luredash captures the 費用中心
+                # table for the two lurefin accounts on a schedule and
+                # stores one row per month here; the /api/cost-center read
+                # serves from this table so lurefin never touches FB.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS cost_center_snapshots (
+                        month TEXT PRIMARY KEY,
+                        payload JSONB NOT NULL,
+                        captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
                 # Backfill: old INSERT bug let the frontend send any
                 # poll_interval_minutes value into DB (the hardcoded
                 # 60-min override only applied on UPDATE, not INSERT).
@@ -1376,8 +1390,8 @@ def _is_public_api_request(request: Request) -> bool:
         return True
     # Machine-to-machine 費用中心匯出 (lurefin)。Bypasses the FB session
     # middleware because it does its own static Bearer-token check against
-    # AD_SPEND_API_TOKEN — see get_cost_center().
-    if path == "/api/cost-center" and method == "GET":
+    # AD_SPEND_API_TOKEN — see get_cost_center() / post_cost_center_refresh().
+    if path.startswith("/api/cost-center"):
         return True
     if path == "/api/proxy-asset" and method == "GET":
         return True
@@ -10056,6 +10070,18 @@ async def _scheduler_loop() -> None:
                     raise
                 except Exception as e:
                     print(f"[security-push] tick error: {e}", flush=True)
+            # Cost-center snapshot (lurefin 每月同步用) — 背景把費用中心
+            # 兩個帳號的資料抓好存進 DB，lurefin 只讀快照、不碰 FB。
+            try:
+                gate_reason = _background_gate_reason()
+                if gate_reason:
+                    print(f"[cost-center] skipping tick — {gate_reason}", flush=True)
+                else:
+                    await _cost_center_snapshot_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[cost-center] tick error: {e}", flush=True)
             # Sleep the remaining half-tick so the overall cadence
             # stays at SCHEDULER_TICK_SECONDS.
             await asyncio.sleep(SCHEDULER_TICK_SECONDS - (SCHEDULER_TICK_SECONDS // 2))
@@ -11849,6 +11875,8 @@ async def run_optimization_agents_stream(req: RunAgentsRequest):
 # 隱藏零花費列（表格「有花費」預設開）。
 
 COST_CENTER_ACCOUNT_NAMES = ["L吸引力", "b新城區廣告帳號"]
+# How stale a month's snapshot may get before the scheduler recaptures it.
+COST_CENTER_REFRESH_HOURS = _env_int("COST_CENTER_REFRESH_HOURS", 6)
 
 
 def _cost_center_month_range(month: Optional[str]) -> tuple:
@@ -12012,12 +12040,9 @@ async def _cost_center_resolve(target_names: List[str]) -> dict:
     return {"matched": matched, "sources": sources, "all_names": sorted(all_names)}
 
 
-@app.get("/api/cost-center")
-async def get_cost_center(
-    request: Request, month: Optional[str] = None, debug: int = 0
-):
-    """唯讀費用中心匯出（機器對機器，給 lurefin）。見上方註解。"""
-    # ── Auth：環境變數裡的靜態 bearer token，不走 FB 使用者登入 ──
+def _cost_center_check_auth(request: Request) -> None:
+    """Static bearer-token gate shared by the read + refresh endpoints.
+    Machine-to-machine only — no FB user login."""
     expected = os.getenv("AD_SPEND_API_TOKEN", "")
     if not expected:
         raise HTTPException(status_code=503, detail="AD_SPEND_API_TOKEN 未設定")
@@ -12026,9 +12051,14 @@ async def get_cost_center(
     if not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+
+async def _cost_center_compute(month: Optional[str]) -> tuple:
+    """Live-fetch the 費用中心 rows for the two accounts for ``month``
+    (Meta → luredash). Returns ``(accounts, debug)``. Used by the
+    scheduled capture and the ?live=1 debug path — NOT by lurefin's
+    normal read (that serves the stored snapshot)."""
     label, since, until = _cost_center_month_range(month)
     time_range = json.dumps({"since": since, "until": until}, separators=(",", ":"))
-
     _fb_call_source.set("cost-center")
 
     # 兩個顯示名稱 → (act_id, 該帳號看得到的 token uid)。M2M 沒有使用者
@@ -12036,7 +12066,6 @@ async def get_cost_center(
     # 每個 per-user token 找到「看得到這個帳號」的那把 token。
     resolution = await _cost_center_resolve(COST_CENTER_ACCOUNT_NAMES)
     matched = resolution["matched"]
-
     row_markups, default_markup, pinned = await _cost_center_finance_settings()
 
     out_accounts: list = []
@@ -12098,15 +12127,10 @@ async def get_cost_center(
         out_accounts.append({"account": name, "rows": rows_out})
         acct_diags.append(diag)
 
-    # Always log a one-line diagnostic to server stdout so empty-row
-    # incidents are debuggable from Zeabur logs without ?debug=1.
     print(
-        "[cost-center] month=%s range=%s..%s sources=%s accounts=%s"
+        "[cost-center] compute month=%s range=%s..%s sources=%s accounts=%s"
         % (
-            label,
-            since,
-            until,
-            resolution["sources"],
+            label, since, until, resolution["sources"],
             [{k: d.get(k) for k in ("account", "found", "token",
                                     "campaigns_total", "rows_after_filter",
                                     "fetch_error") if k in d}
@@ -12115,17 +12139,172 @@ async def get_cost_center(
         flush=True,
     )
 
-    result: dict = {"month": label, "accounts": out_accounts}
+    debug = {
+        "month": label,
+        "date_range": {"since": since, "until": until},
+        "time_range": time_range,
+        "token_sources": resolution["sources"],
+        "accounts": acct_diags,
+        "all_visible_account_names": resolution["all_names"],
+        "finance_default_markup": default_markup,
+    }
+    return out_accounts, debug
+
+
+async def _cost_center_capture(month: str) -> dict:
+    """Compute one month live and upsert it into cost_center_snapshots.
+    Returns the compute debug dict."""
+    accounts, debug = await _cost_center_compute(month)
+    label = debug["month"]
+    if _db_pool is not None:
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO cost_center_snapshots (month, payload, captured_at, updated_at)
+                VALUES ($1, $2::jsonb, NOW(), NOW())
+                ON CONFLICT (month) DO UPDATE
+                  SET payload = EXCLUDED.payload, captured_at = NOW(), updated_at = NOW()
+                """,
+                label,
+                json.dumps({"accounts": accounts}, ensure_ascii=False),
+            )
+    return debug
+
+
+async def _cost_center_read_snapshot(month: str) -> Optional[dict]:
+    """Read a stored monthly snapshot → {"accounts", "captured_at"} or
+    None when not yet captured."""
+    if _db_pool is None:
+        return None
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT payload, captured_at FROM cost_center_snapshots WHERE month = $1",
+            month,
+        )
+    if not row:
+        return None
+    payload = row["payload"]
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            return None
+    if not isinstance(payload, dict):
+        return None
+    accounts = payload.get("accounts")
+    if not isinstance(accounts, list):
+        return None
+    ca = row["captured_at"]
+    return {"accounts": accounts, "captured_at": ca.isoformat() if ca else None}
+
+
+def _cost_center_months_to_maintain() -> list:
+    """Months the scheduler keeps fresh: always the current month, plus
+    the previous month during its first 5 days so late FB conversions
+    settle before the month is 定版."""
+    tz = _scheduler_tz()
+    today = datetime.now(timezone.utc).astimezone(tz).date()
+    months = [f"{today.year:04d}-{today.month:02d}"]
+    if today.day <= 5:
+        prev = date(today.year, today.month, 1) - timedelta(days=1)
+        months.append(f"{prev.year:04d}-{prev.month:02d}")
+    return months
+
+
+async def _cost_center_snapshot_tick() -> None:
+    """Scheduler tick: recapture each maintained month whose snapshot is
+    missing or older than COST_CENTER_REFRESH_HOURS."""
+    if _db_pool is None:
+        return
+    interval = timedelta(hours=COST_CENTER_REFRESH_HOURS)
+    now = datetime.now(timezone.utc)
+    for month in _cost_center_months_to_maintain():
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT updated_at FROM cost_center_snapshots WHERE month = $1",
+                month,
+            )
+        if row and row["updated_at"] and (now - row["updated_at"]) < interval:
+            continue
+        try:
+            await _cost_center_capture(month)
+        except Exception as e:
+            print(f"[cost-center] capture {month} failed: {e}", flush=True)
+
+
+@app.get("/api/cost-center")
+async def get_cost_center(
+    request: Request, month: Optional[str] = None, debug: int = 0, live: int = 0
+):
+    """唯讀費用中心匯出（機器對機器，給 lurefin）。
+
+    預設讀 luredash 自己存的月度快照（不碰 FB）；快照由排程背景抓取。
+    ``?live=1`` 會即時打 FB 重算（僅供除錯，會吃 FB 額度）。
+    ``?debug=1`` 附上診斷資訊。見上方註解。
+    """
+    _cost_center_check_auth(request)
+    label, _since, _until = _cost_center_month_range(month)  # 驗證 + 正規化月份
+
+    if live:
+        accounts, dbg = await _cost_center_compute(label)
+        result: dict = {"month": label, "accounts": accounts, "captured_at": None, "live": True}
+        if debug:
+            result["_debug"] = dbg
+        return result
+
+    snap = await _cost_center_read_snapshot(label)
+    if snap:
+        result = {
+            "month": label,
+            "accounts": snap["accounts"],
+            "captured_at": snap["captured_at"],
+        }
+    else:
+        # 尚未抓過這個月（剛部署 / 太舊）。回穩定的空殼，不打 FB。
+        result = {
+            "month": label,
+            "accounts": [{"account": n, "rows": []} for n in COST_CENTER_ACCOUNT_NAMES],
+            "captured_at": None,
+        }
     if debug:
         result["_debug"] = {
-            "date_range": {"since": since, "until": until},
-            "time_range": time_range,
-            "token_sources": resolution["sources"],
-            "accounts": acct_diags,
-            "all_visible_account_names": resolution["all_names"],
-            "finance_default_markup": default_markup,
+            "snapshot_found": bool(snap),
+            "captured_at": snap["captured_at"] if snap else None,
+            "refresh_hours": COST_CENTER_REFRESH_HOURS,
         }
     return result
+
+
+@app.post("/api/cost-center/refresh")
+async def post_cost_center_refresh(request: Request, month: Optional[str] = None):
+    """立即抓一次並存進快照（機器對機器，bearer 驗證）。
+
+    ``month`` 省略時刷新「目前排程維護的月份」（當月，月初前 5 天含上月）。
+    用於剛設定好 token 後立刻 populate，或手動補抓某個月。
+    """
+    _cost_center_check_auth(request)
+    if month:
+        months = [_cost_center_month_range(month)[0]]
+    else:
+        months = _cost_center_months_to_maintain()
+    refreshed: list = []
+    for m in months:
+        dbg = await _cost_center_capture(m)
+        refreshed.append(
+            {
+                "month": m,
+                "accounts": [
+                    {
+                        "account": d["account"],
+                        "found": d.get("found"),
+                        "rows": d.get("rows_after_filter", 0),
+                        "fetch_error": d.get("fetch_error"),
+                    }
+                    for d in dbg["accounts"]
+                ],
+            }
+        )
+    return {"refreshed": refreshed}
 
 
 # ── SPA catch-all (MUST be registered last) ─────────────────────────
