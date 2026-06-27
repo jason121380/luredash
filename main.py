@@ -6318,6 +6318,7 @@ async def get_overview(
     include_archived: bool = False,
     lite: bool = False,
     include_adsets: bool = False,
+    force: bool = False,
 ):
     """Batch multi-account overview endpoint.
 
@@ -6368,7 +6369,7 @@ async def get_overview(
         so the frontend can show campaign rows within ~1-2s. The full
         data follows from a parallel non-lite request.
         """
-        if not lite and snap_month is not None:
+        if not lite and snap_month is not None and not force:
             cached = await _overview_snapshot_read(
                 aid, snap_month, include_archived, include_adsets
             )
@@ -6422,9 +6423,10 @@ async def get_overview(
             items = raw.get("data") or [] if isinstance(raw, dict) else []
             ins_flat = items[0] if items else None
 
-        # Cache a complete past month once fetched cleanly (no error,
-        # has data) so the next view of it serves from DB instead of FB.
-        if snap_month is not None and not error_parts and camps:
+        # Cache a complete past month once fetched cleanly (no error) so
+        # the next view of it serves from DB instead of FB. Empty result
+        # is cached too — a past month with no campaigns is final.
+        if snap_month is not None and not error_parts:
             await _overview_snapshot_store(
                 aid, snap_month, include_archived, include_adsets, camps, ins_flat
             )
@@ -12435,87 +12437,116 @@ async def post_cost_center_backfill(
     return {"backfilled": out}
 
 
-# ── 工程模式:費用中心歷史回填 UI（前端 session 驗證,非 lurefin token）──
+# ── 工程模式:歷史資料預熱 UI（前端 session 驗證）──────────────
 #
-# 這兩支走一般登入 session（middleware 驗證),給工程模式的「歷史資料」
-# 分頁用:列出每個月 + 手動逐月撈取存進 DB(可重抓覆蓋)。
+# 把「所有帳號」每個過往完整月份的 /api/overview 資料先抓進
+# account_month_snapshots,讓 費用中心 / 店家花費 / 歷史花費 等月報表型
+# 頁面第一次打開就秒出(不必等 lazy-fill)。逐月、可重抓覆蓋(force)。
 
 
-@app.get("/api/engineering/cost-center/months")
-async def get_engineering_cost_center_months():
-    """列出 2024-01 ~ 當月每個月份,以及它在 DB 的快照狀態(已存 / 列數 /
-    更新時間)。給工程模式表格用。"""
+async def _engineering_warm_accounts(uid: Optional[str]) -> list:
+    """要預熱的帳號:登入者的 selected_accounts;沒設定就退回他看得到的
+    全部帳號(me/adaccounts)。"""
+    ids: list = []
+    if uid and _db_pool is not None:
+        try:
+            async with _db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT value FROM user_settings "
+                    "WHERE fb_user_id=$1 AND key='selected_accounts'",
+                    uid,
+                )
+            if row and row["value"]:
+                ids = [str(x) for x in _jsonb_list(row["value"]) if x]
+        except Exception:
+            ids = []
+    if not ids:
+        try:
+            accts = await fb_get_paginated(
+                "me/adaccounts", {"fields": "id", "limit": "500"},
+                ttl=_ACCOUNTS_CACHE_TTL_SECONDS,
+            )
+            ids = [a.get("id") for a in accts if a.get("id")]
+        except Exception:
+            ids = []
+    return list(dict.fromkeys(ids))
+
+
+@app.get("/api/engineering/history-warm/months")
+async def get_engineering_history_warm_months():
+    """列出 2024-01 ~ 當月,以及每個月已預熱(存進 account_month_snapshots)
+    的帳號數 / 總帳號數。給工程模式「歷史資料預熱」表格用。"""
+    uid = _current_fb_user_id.get()
     current = _cost_center_current_month()
     months = _cost_center_month_list("2024-01", current)
-    stored: dict = {}
-    if _db_pool is not None:
+    accounts = await _engineering_warm_accounts(uid)
+    total = len(accounts)
+    warmed: dict = {}
+    if _db_pool is not None and accounts:
         async with _db_pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT month, payload, captured_at FROM cost_center_snapshots"
+                "SELECT month, COUNT(*) AS n FROM account_month_snapshots "
+                "WHERE include_archived=TRUE AND include_adsets=FALSE "
+                "AND account_id = ANY($1) GROUP BY month",
+                accounts,
             )
         for r in rows:
-            payload = r["payload"]
-            if isinstance(payload, str):
-                try:
-                    payload = json.loads(payload)
-                except Exception:
-                    payload = {}
-            accts = payload.get("accounts") if isinstance(payload, dict) else []
-            nrows = sum(
-                len(a.get("rows") or [])
-                for a in (accts or [])
-                if isinstance(a, dict)
-            )
-            ca = r["captured_at"]
-            stored[r["month"]] = {
-                "rows": nrows,
-                "captured_at": ca.isoformat() if ca else None,
-            }
+            warmed[r["month"]] = int(r["n"])
     out: list = []
     for m in months:
-        s = stored.get(m)
         out.append(
             {
                 "month": m,
-                "stored": bool(s),
-                "rows": s["rows"] if s else None,
-                "captured_at": s["captured_at"] if s else None,
+                "warmed": warmed.get(m, 0),
+                "total": total,
                 "is_current": m == current,
             }
         )
-    return {
-        "current": current,
-        "accounts": [a["label"] for a in COST_CENTER_ACCOUNTS],
-        "months": out,
-    }
+    return {"current": current, "total_accounts": total, "months": out}
 
 
-class _CcCaptureBody(BaseModel):
+class _HistoryWarmBody(BaseModel):
     month: str
 
 
-@app.post("/api/engineering/cost-center/capture")
-async def post_engineering_cost_center_capture(body: _CcCaptureBody):
-    """手動抓某個月並存進 DB(可重抓覆蓋)。只有抓到有效資料(無錯誤且
-    至少一個帳號有列)才會存,並回完成狀態。"""
+@app.post("/api/engineering/history-warm/run")
+async def post_engineering_history_warm_run(body: _HistoryWarmBody):
+    """把『所有帳號』在某個月的資料抓進 account_month_snapshots(可重抓
+    覆蓋,force)。當月不預熱(維持即時)。回每帳號成功 / 失敗數。"""
+    uid = _current_fb_user_id.get()
+    current = _cost_center_current_month()
     label = _cost_center_month_range(body.month)[0]
-    accounts, dbg = await _cost_center_compute(label)
-    good = _cost_center_capture_good(dbg)
-    if good:
-        await _cost_center_store_snapshot(label, accounts)
+    if label >= current:
+        return {"month": label, "skipped": "當月即時,不預熱", "total": 0, "warmed": 0, "failed": 0, "errors": []}
+    accounts = await _engineering_warm_accounts(uid)
+    if not accounts:
+        return {"month": label, "total": 0, "warmed": 0, "failed": 0, "errors": []}
+    _, since, until = _cost_center_month_range(label)
+    time_range = json.dumps({"since": since, "until": until}, separators=(",", ":"))
+    res = await get_overview(
+        ids=",".join(accounts),
+        time_range=time_range,
+        include_archived=True,
+        include_adsets=False,
+        force=True,
+    )
+    data = res.get("data", {}) if isinstance(res, dict) else {}
+    warmed = 0
+    failed = 0
+    errors: list = []
+    for aid, b in data.items():
+        if b.get("error"):
+            failed += 1
+            if len(errors) < 10:
+                errors.append({"account_id": aid, "error": b["error"]})
+        else:
+            warmed += 1
     return {
         "month": label,
-        "stored": bool(good),
-        "rows": sum(len(a["rows"]) for a in accounts),
-        "accounts": [
-            {
-                "account": d["account"],
-                "found": d.get("found"),
-                "rows": d.get("rows_after_filter", 0),
-                "fetch_error": d.get("fetch_error"),
-            }
-            for d in dbg["accounts"]
-        ],
+        "total": len(accounts),
+        "warmed": warmed,
+        "failed": failed,
+        "errors": errors,
     }
 
 
