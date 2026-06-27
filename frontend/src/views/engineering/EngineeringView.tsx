@@ -9,7 +9,7 @@ import { toast } from "@/components/Toast";
 import { cn } from "@/lib/cn";
 import { queryClient } from "@/lib/queryClient";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 /**
  * Returns true when the tab is currently visible (i.e. user is looking
@@ -45,7 +45,7 @@ function useTabVisible(): boolean {
  * closed modal stops issuing requests immediately (the Modal unmounts
  * children when `open` flips false).
  */
-type EngineeringTab = "dashboard" | "ad-account" | "other";
+type EngineeringTab = "dashboard" | "ad-account" | "cost-center" | "other";
 
 const ENGINEERING_TABS: Array<{
   id: EngineeringTab;
@@ -64,6 +64,12 @@ const ENGINEERING_TABS: Array<{
     label: "FB Rate Limit by Ad Account",
     mobileLabel: "By Account",
     subtitle: "FB API 節流狀態",
+  },
+  {
+    id: "cost-center",
+    label: "費用中心歷史回填",
+    mobileLabel: "歷史回填",
+    subtitle: "逐月撈取存進資料庫",
   },
   {
     id: "other",
@@ -133,6 +139,8 @@ function EngineeringPanels() {
           <FbCallsPanel />
         ) : activeTab === "ad-account" ? (
           <FbUsagePanel />
+        ) : activeTab === "cost-center" ? (
+          <CostCenterBackfillPanel />
         ) : (
           <RuntimeDiagnosticsPanel />
         )}
@@ -183,6 +191,226 @@ function RuntimeDiagnosticsPanel() {
         <StoragePanel />
       </div>
     </section>
+  );
+}
+
+// ── 費用中心歷史回填 ─────────────────────────────────────────
+//
+// 逐月把「費用中心」的帳號資料從 FB 撈下來存進 DB。過往月份是固定的,
+// 存一次之後 lurefin 讀 /api/cost-center 就直接讀 DB、不再打 FB。每列一
+// 個「更新」按鈕(可重抓覆蓋),撈取時跑進度條,完成寫「完成」。
+
+interface CcRowState {
+  status: "idle" | "running" | "done" | "error";
+  progress: number; // 0-100
+  message?: string;
+}
+
+function fmtCcMonth(m: string): string {
+  const [y, mm] = m.split("-");
+  return `${y}/${Number.parseInt(mm ?? "0", 10)}`;
+}
+
+function fmtCcTime(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("zh-TW", { hour12: false });
+}
+
+function CostCenterBackfillPanel() {
+  const monthsQuery = useQuery({
+    queryKey: ["cc-backfill-months"],
+    queryFn: () => api.engineering.costCenterMonths(),
+    staleTime: 30_000,
+  });
+  const [rowState, setRowState] = useState<Record<string, CcRowState>>({});
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const timersRef = useRef<Record<string, number>>({});
+
+  // Clear any running fake-progress timers on unmount (modal close).
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      for (const id of Object.values(timers)) window.clearInterval(id);
+    };
+  }, []);
+
+  const data = monthsQuery.data;
+  const accounts = data?.accounts ?? [];
+  // Newest month first in the table.
+  const rows = useMemo(() => [...(data?.months ?? [])].reverse(), [data?.months]);
+
+  const setRS = (month: string, s: Partial<CcRowState>) =>
+    setRowState((prev) => ({
+      ...prev,
+      [month]: { ...(prev[month] ?? { status: "idle", progress: 0 }), ...s },
+    }));
+
+  // Capture one month — runs an asymptotic fake-progress bar while the
+  // (single, slow) request is in flight, then snaps to 100% on done.
+  const capture = async (month: string): Promise<boolean> => {
+    setRS(month, { status: "running", progress: 8, message: undefined });
+    const start = Date.now();
+    const tick = window.setInterval(() => {
+      const elapsed = (Date.now() - start) / 1000;
+      const p = Math.min(90, 8 + 82 * (1 - Math.exp(-elapsed / 12)));
+      setRS(month, { progress: p });
+    }, 400);
+    timersRef.current[month] = tick;
+    try {
+      const res = await api.engineering.costCenterCapture(month);
+      window.clearInterval(tick);
+      if (res.stored) {
+        setRS(month, { status: "done", progress: 100, message: `完成 · ${res.rows} 列` });
+        return true;
+      }
+      const errs = res.accounts
+        .filter((a) => a.fetch_error)
+        .map((a) => `${a.account}:${a.fetch_error}`);
+      setRS(month, {
+        status: "error",
+        progress: 100,
+        message: errs.length ? errs.join(" / ") : "沒抓到資料(該月無花費或被限流),可重抓",
+      });
+      return false;
+    } catch (e) {
+      window.clearInterval(tick);
+      const msg =
+        (e as { detail?: string })?.detail ?? (e instanceof Error ? e.message : "未知錯誤");
+      setRS(month, { status: "error", progress: 100, message: msg });
+      return false;
+    }
+  };
+
+  const onCapture = async (month: string) => {
+    const ok = await capture(month);
+    await monthsQuery.refetch();
+    toast(ok ? `${fmtCcMonth(month)} 已更新` : `${fmtCcMonth(month)} 更新失敗`, ok ? undefined : "error");
+  };
+
+  // Bulk: oldest → newest, sequential (one at a time) so we don't fan
+  // out heavy FB pulls in parallel.
+  const onBulk = async () => {
+    if (bulkRunning) return;
+    setBulkRunning(true);
+    try {
+      let done = 0;
+      let fail = 0;
+      for (const m of data?.months ?? []) {
+        const ok = await capture(m.month);
+        if (ok) done += 1;
+        else fail += 1;
+      }
+      await monthsQuery.refetch();
+      toast(`全部完成:成功 ${done}、失敗 ${fail}`, fail ? "error" : undefined);
+    } finally {
+      setBulkRunning(false);
+    }
+  };
+
+  return (
+    <Card
+      title="費用中心歷史回填"
+      subtitle="逐月把費用中心資料從 FB 撈下來存進資料庫(過往月份存一次即可,lurefin 之後直接讀 DB)。可重抓覆蓋。"
+      frameless
+      action={
+        <Button size="sm" onClick={() => void onBulk()} disabled={bulkRunning || monthsQuery.isLoading}>
+          {bulkRunning ? "全部更新中…" : "全部更新(舊→新)"}
+        </Button>
+      }
+    >
+      {monthsQuery.isLoading ? (
+        <div className="text-sm text-gray-400">載入中…</div>
+      ) : !data ? (
+        <div className="text-sm text-gray-400">無資料</div>
+      ) : (
+        <>
+          <div className="mb-3 text-[11px] text-gray-400">
+            帳號:{accounts.join("、")} · 當月({fmtCcMonth(data.current)})為即時抓取,可不必存。
+          </div>
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="w-full text-[12px]">
+              <thead className="bg-bg text-left text-gray-500">
+                <tr>
+                  <th className="px-3 py-2 font-semibold">月份</th>
+                  <th className="px-3 py-2 font-semibold">狀態 / 進度</th>
+                  <th className="px-3 py-2 text-right font-semibold">列數</th>
+                  <th className="px-3 py-2 font-semibold whitespace-nowrap">更新時間</th>
+                  <th className="px-3 py-2 text-right font-semibold">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((m) => {
+                  const rs = rowState[m.month];
+                  const running = rs?.status === "running";
+                  return (
+                    <tr key={m.month} className="border-t border-border align-middle">
+                      <td className="whitespace-nowrap px-3 py-2 font-semibold text-ink">
+                        {fmtCcMonth(m.month)}
+                        {m.is_current ? (
+                          <span className="ml-1.5 rounded-full bg-orange-bg px-1.5 py-0.5 text-[10px] font-semibold text-orange">
+                            當月
+                          </span>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-2">
+                        {running || rs?.status === "done" ? (
+                          <div className="flex items-center gap-2">
+                            <ProgressBar
+                              value={rs.progress}
+                              size="sm"
+                              tone={rs.status === "done" ? "ok" : "warm"}
+                              className="min-w-[90px] flex-1"
+                            />
+                            <span
+                              className={cn(
+                                "shrink-0 text-[11px]",
+                                rs.status === "done" ? "font-semibold text-emerald-600" : "text-gray-500",
+                              )}
+                            >
+                              {running ? "撈取中…" : rs.message}
+                            </span>
+                          </div>
+                        ) : rs?.status === "error" ? (
+                          <span className="text-[11px] text-red-600" title={rs.message}>
+                            失敗 · {rs.message}
+                          </span>
+                        ) : m.stored ? (
+                          <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                            已存
+                          </span>
+                        ) : (
+                          <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">
+                            未存
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-gray-600">
+                        {m.rows ?? "—"}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2 text-[11px] text-gray-500">
+                        {fmtCcTime(m.captured_at)}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <Button
+                          size="sm"
+                          variant={m.stored ? "ghost" : "primary"}
+                          onClick={() => void onCapture(m.month)}
+                          disabled={running || bulkRunning}
+                        >
+                          {running ? "撈取中…" : m.stored ? "重抓" : "更新"}
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </Card>
   );
 }
 
