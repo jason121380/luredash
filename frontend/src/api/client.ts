@@ -1003,6 +1003,38 @@ export const api = {
         retried_total_5m: number;
         total_5m: number;
       }>("GET", "/api/engineering/fb-calls"),
+    /** 工程模式「費用中心歷史」分頁:列出 2024-01 ~ 當月每個月份 +
+     * 它在 DB 的快照狀態(已存 / 列數 / 更新時間)。 */
+    costCenterMonths: () =>
+      request<{
+        current: string;
+        accounts: string[];
+        months: Array<{
+          month: string;
+          stored: boolean;
+          rows: number | null;
+          captured_at: string | null;
+          is_current: boolean;
+        }>;
+      }>("GET", "/api/engineering/cost-center/months", { source: "finance" }),
+    /** 手動抓某個月的費用中心資料存進 DB(可重抓覆蓋)。會即時打 FB,
+     * 所以給 5 分鐘 timeout。 */
+    costCenterCapture: (month: string) =>
+      request<{
+        month: string;
+        stored: boolean;
+        rows: number;
+        accounts: Array<{
+          account: string;
+          found: boolean | null;
+          rows: number;
+          fetch_error: string | null;
+        }>;
+      }>("POST", "/api/engineering/cost-center/capture", {
+        body: { month },
+        timeoutMs: 300_000,
+        source: "finance",
+      }),
   },
 
   nicknames: {

@@ -12311,6 +12311,90 @@ async def post_cost_center_backfill(
     return {"backfilled": out}
 
 
+# ── 工程模式:費用中心歷史回填 UI（前端 session 驗證,非 lurefin token）──
+#
+# 這兩支走一般登入 session（middleware 驗證),給工程模式的「歷史資料」
+# 分頁用:列出每個月 + 手動逐月撈取存進 DB(可重抓覆蓋)。
+
+
+@app.get("/api/engineering/cost-center/months")
+async def get_engineering_cost_center_months():
+    """列出 2024-01 ~ 當月每個月份,以及它在 DB 的快照狀態(已存 / 列數 /
+    更新時間)。給工程模式表格用。"""
+    current = _cost_center_current_month()
+    months = _cost_center_month_list("2024-01", current)
+    stored: dict = {}
+    if _db_pool is not None:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT month, payload, captured_at FROM cost_center_snapshots"
+            )
+        for r in rows:
+            payload = r["payload"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+            accts = payload.get("accounts") if isinstance(payload, dict) else []
+            nrows = sum(
+                len(a.get("rows") or [])
+                for a in (accts or [])
+                if isinstance(a, dict)
+            )
+            ca = r["captured_at"]
+            stored[r["month"]] = {
+                "rows": nrows,
+                "captured_at": ca.isoformat() if ca else None,
+            }
+    out: list = []
+    for m in months:
+        s = stored.get(m)
+        out.append(
+            {
+                "month": m,
+                "stored": bool(s),
+                "rows": s["rows"] if s else None,
+                "captured_at": s["captured_at"] if s else None,
+                "is_current": m == current,
+            }
+        )
+    return {
+        "current": current,
+        "accounts": [a["label"] for a in COST_CENTER_ACCOUNTS],
+        "months": out,
+    }
+
+
+class _CcCaptureBody(BaseModel):
+    month: str
+
+
+@app.post("/api/engineering/cost-center/capture")
+async def post_engineering_cost_center_capture(body: _CcCaptureBody):
+    """手動抓某個月並存進 DB(可重抓覆蓋)。只有抓到有效資料(無錯誤且
+    至少一個帳號有列)才會存,並回完成狀態。"""
+    label = _cost_center_month_range(body.month)[0]
+    accounts, dbg = await _cost_center_compute(label)
+    good = _cost_center_capture_good(dbg)
+    if good:
+        await _cost_center_store_snapshot(label, accounts)
+    return {
+        "month": label,
+        "stored": bool(good),
+        "rows": sum(len(a["rows"]) for a in accounts),
+        "accounts": [
+            {
+                "account": d["account"],
+                "found": d.get("found"),
+                "rows": d.get("rows_after_filter", 0),
+                "fetch_error": d.get("fetch_error"),
+            }
+            for d in dbg["accounts"]
+        ],
+    }
+
+
 # ── SPA catch-all (MUST be registered last) ─────────────────────────
 # React Router uses client-side paths like /dashboard, /analytics, /finance.
 # A browser hard-refresh on those paths hits FastAPI, which otherwise 404s.
