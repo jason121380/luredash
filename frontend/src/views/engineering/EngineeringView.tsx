@@ -55,14 +55,14 @@ const ENGINEERING_TABS: Array<{
 }> = [
   {
     id: "dashboard",
-    label: "FB Rate Limit Dashboard",
-    mobileLabel: "Dashboard",
-    subtitle: "原 FB Rate Limit 戰情室",
+    label: "FB 限流戰情室",
+    mobileLabel: "戰情室",
+    subtitle: "即時 FB 呼叫 / 節流總覽",
   },
   {
     id: "ad-account",
-    label: "FB Rate Limit by Ad Account",
-    mobileLabel: "By Account",
+    label: "各帳戶 FB 限流",
+    mobileLabel: "各帳戶",
     subtitle: "FB API 節流狀態",
   },
   {
@@ -73,8 +73,8 @@ const ENGINEERING_TABS: Array<{
   },
   {
     id: "other",
-    label: "Other",
-    mobileLabel: "Other",
+    label: "其他",
+    mobileLabel: "其他",
     subtitle: "其他診斷",
   },
 ];
@@ -173,7 +173,7 @@ function RuntimeDiagnosticsPanel() {
   return (
     <section>
       <header className="mb-3">
-        <h2 className="text-[15px] font-bold text-ink">Other</h2>
+        <h2 className="text-[15px] font-bold text-ink">其他</h2>
         <p className="mt-0.5 text-xs text-gray-400">
           其他診斷:身分、記憶體、前端快取與本機環境。
         </p>
@@ -335,7 +335,7 @@ function CostCenterBackfillPanel() {
                 <tr>
                   <th className="px-3 py-2 font-semibold">月份</th>
                   <th className="px-3 py-2 font-semibold">狀態 / 進度</th>
-                  <th className="px-3 py-2 text-right font-semibold">列數</th>
+                  <th className="px-3 py-2 text-right font-semibold">資料筆數</th>
                   <th className="px-3 py-2 font-semibold whitespace-nowrap">更新時間</th>
                   <th className="px-3 py-2 text-right font-semibold">操作</th>
                 </tr>
@@ -675,7 +675,7 @@ function FbUsagePanel() {
 
   return (
     <Card
-      title="FB Rate Limit by Ad Account"
+      title="各帳戶 FB 限流"
       subtitle="FB API 節流狀態"
       frameless
       action={
@@ -1123,7 +1123,7 @@ function FbCallsPanel() {
 
   return (
     <Card
-      title="FB Rate Limit Dashboard"
+      title="FB 限流戰情室"
       subtitle="只看真正 matter 的訊號:誰觸發、為什麼打、狀態如何、是否被我們擋下。此頁本身不打 FB。"
       frameless
       action={
