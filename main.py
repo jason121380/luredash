@@ -843,6 +843,25 @@ async def lifespan(app: FastAPI):
                     )
                     """
                 )
+                # Per-account complete-past-month overview snapshots. The
+                # /api/overview endpoint serves a complete past calendar
+                # month from here instead of FB (past months are immutable),
+                # so 歷史花費 / 月報表型頁面 open instantly and don't burn
+                # FB rate limit. Keyed by the include_* flags because
+                # different views request different payload shapes.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS account_month_snapshots (
+                        account_id TEXT NOT NULL,
+                        month TEXT NOT NULL,
+                        include_archived BOOLEAN NOT NULL DEFAULT FALSE,
+                        include_adsets BOOLEAN NOT NULL DEFAULT FALSE,
+                        payload JSONB NOT NULL,
+                        captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (account_id, month, include_archived, include_adsets)
+                    )
+                    """
+                )
                 # Backfill: old INSERT bug let the frontend send any
                 # poll_interval_minutes value into DB (the hardcoded
                 # 60-min override only applied on UPDATE, not INSERT).
@@ -6209,6 +6228,88 @@ async def get_account_insights(
 
 # ── 批次總覽（多帳戶並行）──────────────────────────────────────
 
+def _overview_snapshot_month(date_preset: str, time_range: Optional[str]) -> Optional[str]:
+    """If this query is exactly a COMPLETE PAST calendar month, return
+    'YYYY-MM' (safe to serve from a DB snapshot — past months are
+    immutable). Otherwise None → serve live.
+
+    Detects a time_range whose ``since`` is the 1st and ``until`` is the
+    last day of the same month, and that month is strictly before the
+    current month (SCHEDULER_TZ). The current month (until = today) and
+    rolling presets (last_7d / last_30d) never match → always live."""
+    if not time_range:
+        return None
+    try:
+        tr = json.loads(time_range)
+        sy, sm, sd = (int(x) for x in str(tr.get("since") or "").split("-"))
+        uy, um, ud = (int(x) for x in str(tr.get("until") or "").split("-"))
+    except Exception:
+        return None
+    if sd != 1 or sy != uy or sm != um:
+        return None
+    nxt = date(uy + 1, 1, 1) if um == 12 else date(uy, um + 1, 1)
+    if ud != (nxt - timedelta(days=1)).day:
+        return None
+    month = f"{sy:04d}-{sm:02d}"
+    return month if month < _cost_center_current_month() else None
+
+
+async def _overview_snapshot_read(
+    account_id: str, month: str, include_archived: bool, include_adsets: bool
+) -> Optional[dict]:
+    """Return a stored {"campaigns", "insights"} bundle for a complete
+    past month, or None. Failures fall back to None (→ live fetch)."""
+    if _db_pool is None:
+        return None
+    try:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT payload FROM account_month_snapshots "
+                "WHERE account_id=$1 AND month=$2 AND include_archived=$3 AND include_adsets=$4",
+                account_id, month, include_archived, include_adsets,
+            )
+    except Exception:
+        return None
+    if not row:
+        return None
+    payload = row["payload"]
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
+async def _overview_snapshot_store(
+    account_id: str,
+    month: str,
+    include_archived: bool,
+    include_adsets: bool,
+    campaigns: list,
+    insights: Optional[dict],
+) -> None:
+    """Cache a complete-past-month overview bundle. Best-effort: any DB
+    error is swallowed so the live response is never affected."""
+    if _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO account_month_snapshots
+                    (account_id, month, include_archived, include_adsets, payload, captured_at)
+                VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+                ON CONFLICT (account_id, month, include_archived, include_adsets)
+                DO UPDATE SET payload = EXCLUDED.payload, captured_at = NOW()
+                """,
+                account_id, month, include_archived, include_adsets,
+                json.dumps({"campaigns": campaigns, "insights": insights}, ensure_ascii=False),
+            )
+    except Exception as e:
+        print(f"[overview-snapshot] store {account_id} {month} failed: {e}", flush=True)
+
+
 @app.get("/api/overview")
 async def get_overview(
     ids: str = Query(..., description="Comma-separated account ids (e.g. 'act_1,act_2')"),
@@ -6252,6 +6353,12 @@ async def get_overview(
     if not account_ids:
         return {"data": {}}
 
+    # When the requested range is a complete PAST calendar month, serve
+    # it from (and lazily fill) a DB snapshot instead of FB — past months
+    # are immutable, so 歷史花費 / 月報表型頁面 load instantly without
+    # burning FB rate limit. None → live path (current month / rolling).
+    snap_month = _overview_snapshot_month(date_preset, time_range)
+
     async def _fetch_one(aid: str):
         """Campaigns + insights for one account in parallel. Sub-fetch
         failures are captured as an ``error`` string so the outer
@@ -6261,6 +6368,16 @@ async def get_overview(
         so the frontend can show campaign rows within ~1-2s. The full
         data follows from a parallel non-lite request.
         """
+        if not lite and snap_month is not None:
+            cached = await _overview_snapshot_read(
+                aid, snap_month, include_archived, include_adsets
+            )
+            if cached is not None:
+                return aid, {
+                    "campaigns": cached.get("campaigns") or [],
+                    "insights": cached.get("insights"),
+                    "error": None,
+                }
         camps_task = asyncio.create_task(
             _fetch_campaigns_for_account(
                 aid, date_preset, time_range, include_archived,
@@ -6304,6 +6421,13 @@ async def get_overview(
             raw = ins_task.result()
             items = raw.get("data") or [] if isinstance(raw, dict) else []
             ins_flat = items[0] if items else None
+
+        # Cache a complete past month once fetched cleanly (no error,
+        # has data) so the next view of it serves from DB instead of FB.
+        if snap_month is not None and not error_parts and camps:
+            await _overview_snapshot_store(
+                aid, snap_month, include_archived, include_adsets, camps, ins_flat
+            )
 
         return aid, {
             "campaigns": camps,
