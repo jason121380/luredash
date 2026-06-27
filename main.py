@@ -828,6 +828,21 @@ async def lifespan(app: FastAPI):
                     ON security_push_configs (owner_fb_user_id)
                     """
                 )
+                # Cost-center snapshots — one row per past month for the
+                # lurefin export. Past months are immutable, so once a
+                # completed month is captured we serve it from here and
+                # never hit FB again. The current month is always fetched
+                # live (never read from / written to this table).
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS cost_center_snapshots (
+                        month TEXT PRIMARY KEY,
+                        payload JSONB NOT NULL,
+                        captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
                 # Backfill: old INSERT bug let the frontend send any
                 # poll_interval_minutes value into DB (the hardcoded
                 # 60-min override only applied on UPDATE, not INSERT).
@@ -1376,8 +1391,8 @@ def _is_public_api_request(request: Request) -> bool:
         return True
     # Machine-to-machine 費用中心匯出 (lurefin)。Bypasses the FB session
     # middleware because it does its own static Bearer-token check against
-    # AD_SPEND_API_TOKEN — see get_cost_center().
-    if path == "/api/cost-center" and method == "GET":
+    # AD_SPEND_API_TOKEN — see get_cost_center() / post_cost_center_backfill().
+    if path.startswith("/api/cost-center"):
         return True
     if path == "/api/proxy-asset" and method == "GET":
         return True
@@ -12133,24 +12148,167 @@ async def _cost_center_compute(month: Optional[str]) -> tuple:
     return out_accounts, debug
 
 
+def _cost_center_current_month() -> str:
+    """Current month 'YYYY-MM' in SCHEDULER_TZ (Asia/Taipei)."""
+    tz = _scheduler_tz()
+    today = datetime.now(timezone.utc).astimezone(tz).date()
+    return f"{today.year:04d}-{today.month:02d}"
+
+
+def _cost_center_month_list(start: str, end: str) -> list:
+    """Inclusive list of 'YYYY-MM' from start to end (bounded)."""
+    try:
+        sy, sm = (int(x) for x in start.split("-"))
+        ey, em = (int(x) for x in end.split("-"))
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="from/to 格式錯誤,請用 YYYY-MM")
+    out: list = []
+    y, m = sy, sm
+    for _ in range(120):  # backstop against a runaway range
+        out.append(f"{y:04d}-{m:02d}")
+        if (y, m) >= (ey, em):
+            break
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    return out
+
+
+def _cost_center_capture_good(debug: dict) -> bool:
+    """Only cache a past month when the capture is trustworthy: no
+    account hit a fetch error AND at least one account returned rows.
+    Guards the DB from caching a throttled/empty result that would then
+    be served forever."""
+    accts = debug.get("accounts", [])
+    if any(d.get("fetch_error") for d in accts):
+        return False
+    return sum(d.get("rows_after_filter", 0) for d in accts) > 0
+
+
+async def _cost_center_store_snapshot(month: str, accounts: list) -> None:
+    if _db_pool is None:
+        return
+    async with _db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO cost_center_snapshots (month, payload, captured_at, updated_at)
+            VALUES ($1, $2::jsonb, NOW(), NOW())
+            ON CONFLICT (month) DO UPDATE
+              SET payload = EXCLUDED.payload, captured_at = NOW(), updated_at = NOW()
+            """,
+            month,
+            json.dumps({"accounts": accounts}, ensure_ascii=False),
+        )
+
+
+async def _cost_center_read_snapshot(month: str) -> Optional[list]:
+    """Return the stored accounts list for a month, or None if absent."""
+    if _db_pool is None:
+        return None
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT payload FROM cost_center_snapshots WHERE month = $1", month
+        )
+    if not row:
+        return None
+    payload = row["payload"]
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            return None
+    if not isinstance(payload, dict):
+        return None
+    accounts = payload.get("accounts")
+    return accounts if isinstance(accounts, list) else None
+
+
 @app.get("/api/cost-center")
 async def get_cost_center(
     request: Request, month: Optional[str] = None, debug: int = 0
 ):
     """唯讀費用中心匯出（機器對機器，給 lurefin）。
 
-    按需即時抓取：lurefin 要資料時呼叫這支，luredash 當下去 FB 抓
-    L吸引力 / b新城區廣告帳號 兩個帳號的費用中心表格回傳（lurefin 本身
-    不直接碰 FB）。沒有背景排程、沒有快照 —— 有要才抓。
-    唯讀、只回 JSON、不需要 CORS。``?debug=1`` 附上診斷資訊。
+    - 當月 → 一律即時跟 FB 抓（數字還在變）。
+    - 過往月份 → 讀資料庫；DB 還沒有的話,第一次自動即時抓一次並存起來,
+      之後就不再碰 FB（過往月份是固定的）。
+    lurefin 本身不直接碰 FB。唯讀、只回 JSON。``?debug=1`` 附診斷。
     """
     _cost_center_check_auth(request)
     label = _cost_center_month_range(month)[0]  # 驗證 + 正規化月份
+    current = _cost_center_current_month()
+
+    # 當月（或未來月）→ 一律即時,不讀也不寫 DB
+    if label >= current:
+        accounts, dbg = await _cost_center_compute(label)
+        result: dict = {"month": label, "accounts": accounts}
+        if debug:
+            result["_debug"] = {**dbg, "source": "live (current month)"}
+        return result
+
+    # 過往月份 → 先讀 DB
+    cached = await _cost_center_read_snapshot(label)
+    if cached is not None:
+        result = {"month": label, "accounts": cached}
+        if debug:
+            result["_debug"] = {"source": "db"}
+        return result
+
+    # DB 沒有 → 即時抓一次,抓到有效資料就存起來(之後免再抓)
     accounts, dbg = await _cost_center_compute(label)
-    result: dict = {"month": label, "accounts": accounts}
+    good = _cost_center_capture_good(dbg)
+    if good:
+        await _cost_center_store_snapshot(label, accounts)
+    result = {"month": label, "accounts": accounts}
     if debug:
-        result["_debug"] = dbg
+        result["_debug"] = {
+            **dbg,
+            "source": "live-then-cached" if good else "live (not cached: empty/error)",
+        }
     return result
+
+
+@app.post("/api/cost-center/backfill")
+async def post_cost_center_backfill(
+    request: Request,
+    from_: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = None,
+):
+    """一次把過往月份抓下來存進 DB（機器對機器，bearer）。
+
+    預設範圍:今年 1 月 ~ 上個完成月份。當月與未來月會跳過（當月一律即時,
+    不存）。可重複執行,只會補沒存到 / 抓失敗的月份。
+    """
+    _cost_center_check_auth(request)
+    current = _cost_center_current_month()
+    start = _cost_center_month_range(from_ or f"{current[:4]}-01")[0]
+    end = _cost_center_month_range(to)[0] if to else current
+    out: list = []
+    for m in _cost_center_month_list(start, end):
+        if m >= current:
+            out.append({"month": m, "stored": False, "note": "當月/未來月一律即時,不存"})
+            continue
+        accounts, dbg = await _cost_center_compute(m)
+        good = _cost_center_capture_good(dbg)
+        if good:
+            await _cost_center_store_snapshot(m, accounts)
+        out.append(
+            {
+                "month": m,
+                "stored": bool(good),
+                "rows": sum(len(a["rows"]) for a in accounts),
+                "accounts": [
+                    {
+                        "account": d["account"],
+                        "found": d.get("found"),
+                        "rows": d.get("rows_after_filter", 0),
+                        "fetch_error": d.get("fetch_error"),
+                    }
+                    for d in dbg["accounts"]
+                ],
+            }
+        )
+    return {"backfilled": out}
 
 
 # ── SPA catch-all (MUST be registered last) ─────────────────────────
