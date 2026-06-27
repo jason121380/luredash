@@ -1031,6 +1031,38 @@ export const api = {
         timeoutMs: 300_000,
         source: "finance",
       }),
+    /** 工程模式「lurefin 匯出預熱」分頁:列出 2024-01 ~ 當月 + 每月在
+     * cost_center_snapshots 的狀態(那三個帳號的匯出快照)。 */
+    costCenterMonths: () =>
+      request<{
+        current: string;
+        accounts: string[];
+        months: Array<{
+          month: string;
+          stored: boolean;
+          rows: number | null;
+          captured_at: string | null;
+          is_current: boolean;
+        }>;
+      }>("GET", "/api/engineering/cost-center/months", { source: "finance" }),
+    /** 抓某個月的 lurefin 匯出資料存進 cost_center_snapshots(可重抓覆蓋)。 */
+    costCenterCapture: (month: string) =>
+      request<{
+        month: string;
+        stored: boolean;
+        rows: number;
+        skipped?: string;
+        accounts: Array<{
+          account: string;
+          found: boolean | null;
+          rows: number;
+          fetch_error: string | null;
+        }>;
+      }>("POST", "/api/engineering/cost-center/capture", {
+        body: { month },
+        timeoutMs: 300_000,
+        source: "finance",
+      }),
   },
 
   nicknames: {

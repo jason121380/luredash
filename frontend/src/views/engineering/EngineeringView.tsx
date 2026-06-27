@@ -45,7 +45,7 @@ function useTabVisible(): boolean {
  * closed modal stops issuing requests immediately (the Modal unmounts
  * children when `open` flips false).
  */
-type EngineeringTab = "dashboard" | "ad-account" | "history-warm" | "other";
+type EngineeringTab = "dashboard" | "ad-account" | "history-warm" | "cost-center" | "other";
 
 const ENGINEERING_TABS: Array<{
   id: EngineeringTab;
@@ -70,6 +70,12 @@ const ENGINEERING_TABS: Array<{
     label: "歷史資料預熱",
     mobileLabel: "預熱",
     subtitle: "全帳號逐月預熱進 DB",
+  },
+  {
+    id: "cost-center",
+    label: "lurefin 匯出預熱",
+    mobileLabel: "lurefin",
+    subtitle: "那三個帳號逐月存進 DB",
   },
   {
     id: "other",
@@ -141,6 +147,8 @@ function EngineeringPanels() {
           <FbUsagePanel />
         ) : activeTab === "history-warm" ? (
           <HistoryWarmPanel />
+        ) : activeTab === "cost-center" ? (
+          <CostCenterBackfillPanel />
         ) : (
           <RuntimeDiagnosticsPanel />
         )}
@@ -404,6 +412,195 @@ function HistoryWarmPanel() {
             </table>
           </div>
         </>
+      )}
+    </Card>
+  );
+}
+
+// ── lurefin 匯出預熱（cost_center_snapshots）─────────────────
+
+function CostCenterBackfillPanel() {
+  const monthsQuery = useQuery({
+    queryKey: ["cc-export-months"],
+    queryFn: () => api.engineering.costCenterMonths(),
+    staleTime: 30_000,
+  });
+  const [rowState, setRowState] = useState<Record<string, CcRowState>>({});
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const timersRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      for (const id of Object.values(timers)) window.clearInterval(id);
+    };
+  }, []);
+
+  const data = monthsQuery.data;
+  const accounts = data?.accounts ?? [];
+  const rows = useMemo(() => [...(data?.months ?? [])].reverse(), [data?.months]);
+
+  const setRS = (month: string, s: Partial<CcRowState>) =>
+    setRowState((prev) => ({
+      ...prev,
+      [month]: { ...(prev[month] ?? { status: "idle", progress: 0 }), ...s },
+    }));
+
+  const capture = async (month: string): Promise<boolean> => {
+    setRS(month, { status: "running", progress: 8, message: undefined });
+    const start = Date.now();
+    const tick = window.setInterval(() => {
+      const elapsed = (Date.now() - start) / 1000;
+      setRS(month, { progress: Math.min(90, 8 + 82 * (1 - Math.exp(-elapsed / 12))) });
+    }, 400);
+    timersRef.current[month] = tick;
+    try {
+      const res = await api.engineering.costCenterCapture(month);
+      window.clearInterval(tick);
+      if (res.skipped) {
+        setRS(month, { status: "idle", progress: 0, message: res.skipped });
+        return false;
+      }
+      if (res.stored) {
+        setRS(month, { status: "done", progress: 100, message: `完成 · ${res.rows} 筆` });
+        return true;
+      }
+      const errs = res.accounts
+        .filter((a) => a.fetch_error)
+        .map((a) => `${a.account}:${a.fetch_error}`);
+      setRS(month, {
+        status: "error",
+        progress: 100,
+        message: errs.length ? errs.join(" / ") : "沒抓到資料(該月無花費或被限流),可重抓",
+      });
+      return false;
+    } catch (e) {
+      window.clearInterval(tick);
+      const msg =
+        (e as { detail?: string })?.detail ?? (e instanceof Error ? e.message : "未知錯誤");
+      setRS(month, { status: "error", progress: 100, message: msg });
+      return false;
+    }
+  };
+
+  const onCapture = async (month: string) => {
+    const ok = await capture(month);
+    await monthsQuery.refetch();
+    if (ok) toast(`${fmtCcMonth(month)} 已更新`);
+  };
+
+  const onBulk = async () => {
+    if (bulkRunning) return;
+    setBulkRunning(true);
+    try {
+      let done = 0;
+      let fail = 0;
+      for (const m of data?.months ?? []) {
+        if (m.is_current) continue;
+        const ok = await capture(m.month);
+        if (ok) done += 1;
+        else fail += 1;
+      }
+      await monthsQuery.refetch();
+      toast(`全部完成:成功 ${done}、失敗 ${fail}`, fail ? "error" : undefined);
+    } finally {
+      setBulkRunning(false);
+    }
+  };
+
+  return (
+    <Card
+      title="lurefin 匯出預熱"
+      subtitle={`把 lurefin 匯出的帳號(${accounts.join("、") || "…"})逐月存進 DB,lurefin 拉過往月份就秒回。當月即時、不存。可重抓覆蓋。`}
+      frameless
+      action={
+        <Button size="sm" onClick={() => void onBulk()} disabled={bulkRunning || monthsQuery.isLoading}>
+          {bulkRunning ? "全部更新中…" : "全部更新(舊→新)"}
+        </Button>
+      }
+    >
+      {monthsQuery.isLoading ? (
+        <div className="text-sm text-gray-400">載入中…</div>
+      ) : !data ? (
+        <div className="text-sm text-gray-400">無資料</div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-border">
+          <table className="w-full text-[12px]">
+            <thead className="bg-bg text-left text-gray-500">
+              <tr>
+                <th className="px-3 py-2 font-semibold">月份</th>
+                <th className="px-3 py-2 font-semibold">狀態 / 進度</th>
+                <th className="px-3 py-2 text-right font-semibold">資料筆數</th>
+                <th className="px-3 py-2 text-right font-semibold">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((m) => {
+                const rs = rowState[m.month];
+                const running = rs?.status === "running";
+                return (
+                  <tr key={m.month} className="border-t border-border align-middle">
+                    <td className="whitespace-nowrap px-3 py-2 font-semibold text-ink">
+                      {fmtCcMonth(m.month)}
+                      {m.is_current ? (
+                        <span className="ml-1.5 rounded-full bg-orange-bg px-1.5 py-0.5 text-[10px] font-semibold text-orange">
+                          當月
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2">
+                      {running || rs?.status === "done" ? (
+                        <div className="flex items-center gap-2">
+                          <ProgressBar
+                            value={rs.progress}
+                            size="sm"
+                            tone={rs.status === "done" ? "ok" : "warm"}
+                            className="min-w-[90px] flex-1"
+                          />
+                          <span
+                            className={cn(
+                              "shrink-0 text-[11px]",
+                              rs.status === "done" ? "font-semibold text-emerald-600" : "text-gray-500",
+                            )}
+                          >
+                            {running ? "撈取中…" : rs.message}
+                          </span>
+                        </div>
+                      ) : rs?.status === "error" ? (
+                        <span className="text-[11px] text-red-600" title={rs.message}>
+                          失敗 · {rs.message}
+                        </span>
+                      ) : m.is_current ? (
+                        <span className="text-[11px] text-gray-400">即時(不存)</span>
+                      ) : m.stored ? (
+                        <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                          已存
+                        </span>
+                      ) : (
+                        <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">
+                          未存
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-gray-600">
+                      {m.is_current ? "—" : (m.rows ?? "—")}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <Button
+                        size="sm"
+                        variant={m.stored ? "ghost" : "primary"}
+                        onClick={() => void onCapture(m.month)}
+                        disabled={running || bulkRunning || m.is_current}
+                      >
+                        {running ? "撈取中…" : m.stored ? "重抓" : "更新"}
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </Card>
   );
