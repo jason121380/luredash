@@ -6233,25 +6233,33 @@ def _overview_snapshot_month(date_preset: str, time_range: Optional[str]) -> Opt
     'YYYY-MM' (safe to serve from a DB snapshot — past months are
     immutable). Otherwise None → serve live.
 
-    Detects a time_range whose ``since`` is the 1st and ``until`` is the
-    last day of the same month, and that month is strictly before the
-    current month (SCHEDULER_TZ). The current month (until = today) and
-    rolling presets (last_7d / last_30d) never match → always live."""
-    if not time_range:
-        return None
-    try:
-        tr = json.loads(time_range)
-        sy, sm, sd = (int(x) for x in str(tr.get("since") or "").split("-"))
-        uy, um, ud = (int(x) for x in str(tr.get("until") or "").split("-"))
-    except Exception:
-        return None
-    if sd != 1 or sy != uy or sm != um:
-        return None
-    nxt = date(uy + 1, 1, 1) if um == 12 else date(uy, um + 1, 1)
-    if ud != (nxt - timedelta(days=1)).day:
-        return None
-    month = f"{sy:04d}-{sm:02d}"
-    return month if month < _cost_center_current_month() else None
+    Two shapes map to a complete past month:
+      1. A ``time_range`` whose ``since`` is the 1st and ``until`` is the
+         last day of the same, past month (歷史花費 / custom 整月).
+      2. ``date_preset=last_month`` — the previous calendar month, which
+         is always complete and in the past (date picker「上個月」).
+    Everything else (this_month / today / yesterday / last_7d|30d|90d) is
+    partial or rolling → None → live."""
+    if time_range:
+        try:
+            tr = json.loads(time_range)
+            sy, sm, sd = (int(x) for x in str(tr.get("since") or "").split("-"))
+            uy, um, ud = (int(x) for x in str(tr.get("until") or "").split("-"))
+        except Exception:
+            return None
+        if sd != 1 or sy != uy or sm != um:
+            return None
+        nxt = date(uy + 1, 1, 1) if um == 12 else date(uy, um + 1, 1)
+        if ud != (nxt - timedelta(days=1)).day:
+            return None
+        month = f"{sy:04d}-{sm:02d}"
+        return month if month < _cost_center_current_month() else None
+    if (date_preset or "") == "last_month":
+        tz = _scheduler_tz()
+        today = datetime.now(timezone.utc).astimezone(tz).date()
+        prev = date(today.year, today.month, 1) - timedelta(days=1)
+        return f"{prev.year:04d}-{prev.month:02d}"
+    return None
 
 
 async def _overview_snapshot_read(
@@ -12547,6 +12555,94 @@ async def post_engineering_history_warm_run(body: _HistoryWarmBody):
         "warmed": warmed,
         "failed": failed,
         "errors": errors,
+    }
+
+
+# ── 工程模式:lurefin 匯出預熱（cost_center_snapshots,那三個帳號）──
+#
+# 跟上面的「歷史資料預熱(全帳號)」分開:這一組是 lurefin 透過
+# /api/cost-center 讀的那條線,先把過往月份抓進 cost_center_snapshots,
+# lurefin 拉過往月份就秒回。走一般登入 session。
+
+
+@app.get("/api/engineering/cost-center/months")
+async def get_engineering_cost_center_months():
+    """列出 2024-01 ~ 當月,以及 lurefin 匯出快照(cost_center_snapshots)的
+    狀態(已存 / 筆數)。給工程模式「lurefin 匯出預熱」表格用。"""
+    current = _cost_center_current_month()
+    months = _cost_center_month_list("2024-01", current)
+    stored: dict = {}
+    if _db_pool is not None:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT month, payload, captured_at FROM cost_center_snapshots"
+            )
+        for r in rows:
+            payload = r["payload"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+            accts = payload.get("accounts") if isinstance(payload, dict) else []
+            nrows = sum(
+                len(a.get("rows") or [])
+                for a in (accts or [])
+                if isinstance(a, dict)
+            )
+            ca = r["captured_at"]
+            stored[r["month"]] = {
+                "rows": nrows,
+                "captured_at": ca.isoformat() if ca else None,
+            }
+    out: list = []
+    for m in months:
+        s = stored.get(m)
+        out.append(
+            {
+                "month": m,
+                "stored": bool(s),
+                "rows": s["rows"] if s else None,
+                "captured_at": s["captured_at"] if s else None,
+                "is_current": m == current,
+            }
+        )
+    return {
+        "current": current,
+        "accounts": [a["label"] for a in COST_CENTER_ACCOUNTS],
+        "months": out,
+    }
+
+
+class _CcCaptureBody(BaseModel):
+    month: str
+
+
+@app.post("/api/engineering/cost-center/capture")
+async def post_engineering_cost_center_capture(body: _CcCaptureBody):
+    """抓某個月的 lurefin 匯出資料並存進 cost_center_snapshots(可重抓
+    覆蓋)。當月即時、不存。"""
+    current = _cost_center_current_month()
+    label = _cost_center_month_range(body.month)[0]
+    if label >= current:
+        return {"month": label, "skipped": "當月即時,不存", "stored": False, "rows": 0, "accounts": []}
+    accounts, dbg = await _cost_center_compute(label)
+    good = _cost_center_capture_good(dbg)
+    if good:
+        await _cost_center_store_snapshot(label, accounts)
+    return {
+        "month": label,
+        "stored": bool(good),
+        "rows": sum(len(a["rows"]) for a in accounts),
+        "accounts": [
+            {
+                "account": d["account"],
+                "found": d.get("found"),
+                "rows": d.get("rows_after_filter", 0),
+                "fetch_error": d.get("fetch_error"),
+            }
+            for d in dbg["accounts"]
+        ],
     }
 
 
