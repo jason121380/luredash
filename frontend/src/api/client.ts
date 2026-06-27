@@ -1003,34 +1003,30 @@ export const api = {
         retried_total_5m: number;
         total_5m: number;
       }>("GET", "/api/engineering/fb-calls"),
-    /** 工程模式「費用中心歷史」分頁:列出 2024-01 ~ 當月每個月份 +
-     * 它在 DB 的快照狀態(已存 / 列數 / 更新時間)。 */
-    costCenterMonths: () =>
+    /** 工程模式「歷史資料預熱」分頁:列出 2024-01 ~ 當月,每個月已預熱
+     * (存進 account_month_snapshots)的帳號數 / 總帳號數。 */
+    historyWarmMonths: () =>
       request<{
         current: string;
-        accounts: string[];
+        total_accounts: number;
         months: Array<{
           month: string;
-          stored: boolean;
-          rows: number | null;
-          captured_at: string | null;
+          warmed: number;
+          total: number;
           is_current: boolean;
         }>;
-      }>("GET", "/api/engineering/cost-center/months", { source: "finance" }),
-    /** 手動抓某個月的費用中心資料存進 DB(可重抓覆蓋)。會即時打 FB,
+      }>("GET", "/api/engineering/history-warm/months", { source: "finance" }),
+    /** 把所有帳號在某個月的資料抓進 DB(可重抓覆蓋)。會即時打一批 FB,
      * 所以給 5 分鐘 timeout。 */
-    costCenterCapture: (month: string) =>
+    historyWarmRun: (month: string) =>
       request<{
         month: string;
-        stored: boolean;
-        rows: number;
-        accounts: Array<{
-          account: string;
-          found: boolean | null;
-          rows: number;
-          fetch_error: string | null;
-        }>;
-      }>("POST", "/api/engineering/cost-center/capture", {
+        total: number;
+        warmed: number;
+        failed: number;
+        errors: Array<{ account_id: string; error: string }>;
+        skipped?: string;
+      }>("POST", "/api/engineering/history-warm/run", {
         body: { month },
         timeoutMs: 300_000,
         source: "finance",
