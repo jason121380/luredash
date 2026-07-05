@@ -1040,6 +1040,8 @@ export const api = {
     costCenterMonths: () =>
       request<{
         current: string;
+        /** 上個月要等到本月幾號才可存(結算緩衝,後端常數) */
+        settle_day: number;
         accounts: string[];
         months: Array<{
           month: string;
@@ -1047,6 +1049,8 @@ export const api = {
           rows: number | null;
           captured_at: string | null;
           is_current: boolean;
+          /** 上個月還在結算緩衝期(1~2 號):FB 數字回補中,不可存 */
+          is_settling: boolean;
         }>;
       }>("GET", "/api/engineering/cost-center/months", { source: "finance" }),
     /** 抓某個月的 lurefin 匯出資料存進 cost_center_snapshots(可重抓覆蓋)。 */

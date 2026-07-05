@@ -10211,11 +10211,16 @@ async def _scheduler_loop() -> None:
                     await _scheduler_tick()
                     # 每月自動重熱上個月快照 — 絕大多數 tick 直接 no-op
                     # (已 done / 還在結算緩衝期),只有每月 3 號後第一次
-                    # 會真的 fan-out。
+                    # 會真的 fan-out。account_month_snapshots(全帳號)與
+                    # lurefin 匯出快照(cost_center_snapshots)各自獨立。
                     try:
                         await _history_warm_auto_tick()
                     except Exception as e:
                         print(f"[history-warm] auto tick error: {e}", flush=True)
+                    try:
+                        await _cost_center_warm_auto_tick()
+                    except Exception as e:
+                        print(f"[cost-center-warm] auto tick error: {e}", flush=True)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -12405,12 +12410,18 @@ async def get_cost_center(
     label = _cost_center_month_range(month)[0]  # 驗證 + 正規化月份
     current = _cost_center_current_month()
 
-    # 當月（或未來月）→ 一律即時,不讀也不寫 DB
-    if label >= current:
+    # 當月、未來月,或還在結算緩衝期的上個月(本月 3 號前)→ 一律即時,
+    # 不讀也不寫 DB。上個月月底翻頁後 FB insights 仍會回補 1~2 天,提早
+    # 存進 cost_center_snapshots 會凍住未結算的數字且之後永遠讀那份髒的。
+    if label > _latest_snapshotable_month():
         accounts, dbg = await _cost_center_compute(label)
         result: dict = {"month": label, "accounts": accounts}
         if debug:
-            result["_debug"] = {**dbg, "source": "live (current month)"}
+            settling = label < current
+            result["_debug"] = {
+                **dbg,
+                "source": "live (settling month)" if settling else "live (current month)",
+            }
         return result
 
     # 過往月份 → 先讀 DB
@@ -12443,17 +12454,20 @@ async def post_cost_center_backfill(
 ):
     """一次把過往月份抓下來存進 DB（機器對機器，bearer）。
 
-    預設範圍:今年 1 月 ~ 上個完成月份。當月與未來月會跳過（當月一律即時,
-    不存）。可重複執行,只會補沒存到 / 抓失敗的月份。
+    預設範圍:今年 1 月 ~ 上個完成月份。當月、未來月,以及還在結算緩衝期的
+    上個月(本月 3 號前)會跳過（一律即時,不存）。可重複執行,只會補沒存到
+    / 抓失敗的月份。
     """
     _cost_center_check_auth(request)
     current = _cost_center_current_month()
+    latest_ok = _latest_snapshotable_month()
     start = _cost_center_month_range(from_ or f"{current[:4]}-01")[0]
     end = _cost_center_month_range(to)[0] if to else current
     out: list = []
     for m in _cost_center_month_list(start, end):
-        if m >= current:
-            out.append({"month": m, "stored": False, "note": "當月/未來月一律即時,不存"})
+        if m > latest_ok:
+            note = "當月/未來月一律即時,不存" if m >= current else "上月結算中,3 號後才可存"
+            out.append({"month": m, "stored": False, "note": note})
             continue
         accounts, dbg = await _cost_center_compute(m)
         good = _cost_center_capture_good(dbg)
@@ -12628,17 +12642,19 @@ async def post_engineering_history_warm_run(body: _HistoryWarmBody):
 #    "attempt_month": "YYYY-MM", "attempt_at": iso}  ← 重試 backoff 用
 
 _HISTORY_WARM_AUTO_STATE_KEY = "_history_warm_auto_state"
+# lurefin 匯出快照(cost_center_snapshots)的每月自動重熱狀態(同結構)。
+_COST_CENTER_WARM_AUTO_STATE_KEY = "_cost_center_warm_auto_state"
 _HISTORY_WARM_AUTO_RETRY_GAP_S = 6 * 3600  # 全滅(warmed=0)後最快 6h 重試
 
 
-async def _history_warm_auto_state_load() -> dict:
+async def _history_warm_auto_state_load(key: str = _HISTORY_WARM_AUTO_STATE_KEY) -> dict:
     if _db_pool is None:
         return {}
     try:
         async with _db_pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT value FROM shared_settings WHERE key=$1",
-                _HISTORY_WARM_AUTO_STATE_KEY,
+                key,
             )
     except Exception:
         return {}
@@ -12653,7 +12669,9 @@ async def _history_warm_auto_state_load() -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-async def _history_warm_auto_state_save(state: dict) -> None:
+async def _history_warm_auto_state_save(
+    state: dict, key: str = _HISTORY_WARM_AUTO_STATE_KEY
+) -> None:
     if _db_pool is None:
         return
     try:
@@ -12665,11 +12683,11 @@ async def _history_warm_auto_state_save(state: dict) -> None:
                 ON CONFLICT (key) DO UPDATE
                 SET value = EXCLUDED.value, updated_at = NOW()
                 """,
-                _HISTORY_WARM_AUTO_STATE_KEY,
+                key,
                 json.dumps(state),
             )
     except Exception as e:
-        print(f"[history-warm] state save failed: {e}", flush=True)
+        print(f"[history-warm] state save failed ({key}): {e}", flush=True)
 
 
 async def _history_warm_auto_tick() -> None:
@@ -12719,6 +12737,47 @@ async def _history_warm_auto_tick() -> None:
     )
 
 
+async def _cost_center_warm_auto_tick() -> None:
+    """lurefin 匯出快照(cost_center_snapshots)的每月自動重熱 — 跟
+    _history_warm_auto_tick 同型,只是換成那三個帳號的 cost-center 資料。
+    結算緩衝期擋掉提早凍結後,3 號後由此 force 覆蓋一次(緩衝期前殘留的
+    髒快照一併蓋掉,因為 /api/cost-center 讀取端有快照就不再重抓)。"""
+    if _db_pool is None:
+        return
+    tz = _scheduler_tz()
+    today = datetime.now(timezone.utc).astimezone(tz).date()
+    prev = date(today.year, today.month, 1) - timedelta(days=1)
+    target = f"{prev.year:04d}-{prev.month:02d}"
+    if target > _latest_snapshotable_month():
+        return  # 上個月還在結算緩衝期
+    state = await _history_warm_auto_state_load(_COST_CENTER_WARM_AUTO_STATE_KEY)
+    if state.get("done") == target:
+        return
+    attempt_at = state.get("attempt_at")
+    if state.get("attempt_month") == target and attempt_at:
+        try:
+            last = datetime.fromisoformat(str(attempt_at))
+            if (datetime.now(timezone.utc) - last).total_seconds() < _HISTORY_WARM_AUTO_RETRY_GAP_S:
+                return
+        except ValueError:
+            pass
+    state["attempt_month"] = target
+    state["attempt_at"] = datetime.now(timezone.utc).isoformat()
+    await _history_warm_auto_state_save(state, _COST_CENTER_WARM_AUTO_STATE_KEY)
+    accounts, dbg = await _cost_center_compute(target)
+    good = _cost_center_capture_good(dbg)
+    if good:
+        await _cost_center_store_snapshot(target, accounts)
+        state["done"] = target
+        state["done_at"] = datetime.now(timezone.utc).isoformat()
+        await _history_warm_auto_state_save(state, _COST_CENTER_WARM_AUTO_STATE_KEY)
+    print(
+        f"[cost-center-warm] auto {target}: stored={bool(good)} "
+        f"rows={sum(len(a['rows']) for a in accounts)}",
+        flush=True,
+    )
+
+
 # ── 工程模式:lurefin 匯出預熱（cost_center_snapshots,那三個帳號）──
 #
 # 跟上面的「歷史資料預熱(全帳號)」分開:這一組是 lurefin 透過
@@ -12731,6 +12790,7 @@ async def get_engineering_cost_center_months():
     """列出 2024-01 ~ 當月,以及 lurefin 匯出快照(cost_center_snapshots)的
     狀態(已存 / 筆數)。給工程模式「lurefin 匯出預熱」表格用。"""
     current = _cost_center_current_month()
+    latest_ok = _latest_snapshotable_month()
     months = _cost_center_month_list("2024-01", current)
     stored: dict = {}
     if _db_pool is not None:
@@ -12766,10 +12826,13 @@ async def get_engineering_cost_center_months():
                 "rows": s["rows"] if s else None,
                 "captured_at": s["captured_at"] if s else None,
                 "is_current": m == current,
+                # 上個月在 1~2 號的結算緩衝期內:FB 數字還在回補,不開放存。
+                "is_settling": m < current and m > latest_ok,
             }
         )
     return {
         "current": current,
+        "settle_day": _SNAPSHOT_SETTLE_DAY,
         "accounts": [a["label"] for a in COST_CENTER_ACCOUNTS],
         "months": out,
     }
@@ -12782,11 +12845,19 @@ class _CcCaptureBody(BaseModel):
 @app.post("/api/engineering/cost-center/capture")
 async def post_engineering_cost_center_capture(body: _CcCaptureBody):
     """抓某個月的 lurefin 匯出資料並存進 cost_center_snapshots(可重抓
-    覆蓋)。當月即時、不存。"""
+    覆蓋)。當月即時、不存;上個月要過了結算緩衝期(本月 3 號)才開放。"""
     current = _cost_center_current_month()
     label = _cost_center_month_range(body.month)[0]
     if label >= current:
         return {"month": label, "skipped": "當月即時,不存", "stored": False, "rows": 0, "accounts": []}
+    if label > _latest_snapshotable_month():
+        return {
+            "month": label,
+            "skipped": f"上月結算中(FB 數字回補),{_SNAPSHOT_SETTLE_DAY} 號後才可存",
+            "stored": False,
+            "rows": 0,
+            "accounts": [],
+        }
     accounts, dbg = await _cost_center_compute(label)
     good = _cost_center_capture_good(dbg)
     if good:

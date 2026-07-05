@@ -510,7 +510,7 @@ function CostCenterBackfillPanel() {
       let done = 0;
       let fail = 0;
       for (const m of data?.months ?? []) {
-        if (m.is_current) continue;
+        if (m.is_current || m.is_settling) continue;
         const ok = await capture(m.month);
         if (ok) done += 1;
         else fail += 1;
@@ -525,7 +525,7 @@ function CostCenterBackfillPanel() {
   return (
     <Card
       title="lurefin 匯出預熱"
-      subtitle={`把 lurefin 匯出的帳號(${accounts.join("、") || "…"})逐月存進 DB,lurefin 拉過往月份就秒回。當月即時、不存。可重抓覆蓋。`}
+      subtitle={`把 lurefin 匯出的帳號(${accounts.join("、") || "…"})逐月存進 DB,lurefin 拉過往月份就秒回。當月即時、不存。可重抓覆蓋。每月 3 號後系統會自動重熱上個月一次。`}
       frameless
       action={
         <Button size="sm" onClick={() => void onBulk()} disabled={bulkRunning || monthsQuery.isLoading}>
@@ -560,6 +560,10 @@ function CostCenterBackfillPanel() {
                         <span className="ml-1.5 rounded-full bg-orange-bg px-1.5 py-0.5 text-[10px] font-semibold text-orange">
                           當月
                         </span>
+                      ) : m.is_settling ? (
+                        <span className="ml-1.5 rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-500">
+                          結算中
+                        </span>
                       ) : null}
                     </td>
                     <td className="px-3 py-2">
@@ -586,6 +590,10 @@ function CostCenterBackfillPanel() {
                         </span>
                       ) : m.is_current ? (
                         <span className="text-[11px] text-gray-400">即時(不存)</span>
+                      ) : m.is_settling ? (
+                        <span className="text-[11px] text-gray-400">
+                          FB 數字回補中,{data.settle_day} 號後自動存
+                        </span>
                       ) : m.stored ? (
                         <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
                           已存
@@ -604,7 +612,7 @@ function CostCenterBackfillPanel() {
                         size="sm"
                         variant={m.stored ? "ghost" : "primary"}
                         onClick={() => void onCapture(m.month)}
-                        disabled={running || bulkRunning || m.is_current}
+                        disabled={running || bulkRunning || m.is_current || m.is_settling}
                       >
                         {running ? "撈取中…" : m.stored ? "重抓" : "更新"}
                       </Button>
