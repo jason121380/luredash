@@ -90,8 +90,14 @@ function EngineeringPanels() {
   const activeMeta = ENGINEERING_TABS.find((t) => t.id === activeTab) ?? ENGINEERING_TABS[0];
 
   return (
-    <div className="grid gap-4 md:h-[calc(100dvh-140px)] md:min-h-0 md:grid-cols-[240px_minmax(0,1fr)]">
-      <aside className="md:sticky md:top-0 md:self-start">
+    // grid-cols-1 (= minmax(0,1fr)) + min-w-0 on BOTH items: on mobile the
+    // implicit `auto` track otherwise grows to the tab strip's min-content
+    // width (5 × min-w-[104px] ≈ 544px) on iOS WebKit — Chromium zeroes a
+    // scroll container's min-content contribution but Safari does not, so
+    // the whole modal body laid out at ~544px and got clipped by the
+    // sheet's overflow-x-hidden (手機版工程模式爆版).
+    <div className="grid grid-cols-1 gap-4 md:h-[calc(100dvh-140px)] md:min-h-0 md:grid-cols-[240px_minmax(0,1fr)]">
+      <aside className="min-w-0 md:sticky md:top-0 md:self-start">
         <div
           className="flex gap-1 overflow-x-auto rounded-lg bg-bg p-1 md:flex-col md:gap-2 md:overflow-visible md:bg-transparent md:p-0"
           role="tablist"
@@ -186,15 +192,15 @@ function RuntimeDiagnosticsPanel() {
           其他診斷:身分、記憶體、前端快取與本機環境。
         </p>
       </header>
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <IdentityPanel />
         <MemoryPanel />
       </div>
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
+      <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
         <ReactQueryPanel />
         <ApiHealthPanel />
       </div>
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
+      <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
         <BrowserPanel />
         <StoragePanel />
       </div>
