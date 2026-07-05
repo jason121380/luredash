@@ -79,6 +79,7 @@ _current_fb_user_id: contextvars.ContextVar[Optional[str]] = contextvars.Context
 #   security-push                                            — 安全監控自動掃 scheduler
 #   security-probe                                           — legacy 安全監控 cheap probe 紀錄
 #   security-test                                            — 推播設定 modal 的「測試」按鈕
+#   history-warm                                             — 每月自動重熱上個月快照 scheduler
 #   unknown                                                  — fallback (some helper that didn't tag)
 _fb_call_source: contextvars.ContextVar[str] = contextvars.ContextVar(
     "fb_call_source", default="unknown"
@@ -209,6 +210,7 @@ _WARM_TARGET_SUPPRESSED_SOURCES = {
     "security-push",
     "security-probe",
     "security-test",
+    "history-warm",
 }
 
 
@@ -6228,6 +6230,25 @@ async def get_account_insights(
 
 # ── 批次總覽（多帳戶並行）──────────────────────────────────────
 
+# 上個月要等到本月幾號(含)才視為「結算完成、可存快照」。FB insights
+# 在月底翻頁後 1~2 天內仍會回補(花費修正、私訊歸因),7/1 就把 6 月
+# 凍結進 DB 會存到未結算的數字,而且之後所有人讀的都是那份髒快照。
+_SNAPSHOT_SETTLE_DAY = 3
+
+
+def _latest_snapshotable_month() -> str:
+    """最後一個「可以存快照」的月份 ('YYYY-MM', SCHEDULER_TZ)。
+
+    本月 1、2 號期間,上個月還在結算緩衝期 → 只回上上個月;3 號(含)
+    之後才把上個月納入。lazy-fill 與工程模式預熱都走這個判斷。"""
+    tz = _scheduler_tz()
+    today = datetime.now(timezone.utc).astimezone(tz).date()
+    prev = date(today.year, today.month, 1) - timedelta(days=1)
+    if today.day < _SNAPSHOT_SETTLE_DAY:
+        prev = date(prev.year, prev.month, 1) - timedelta(days=1)
+    return f"{prev.year:04d}-{prev.month:02d}"
+
+
 def _overview_snapshot_month(date_preset: str, time_range: Optional[str]) -> Optional[str]:
     """If this query is exactly a COMPLETE PAST calendar month, return
     'YYYY-MM' (safe to serve from a DB snapshot — past months are
@@ -6239,7 +6260,11 @@ def _overview_snapshot_month(date_preset: str, time_range: Optional[str]) -> Opt
       2. ``date_preset=last_month`` — the previous calendar month, which
          is always complete and in the past (date picker「上個月」).
     Everything else (this_month / today / yesterday / last_7d|30d|90d) is
-    partial or rolling → None → live."""
+    partial or rolling → None → live.
+
+    「過去月份」不是月份一翻頁就算:上個月要過了結算緩衝期
+    (_latest_snapshotable_month) 才回傳,不然 1~2 號的 lazy-fill 會把
+    FB 還沒回補完的數字永久凍結進 account_month_snapshots。"""
     if time_range:
         try:
             tr = json.loads(time_range)
@@ -6253,12 +6278,13 @@ def _overview_snapshot_month(date_preset: str, time_range: Optional[str]) -> Opt
         if ud != (nxt - timedelta(days=1)).day:
             return None
         month = f"{sy:04d}-{sm:02d}"
-        return month if month < _cost_center_current_month() else None
+        return month if month <= _latest_snapshotable_month() else None
     if (date_preset or "") == "last_month":
         tz = _scheduler_tz()
         today = datetime.now(timezone.utc).astimezone(tz).date()
         prev = date(today.year, today.month, 1) - timedelta(days=1)
-        return f"{prev.year:04d}-{prev.month:02d}"
+        month = f"{prev.year:04d}-{prev.month:02d}"
+        return month if month <= _latest_snapshotable_month() else None
     return None
 
 
@@ -10183,6 +10209,13 @@ async def _scheduler_loop() -> None:
                     print(f"[scheduler] skipping tick — {gate_reason}", flush=True)
                 else:
                     await _scheduler_tick()
+                    # 每月自動重熱上個月快照 — 絕大多數 tick 直接 no-op
+                    # (已 done / 還在結算緩衝期),只有每月 3 號後第一次
+                    # 會真的 fan-out。
+                    try:
+                        await _history_warm_auto_tick()
+                    except Exception as e:
+                        print(f"[history-warm] auto tick error: {e}", flush=True)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -12486,6 +12519,7 @@ async def get_engineering_history_warm_months():
     的帳號數 / 總帳號數。給工程模式「歷史資料預熱」表格用。"""
     uid = _current_fb_user_id.get()
     current = _cost_center_current_month()
+    latest_ok = _latest_snapshotable_month()
     months = _cost_center_month_list("2024-01", current)
     accounts = await _engineering_warm_accounts(uid)
     total = len(accounts)
@@ -12508,27 +12542,26 @@ async def get_engineering_history_warm_months():
                 "warmed": warmed.get(m, 0),
                 "total": total,
                 "is_current": m == current,
+                # 上個月在 1~2 號的結算緩衝期內:數字 FB 還在回補,
+                # 先不開放預熱(前端顯示「結算中」並鎖按鈕)。
+                "is_settling": m < current and m > latest_ok,
             }
         )
-    return {"current": current, "total_accounts": total, "months": out}
+    return {
+        "current": current,
+        "settle_day": _SNAPSHOT_SETTLE_DAY,
+        "total_accounts": total,
+        "months": out,
+    }
 
 
 class _HistoryWarmBody(BaseModel):
     month: str
 
 
-@app.post("/api/engineering/history-warm/run")
-async def post_engineering_history_warm_run(body: _HistoryWarmBody):
-    """把『所有帳號』在某個月的資料抓進 account_month_snapshots(可重抓
-    覆蓋,force)。當月不預熱(維持即時)。回每帳號成功 / 失敗數。"""
-    uid = _current_fb_user_id.get()
-    current = _cost_center_current_month()
-    label = _cost_center_month_range(body.month)[0]
-    if label >= current:
-        return {"month": label, "skipped": "當月即時,不預熱", "total": 0, "warmed": 0, "failed": 0, "errors": []}
-    accounts = await _engineering_warm_accounts(uid)
-    if not accounts:
-        return {"month": label, "total": 0, "warmed": 0, "failed": 0, "errors": []}
+async def _history_warm_run_month(label: str, accounts: list) -> dict:
+    """把 ``accounts`` 在 ``label`` 月的 overview 資料 force 抓進
+    account_month_snapshots。呼叫端負責確認月份已過結算緩衝期。"""
     _, since, until = _cost_center_month_range(label)
     time_range = json.dumps({"since": since, "until": until}, separators=(",", ":"))
     res = await get_overview(
@@ -12556,6 +12589,134 @@ async def post_engineering_history_warm_run(body: _HistoryWarmBody):
         "failed": failed,
         "errors": errors,
     }
+
+
+@app.post("/api/engineering/history-warm/run")
+async def post_engineering_history_warm_run(body: _HistoryWarmBody):
+    """把『所有帳號』在某個月的資料抓進 account_month_snapshots(可重抓
+    覆蓋,force)。當月不預熱(維持即時);上個月要過了結算緩衝期
+    (本月 3 號)才開放。回每帳號成功 / 失敗數。"""
+    uid = _current_fb_user_id.get()
+    current = _cost_center_current_month()
+    label = _cost_center_month_range(body.month)[0]
+    if label >= current:
+        return {"month": label, "skipped": "當月即時,不預熱", "total": 0, "warmed": 0, "failed": 0, "errors": []}
+    if label > _latest_snapshotable_month():
+        return {
+            "month": label,
+            "skipped": f"上月結算中(FB 數字回補),{_SNAPSHOT_SETTLE_DAY} 號後才可預熱",
+            "total": 0,
+            "warmed": 0,
+            "failed": 0,
+            "errors": [],
+        }
+    accounts = await _engineering_warm_accounts(uid)
+    if not accounts:
+        return {"month": label, "total": 0, "warmed": 0, "failed": 0, "errors": []}
+    return await _history_warm_run_month(label, accounts)
+
+
+# ── 每月自動重熱(上個月 overview 快照)─────────────────────────
+#
+# 修「7/1 抓 6 月不準」的第二半:結算緩衝期(_SNAPSHOT_SETTLE_DAY)擋掉
+# 提早凍結之後,這裡在每月 3 號(含)之後由 _scheduler_loop 自動把上個月
+# 所有帳號 force 重熱一次,老快照(或緩衝期前殘留的髒快照)一併覆蓋,
+# 不需要有人記得去工程模式按按鈕。狀態存 shared_settings
+# `_history_warm_auto_state`(underscore 前綴 = server-internal,不會被
+# GET /api/settings/shared 吐給前端):
+#   {"done": "YYYY-MM", "done_at": iso,          ← 該月已成功重熱
+#    "attempt_month": "YYYY-MM", "attempt_at": iso}  ← 重試 backoff 用
+
+_HISTORY_WARM_AUTO_STATE_KEY = "_history_warm_auto_state"
+_HISTORY_WARM_AUTO_RETRY_GAP_S = 6 * 3600  # 全滅(warmed=0)後最快 6h 重試
+
+
+async def _history_warm_auto_state_load() -> dict:
+    if _db_pool is None:
+        return {}
+    try:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value FROM shared_settings WHERE key=$1",
+                _HISTORY_WARM_AUTO_STATE_KEY,
+            )
+    except Exception:
+        return {}
+    if not row or row["value"] is None:
+        return {}
+    raw = row["value"]
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+async def _history_warm_auto_state_save(state: dict) -> None:
+    if _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO shared_settings (key, value, updated_at)
+                VALUES ($1, $2::jsonb, NOW())
+                ON CONFLICT (key) DO UPDATE
+                SET value = EXCLUDED.value, updated_at = NOW()
+                """,
+                _HISTORY_WARM_AUTO_STATE_KEY,
+                json.dumps(state),
+            )
+    except Exception as e:
+        print(f"[history-warm] state save failed: {e}", flush=True)
+
+
+async def _history_warm_auto_tick() -> None:
+    """Called every scheduler tick; no-ops until 上個月 exits the settle
+    window, then force-warms it exactly once per month. Partial per-account
+    failures still count as done (manual re-warm remains available); a
+    total failure (warmed=0, e.g. FB token expired) leaves the month
+    un-done and retries after _HISTORY_WARM_AUTO_RETRY_GAP_S."""
+    if _db_pool is None:
+        return
+    tz = _scheduler_tz()
+    today = datetime.now(timezone.utc).astimezone(tz).date()
+    prev = date(today.year, today.month, 1) - timedelta(days=1)
+    target = f"{prev.year:04d}-{prev.month:02d}"
+    if target > _latest_snapshotable_month():
+        return  # 上個月還在結算緩衝期
+    state = await _history_warm_auto_state_load()
+    if state.get("done") == target:
+        return
+    attempt_at = state.get("attempt_at")
+    if state.get("attempt_month") == target and attempt_at:
+        try:
+            last = datetime.fromisoformat(str(attempt_at))
+            if (datetime.now(timezone.utc) - last).total_seconds() < _HISTORY_WARM_AUTO_RETRY_GAP_S:
+                return
+        except ValueError:
+            pass
+    # Stamp the attempt BEFORE the fan-out so a crash / restart mid-warm
+    # still respects the backoff instead of hammering FB every 60s tick.
+    state["attempt_month"] = target
+    state["attempt_at"] = datetime.now(timezone.utc).isoformat()
+    await _history_warm_auto_state_save(state)
+    _fb_call_source.set("history-warm")
+    accounts = await _engineering_warm_accounts(None)
+    if not accounts:
+        print(f"[history-warm] auto {target}: no accounts (runtime token missing?)", flush=True)
+        return
+    res = await _history_warm_run_month(target, accounts)
+    if res["warmed"] > 0:
+        state["done"] = target
+        state["done_at"] = datetime.now(timezone.utc).isoformat()
+        await _history_warm_auto_state_save(state)
+    print(
+        f"[history-warm] auto {target}: warmed={res['warmed']} failed={res['failed']} "
+        f"total={res['total']}",
+        flush=True,
+    )
 
 
 # ── 工程模式:lurefin 匯出預熱（cost_center_snapshots,那三個帳號）──
