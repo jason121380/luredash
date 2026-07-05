@@ -297,7 +297,7 @@ function HistoryWarmPanel() {
       let done = 0;
       let fail = 0;
       for (const m of data?.months ?? []) {
-        if (m.is_current) continue;
+        if (m.is_current || m.is_settling) continue;
         const ok = await warm(m.month);
         if (ok) done += 1;
         else fail += 1;
@@ -312,7 +312,7 @@ function HistoryWarmPanel() {
   return (
     <Card
       title="歷史資料預熱"
-      subtitle="把所有帳號每個過往月份的資料先抓進資料庫,讓 費用中心 / 店家花費 / 歷史花費 第一次打開就秒出。可重抓覆蓋。"
+      subtitle="把所有帳號每個過往月份的資料先抓進資料庫,讓 費用中心 / 店家花費 / 歷史花費 第一次打開就秒出。可重抓覆蓋。每月 3 號後系統會自動重熱上個月一次。"
       frameless
       action={
         <Button size="sm" onClick={() => void onBulk()} disabled={bulkRunning || monthsQuery.isLoading}>
@@ -352,6 +352,10 @@ function HistoryWarmPanel() {
                           <span className="ml-1.5 rounded-full bg-orange-bg px-1.5 py-0.5 text-[10px] font-semibold text-orange">
                             當月
                           </span>
+                        ) : m.is_settling ? (
+                          <span className="ml-1.5 rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-500">
+                            結算中
+                          </span>
                         ) : null}
                       </td>
                       <td className="px-3 py-2">
@@ -378,6 +382,10 @@ function HistoryWarmPanel() {
                           </span>
                         ) : m.is_current ? (
                           <span className="text-[11px] text-gray-400">即時(不預熱)</span>
+                        ) : m.is_settling ? (
+                          <span className="text-[11px] text-gray-400">
+                            FB 數字回補中,{data.settle_day} 號後自動預熱
+                          </span>
                         ) : fullyWarmed ? (
                           <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
                             已預熱
@@ -400,7 +408,7 @@ function HistoryWarmPanel() {
                           size="sm"
                           variant={fullyWarmed ? "ghost" : "primary"}
                           onClick={() => void onWarm(m.month)}
-                          disabled={running || bulkRunning || m.is_current}
+                          disabled={running || bulkRunning || m.is_current || m.is_settling}
                         >
                           {running ? "預熱中…" : fullyWarmed ? "重抓" : "預熱"}
                         </Button>

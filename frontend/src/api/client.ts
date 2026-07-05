@@ -1008,12 +1008,16 @@ export const api = {
     historyWarmMonths: () =>
       request<{
         current: string;
+        /** 上個月要等到本月幾號才可預熱(結算緩衝,後端常數) */
+        settle_day: number;
         total_accounts: number;
         months: Array<{
           month: string;
           warmed: number;
           total: number;
           is_current: boolean;
+          /** 上個月還在結算緩衝期(1~2 號):FB 數字回補中,不可預熱 */
+          is_settling: boolean;
         }>;
       }>("GET", "/api/engineering/history-warm/months", { source: "finance" }),
     /** 把所有帳號在某個月的資料抓進 DB(可重抓覆蓋)。會即時打一批 FB,
