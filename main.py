@@ -610,6 +610,35 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS channel_id UUID REFERENCES line_channels(id)
                     """
                 )
+                # `line_group_folders` (2026-07-07): user-defined folders
+                # for categorising groups WITHIN one OA (channel). A group
+                # belongs to at most one folder; NULL folder_id = 未分類.
+                # Deleting a folder un-categorises its groups (SET NULL),
+                # never deletes groups.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS line_group_folders (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        channel_id UUID NOT NULL REFERENCES line_channels(id) ON DELETE CASCADE,
+                        name TEXT NOT NULL,
+                        sort_order INT NOT NULL DEFAULT 0,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_line_group_folders_channel
+                    ON line_group_folders (channel_id)
+                    """
+                )
+                await conn.execute(
+                    """
+                    ALTER TABLE line_groups
+                    ADD COLUMN IF NOT EXISTS folder_id UUID
+                        REFERENCES line_group_folders(id) ON DELETE SET NULL
+                    """
+                )
                 # `campaign_line_push_configs`: one row per
                 # (campaign_id, group_id) pair. `next_run_at` is the
                 # index the scheduler tick scans; `frequency` + the
@@ -8632,7 +8661,7 @@ async def list_line_groups(fb_user_id: Optional[str] = None):
         rows = await conn.fetch(
             """
             SELECT g.group_id, g.group_name, g.label, g.joined_at, g.left_at,
-                   g.channel_id,
+                   g.channel_id, g.folder_id,
                    COALESCE(c.name, '') AS channel_name,
                    c.owner_fb_user_id AS channel_owner_fb_user_id,
                    (c.owner_fb_user_id = $1) AS is_owner,
@@ -8659,6 +8688,7 @@ async def list_line_groups(fb_user_id: Optional[str] = None):
                 "group_name": r["group_name"],
                 "label": r["label"],
                 "channel_id": str(r["channel_id"]) if r["channel_id"] else None,
+                "folder_id": str(r["folder_id"]) if r["folder_id"] else None,
                 "channel_name": r["channel_name"] or "",
                 "channel_owner_fb_user_id": r["channel_owner_fb_user_id"],
                 "is_owner": bool(r["is_owner"]),
@@ -8675,6 +8705,209 @@ async def list_line_groups(fb_user_id: Optional[str] = None):
             for r in rows
         ]
     }
+
+
+# ── LINE 群組資料夾（每個 OA 自訂分類）─────────────────────────
+#
+# 每個群組(line_groups)最多屬於一個 folder(line_group_folders),folder
+# 綁在一個 OA(channel)底下。前端 LINE 群組管理用 OA 分頁 + 左側資料夾清單
+# 呈現;folder_id NULL = 未分類。
+
+
+async def _folder_channel_for_write(folder_id: str, uid: str) -> str:
+    """Resolve a folder to its channel_id and assert the caller can
+    manage it (owner or admin grant). Returns the channel_id string.
+    404 if the folder is gone; 403 if the caller lacks write access."""
+    pool = _require_db()
+    if not uid:
+        raise HTTPException(status_code=401, detail="fb_user_id 必填")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT channel_id FROM line_group_folders WHERE id = $1::uuid",
+            folder_id,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="資料夾不存在")
+    channel_id = str(row["channel_id"])
+    role = await _channel_role_for_user(channel_id, uid)
+    if role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="你沒有權限管理此官方帳號的資料夾")
+    return channel_id
+
+
+@app.get("/api/line-group-folders")
+async def list_line_group_folders(fb_user_id: Optional[str] = None):
+    """List folders for every channel visible to the caller (owned,
+    orphan, or accepted-grant), with the group count in each folder.
+    Same visibility rule as `/api/line-groups`."""
+    if _db_pool is None:
+        return {"data": []}
+    uid = (fb_user_id or "").strip()
+    if not uid:
+        return {"data": []}
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT f.id, f.channel_id, f.name, f.sort_order,
+                   COUNT(g.group_id) FILTER (WHERE g.left_at IS NULL) AS group_count
+            FROM line_group_folders f
+            JOIN line_channels c ON c.id = f.channel_id
+            LEFT JOIN line_channel_grants gr
+                ON gr.channel_id = c.id AND gr.fb_user_id = $1
+            LEFT JOIN line_groups g ON g.folder_id = f.id
+            WHERE c.owner_fb_user_id = $1
+               OR c.owner_fb_user_id IS NULL
+               OR (gr.fb_user_id = $1 AND gr.status = 'accepted')
+            GROUP BY f.id, f.channel_id, f.name, f.sort_order
+            ORDER BY f.sort_order, f.created_at
+            """,
+            uid,
+        )
+    return {
+        "data": [
+            {
+                "id": str(r["id"]),
+                "channel_id": str(r["channel_id"]),
+                "name": r["name"],
+                "sort_order": int(r["sort_order"]),
+                "group_count": int(r["group_count"] or 0),
+            }
+            for r in rows
+        ]
+    }
+
+
+class _FolderCreateBody(BaseModel):
+    channel_id: str
+    name: str
+
+
+@app.post("/api/line-group-folders")
+async def create_line_group_folder(
+    body: _FolderCreateBody, fb_user_id: Optional[str] = None
+):
+    """Create a folder under a channel. Caller must own or be an admin
+    grantee of that channel."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="資料夾名稱必填")
+    role = await _channel_role_for_user(body.channel_id, uid)
+    if role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="你沒有權限在此官方帳號建立資料夾")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO line_group_folders (channel_id, name, sort_order)
+            VALUES ($1::uuid, $2,
+                    COALESCE((SELECT MAX(sort_order) + 1 FROM line_group_folders
+                              WHERE channel_id = $1::uuid), 0))
+            RETURNING id, channel_id, name, sort_order
+            """,
+            body.channel_id,
+            name,
+        )
+    return {
+        "ok": True,
+        "data": {
+            "id": str(row["id"]),
+            "channel_id": str(row["channel_id"]),
+            "name": row["name"],
+            "sort_order": int(row["sort_order"]),
+            "group_count": 0,
+        },
+    }
+
+
+class _FolderUpdateBody(BaseModel):
+    name: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+@app.patch("/api/line-group-folders/{folder_id}")
+async def update_line_group_folder(
+    folder_id: str, body: _FolderUpdateBody, fb_user_id: Optional[str] = None
+):
+    """Rename and/or reorder a folder."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    await _folder_channel_for_write(folder_id, uid)
+    sets: list = []
+    args: list = []
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="資料夾名稱不可為空")
+        args.append(name)
+        sets.append(f"name = ${len(args)}")
+    if body.sort_order is not None:
+        args.append(int(body.sort_order))
+        sets.append(f"sort_order = ${len(args)}")
+    if not sets:
+        return {"ok": True}
+    args.append(folder_id)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE line_group_folders SET {', '.join(sets)} WHERE id = ${len(args)}::uuid",
+            *args,
+        )
+    return {"ok": True}
+
+
+@app.delete("/api/line-group-folders/{folder_id}")
+async def delete_line_group_folder(folder_id: str, fb_user_id: Optional[str] = None):
+    """Delete a folder. Its groups fall back to 未分類 (folder_id → NULL
+    via ON DELETE SET NULL) — groups are never deleted."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    await _folder_channel_for_write(folder_id, uid)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM line_group_folders WHERE id = $1::uuid", folder_id
+        )
+    return {"ok": True}
+
+
+class _GroupFolderBody(BaseModel):
+    folder_id: Optional[str] = None
+
+
+@app.post("/api/line-groups/{group_id}/folder")
+async def set_line_group_folder(
+    group_id: str, body: _GroupFolderBody, fb_user_id: Optional[str] = None
+):
+    """Move a group into a folder (or clear it with folder_id=null).
+    Caller must be able to manage the group's channel; the target folder
+    must belong to that same channel."""
+    pool = _require_db()
+    uid = (fb_user_id or "").strip()
+    # Owner/admin on the group's channel (reuses the config-write gate).
+    await _assert_can_modify_config_for_group(group_id, uid)
+    async with pool.acquire() as conn:
+        grow = await conn.fetchrow(
+            "SELECT channel_id FROM line_groups WHERE group_id = $1", group_id
+        )
+        if grow is None:
+            raise HTTPException(status_code=404, detail="群組不存在")
+        group_channel = str(grow["channel_id"]) if grow["channel_id"] else None
+        target = (body.folder_id or "").strip() or None
+        if target is not None:
+            frow = await conn.fetchrow(
+                "SELECT channel_id FROM line_group_folders WHERE id = $1::uuid", target
+            )
+            if frow is None:
+                raise HTTPException(status_code=404, detail="資料夾不存在")
+            if str(frow["channel_id"]) != group_channel:
+                raise HTTPException(
+                    status_code=400, detail="資料夾與群組不屬於同一個官方帳號"
+                )
+        await conn.execute(
+            "UPDATE line_groups SET folder_id = $1::uuid WHERE group_id = $2",
+            target,
+            group_id,
+        )
+    return {"ok": True, "folder_id": target}
 
 
 @app.get("/api/line-groups/{group_id}/push-configs")
