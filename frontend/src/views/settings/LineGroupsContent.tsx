@@ -254,7 +254,7 @@ export function LineGroupsContent() {
 
       {/* OA tabs */}
       <div
-        className="mb-3 flex gap-1 overflow-x-auto rounded-lg bg-bg p-1"
+        className="mb-3 flex gap-1.5 overflow-x-auto pb-0.5"
         role="tablist"
         aria-label="LINE 官方帳號"
       >
@@ -268,17 +268,17 @@ export function LineGroupsContent() {
               aria-selected={active}
               onClick={() => setSelectedOaKey(tab.key)}
               className={cn(
-                "flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] transition-colors",
+                "flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-3 py-1.5 text-[13px] transition-colors",
                 active
-                  ? "bg-white font-semibold text-orange shadow-sm"
-                  : "text-gray-500 hover:text-orange",
+                  ? "border-orange bg-white font-semibold text-orange"
+                  : "border-transparent text-gray-500 hover:text-orange",
               )}
             >
               <span>{tab.name}</span>
               <span
                 className={cn(
                   "rounded-full px-1.5 text-[10px] tabular-nums",
-                  active ? "bg-orange-bg text-orange" : "bg-white text-gray-300",
+                  active ? "bg-orange-bg text-orange" : "bg-bg text-gray-400",
                 )}
               >
                 {tab.count}
