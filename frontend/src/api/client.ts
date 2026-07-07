@@ -82,6 +82,15 @@ export interface LinePushConfig {
   channel_name?: string;
 }
 
+/** A user-defined folder for categorising LINE groups within one OA. */
+export interface LineGroupFolder {
+  id: string;
+  channel_id: string;
+  name: string;
+  sort_order: number;
+  group_count: number;
+}
+
 export interface LinePushConfigInput {
   id?: string;
   campaign_id: string;
@@ -453,7 +462,7 @@ function composeSignals(...signals: Array<AbortSignal | undefined>): AbortSignal
 }
 
 async function request<T>(
-  method: "GET" | "POST" | "PUT" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   options?: {
     body?: unknown;
@@ -598,16 +607,11 @@ export const api = {
         pictureUrl?: string;
         sessionToken?: string;
         sessionExpiresAt?: number;
-      }>(
-        "POST",
-        "/api/auth/token",
-        {
-          body: { token },
-          source: "auth",
-        },
-      ),
-    clearToken: () =>
-      request<{ ok: boolean }>("DELETE", "/api/auth/token", { source: "auth" }),
+      }>("POST", "/api/auth/token", {
+        body: { token },
+        source: "auth",
+      }),
+    clearToken: () => request<{ ok: boolean }>("DELETE", "/api/auth/token", { source: "auth" }),
     me: () => request<AuthMeResponse>("GET", "/api/auth/me", { source: "auth" }),
   },
 
@@ -636,11 +640,10 @@ export const api = {
       };
       if (objectId) query.object_id = objectId;
       if (eventTypes) query.event_types = eventTypes;
-      return request<{ data: FbActivity[] }>(
-        "GET",
-        `/api/accounts/${accountId}/activities`,
-        { query, source: "activities" },
-      );
+      return request<{ data: FbActivity[] }>("GET", `/api/accounts/${accountId}/activities`, {
+        query,
+        source: "activities",
+      });
     },
   },
 
@@ -670,15 +673,11 @@ export const api = {
         fallback?: boolean;
         synthetic?: boolean;
         source?: "screen" | "scan_record" | "synthetic";
-      }>(
-        "POST",
-        `/api/security-push/configs/${encodeURIComponent(id)}/test`,
-        {
-          query: { fb_user_id: fbUserId },
-          body: { cards: cards ?? [] },
-          source: "security-test",
-        },
-      ),
+      }>("POST", `/api/security-push/configs/${encodeURIComponent(id)}/test`, {
+        query: { fb_user_id: fbUserId },
+        body: { cards: cards ?? [] },
+        source: "security-test",
+      }),
   },
 
   securityScan: {
@@ -717,11 +716,7 @@ export const api = {
     /** Browse stored scan records for cross-device history. Returns
      * both auto-scan (scheduler-triggered) and manual (user-triggered)
      * entries unless `trigger` narrows it down. */
-    listRecords: (
-      fbUserId: string,
-      limit = 30,
-      trigger?: "auto" | "manual",
-    ) =>
+    listRecords: (fbUserId: string, limit = 30, trigger?: "auto" | "manual") =>
       request<{
         data: Array<{
           id: string;
@@ -887,7 +882,12 @@ export const api = {
     batch: (
       accountIds: string[],
       date: DateConfig,
-      opts?: { includeArchived?: boolean; lite?: boolean; includeAdsets?: boolean; source?: string },
+      opts?: {
+        includeArchived?: boolean;
+        lite?: boolean;
+        includeAdsets?: boolean;
+        source?: string;
+      },
     ) =>
       request<{
         data: Record<
@@ -1263,6 +1263,7 @@ export const api = {
           group_name: string;
           label: string;
           channel_id: string | null;
+          folder_id: string | null;
           channel_name: string;
           channel_owner_fb_user_id: string | null;
           is_owner: boolean;
@@ -1272,6 +1273,13 @@ export const api = {
           left_at: string | null;
         }>;
       }>("GET", "/api/line-groups", { query: { fb_user_id: fbUserId } }),
+    /** Move a group into a folder (folderId=null clears → 未分類). */
+    setGroupFolder: (fbUserId: string, groupId: string, folderId: string | null) =>
+      request<{ ok: boolean; folder_id: string | null }>(
+        "POST",
+        `/api/line-groups/${encodeURIComponent(groupId)}/folder`,
+        { body: { folder_id: folderId }, query: { fb_user_id: fbUserId } },
+      ),
     /** List push configs targeting this group (with campaign nickname joined). */
     listGroupConfigs: (fbUserId: string, groupId: string) =>
       request<{ data: Array<LinePushConfig & { campaign_nickname: string }> }>(
@@ -1321,6 +1329,30 @@ export const api = {
       }>("GET", "/api/line-push/logs", {
         query: { config_id: configId, limit: String(limit) },
       }),
+  },
+
+  /** LINE 群組資料夾 — 每個 OA(channel)自訂的群組分類。 */
+  lineFolders: {
+    list: (fbUserId: string) =>
+      request<{ data: LineGroupFolder[] }>("GET", "/api/line-group-folders", {
+        query: { fb_user_id: fbUserId },
+      }),
+    create: (fbUserId: string, channelId: string, name: string) =>
+      request<{ ok: boolean; data: LineGroupFolder }>("POST", "/api/line-group-folders", {
+        body: { channel_id: channelId, name },
+        query: { fb_user_id: fbUserId },
+      }),
+    update: (fbUserId: string, folderId: string, body: { name?: string; sort_order?: number }) =>
+      request<{ ok: boolean }>("PATCH", `/api/line-group-folders/${encodeURIComponent(folderId)}`, {
+        body,
+        query: { fb_user_id: fbUserId },
+      }),
+    delete: (fbUserId: string, folderId: string) =>
+      request<{ ok: boolean }>(
+        "DELETE",
+        `/api/line-group-folders/${encodeURIComponent(folderId)}`,
+        { query: { fb_user_id: fbUserId } },
+      ),
   },
 
   settings: {

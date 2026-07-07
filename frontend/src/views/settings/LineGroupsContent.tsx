@@ -1,10 +1,15 @@
-import type { LinePushConfig, LinePushDateRange } from "@/api/client";
+import type { LineGroupFolder, LinePushConfig, LinePushDateRange } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import {
+  useCreateLineFolder,
+  useDeleteLineFolder,
   useDeleteLinePushConfig,
+  useLineGroupFolders,
   useLineGroupPushConfigs,
   useLineGroups,
+  useSetLineGroupFolder,
   useTestLinePush,
+  useUpdateLineFolder,
 } from "@/api/hooks/useLinePush";
 import { useBillingUsage } from "@/api/hooks/useSubscription";
 import { confirm } from "@/components/ConfirmDialog";
@@ -12,7 +17,7 @@ import { GraceBanner } from "@/components/GraceBanner";
 import { toast } from "@/components/Toast";
 import { UpgradeModal, type UpgradeModalState } from "@/components/UpgradeModal";
 import { cn } from "@/lib/cn";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { GroupPushConfigModal } from "./GroupPushConfigModal";
 
 type EditTarget = {
@@ -22,6 +27,11 @@ type EditTarget = {
 } | null;
 
 const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
+/** Sentinel folder selections (real folder ids are UUIDs). */
+const FOLDER_ALL = "__all__";
+const FOLDER_NONE = "__none__";
+/** OA-tab key for groups whose channel_id is NULL (legacy / unclaimed). */
+const OA_NONE = "__none_oa__";
 
 const DATE_RANGE_LABELS: Record<LinePushDateRange, string> = {
   yesterday: "昨日",
@@ -62,6 +72,7 @@ interface LineGroup {
   group_name: string;
   label: string;
   channel_id: string | null;
+  folder_id: string | null;
   channel_name: string;
   channel_owner_fb_user_id: string | null;
   is_owner: boolean;
@@ -71,27 +82,31 @@ interface LineGroup {
   left_at: string | null;
 }
 
+interface OaTab {
+  key: string; // channel_id or OA_NONE
+  channelId: string | null;
+  name: string;
+  role: LineGroup["my_role"];
+  count: number;
+}
+
+const oaKeyOf = (channelId: string | null): string => channelId ?? OA_NONE;
+
 /**
- * Shared list UI for LINE groups the bot has joined. Standalone page
- * is `LinePushSettingsView`; that view's Topbar refresh button calls
- * `/api/line-groups/refresh-all` to bulk-update group names from
- * LINE and drop any whose membership ended.
+ * LINE 群組管理 — OA-tabbed view. Each LINE 官方帳號 (channel) is its
+ * own tab; within a tab, a left-hand folder list categorises that OA's
+ * groups (全部 / 未分類 / user folders). The search box is scoped to the
+ * currently-selected OA (and narrows within the selected folder).
  *
- * Two-column table:
- *   群組(LINE 顯示名 + ID) | 已設定的推播
- *
- * Top-of-page search filters by group_name / group_id.
+ * Standalone page is `LinePushSettingsView`; its Topbar refresh button
+ * calls `/api/line-groups/refresh-all` to bulk-update group names.
  */
 export function LineGroupsContent() {
   const groupsQuery = useLineGroups();
-  const groups = groupsQuery.data ?? [];
+  const groups = (groupsQuery.data ?? []) as LineGroup[];
+  const foldersQuery = useLineGroupFolders();
+  const allFolders = foldersQuery.data ?? [];
   // Set of account IDs the current FB user has Marketing API access to.
-  // `useAccounts()` calls /me/adaccounts which FB itself filters by the
-  // user's permissions, so this is the authoritative "what they can see".
-  // We use it to hide push configs that target accounts outside the
-  // current user's reach — matches the principle of "看不到的帳戶,
-  // 不該看到它的推播". Backend-side gating is still needed for hard
-  // security but this kills the visibility leak.
   const accountsQuery = useAccounts();
   const accessibleAccountIds = useMemo(
     () => new Set((accountsQuery.data ?? []).map((a) => a.id)),
@@ -99,27 +114,89 @@ export function LineGroupsContent() {
   );
   const [editTarget, setEditTarget] = useState<EditTarget>(null);
   const [query, setQuery] = useState("");
-  const [sortKey, setSortKey] = useState<"channel" | "group" | null>(null);
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [selectedOaKey, setSelectedOaKey] = useState<string | null>(null);
+  const [selectedFolder, setSelectedFolder] = useState<string>(FOLDER_ALL);
   const usageQuery = useBillingUsage();
   const groupCap = usageQuery.data?.limits.line_groups ?? -1;
   const groupsUsed = usageQuery.data?.usage.line_groups ?? 0;
   const isUnlimited = groupCap < 0 || groupCap >= 999_000;
-  // Tier limit only applies when the user owns at least one channel.
-  // Shared OAs count against the OWNER's tier (not the caller's), so
-  // a grantee viewing only shared groups should never see「已達上限」
-  // — that limit is irrelevant for them.
-  const ownedGroupsCount = (groups as LineGroup[]).filter((g) => g.is_owner).length;
-  const sharedGroupsCount = (groups as LineGroup[]).filter((g) => g.is_shared).length;
+  const ownedGroupsCount = groups.filter((g) => g.is_owner).length;
+  const sharedGroupsCount = groups.filter((g) => g.is_shared).length;
   const showLimitBadge = !isUnlimited && ownedGroupsCount > 0;
   const atLimit = showLimitBadge && groupsUsed >= groupCap;
   const [upgradeState, setUpgradeState] = useState<UpgradeModalState | null>(null);
 
+  // ── OA tabs (one per distinct channel among visible groups) ──
+  const oaTabs = useMemo<OaTab[]>(() => {
+    const map = new Map<string, OaTab>();
+    for (const g of groups) {
+      const key = oaKeyOf(g.channel_id);
+      const existing = map.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        map.set(key, {
+          key,
+          channelId: g.channel_id,
+          name: g.channel_name?.trim() || (g.channel_id ? "未命名官方帳號" : "未指定官方帳號"),
+          role: g.my_role,
+          count: 1,
+        });
+      }
+    }
+    // Real channels first (by name), the null-channel bucket last.
+    return [...map.values()].sort((a, b) => {
+      if ((a.channelId === null) !== (b.channelId === null)) {
+        return a.channelId === null ? 1 : -1;
+      }
+      return a.name.localeCompare(b.name, "zh-TW");
+    });
+  }, [groups]);
+
+  // Resolve the active OA: keep the user's pick if it still exists,
+  // else fall back to the first tab.
+  const activeOa = useMemo<OaTab | null>(() => {
+    if (oaTabs.length === 0) return null;
+    return oaTabs.find((t) => t.key === selectedOaKey) ?? oaTabs[0] ?? null;
+  }, [oaTabs, selectedOaKey]);
+
+  // Reset folder selection whenever the active OA changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset on OA switch only
+  useEffect(() => {
+    setSelectedFolder(FOLDER_ALL);
+  }, [activeOa?.key]);
+
+  const canManageFolders =
+    !!activeOa?.channelId && (activeOa.role === "owner" || activeOa.role === "admin");
+
+  const oaFolders = useMemo(
+    () => allFolders.filter((f) => f.channel_id === activeOa?.channelId),
+    [allFolders, activeOa?.channelId],
+  );
+
+  // Groups in the active OA, with per-folder counts for the sidebar.
+  const oaGroups = useMemo(
+    () => groups.filter((g) => oaKeyOf(g.channel_id) === activeOa?.key),
+    [groups, activeOa?.key],
+  );
+  const uncategorisedCount = useMemo(() => oaGroups.filter((g) => !g.folder_id).length, [oaGroups]);
+
+  // Folder filter → then search filter (search is scoped to the OA,
+  // narrowing within whatever folder is selected).
+  const visibleGroups = useMemo(() => {
+    let base = oaGroups;
+    if (selectedFolder === FOLDER_NONE) base = base.filter((g) => !g.folder_id);
+    else if (selectedFolder !== FOLDER_ALL)
+      base = base.filter((g) => g.folder_id === selectedFolder);
+    const q = query.trim().toLowerCase();
+    if (!q) return base;
+    return base.filter(
+      (g) => (g.group_name ?? "").toLowerCase().includes(q) || g.group_id.toLowerCase().includes(q),
+    );
+  }, [oaGroups, selectedFolder, query]);
+
   const tryAddPush = (target: NonNullable<EditTarget>) => {
-    // Only enforce caller's tier on rows under their OWN channels.
-    // For shared OAs the limit lives on the owner's tier — backend
-    // will 403 if owner is over THEIR cap, with a friendly message.
-    const targetGroup = (groups as LineGroup[]).find((g) => g.group_id === target.groupId);
+    const targetGroup = groups.find((g) => g.group_id === target.groupId);
     const isCallerOwnedTarget = targetGroup?.is_owner ?? false;
     if (isCallerOwnedTarget && atLimit) {
       setUpgradeState({
@@ -131,37 +208,6 @@ export function LineGroupsContent() {
     }
     setEditTarget(target);
   };
-
-  const onSort = (key: "channel" | "group") => {
-    if (sortKey === key) {
-      setSortDir(sortDir === "asc" ? "desc" : "asc");
-    } else {
-      setSortKey(key);
-      setSortDir("asc");
-    }
-  };
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const base = q
-      ? groups.filter(
-          (g) =>
-            (g.group_name ?? "").toLowerCase().includes(q) ||
-            g.group_id.toLowerCase().includes(q),
-        )
-      : groups;
-    if (sortKey === null) return base;
-    const sorted = [...base];
-    sorted.sort((a, b) => {
-      const av =
-        sortKey === "channel" ? (a.channel_name ?? "") : (a.group_name?.trim() || a.group_id);
-      const bv =
-        sortKey === "channel" ? (b.channel_name ?? "") : (b.group_name?.trim() || b.group_id);
-      const cmp = av.localeCompare(bv, "zh-TW");
-      return sortDir === "asc" ? cmp : -cmp;
-    });
-    return sorted;
-  }, [groups, query, sortKey, sortDir]);
 
   if (groupsQuery.isLoading) {
     return (
@@ -194,8 +240,7 @@ export function LineGroupsContent() {
           )}
         >
           <span>
-            我的推播設定{" "}
-            <span className="font-semibold tabular-nums text-ink">{groupsUsed}</span> /{" "}
+            我的推播設定 <span className="font-semibold tabular-nums text-ink">{groupsUsed}</span> /{" "}
             <span className="tabular-nums">{groupCap}</span>
             {sharedGroupsCount > 0 && (
               <span className="ml-3 text-gray-300">
@@ -206,78 +251,130 @@ export function LineGroupsContent() {
           {atLimit && <span className="font-semibold">已達上限</span>}
         </div>
       )}
-      <div className="mb-3 flex items-center gap-2">
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.currentTarget.value)}
-          placeholder="搜尋群組名稱或 ID"
-          className="h-9 w-full rounded-lg border border-border bg-white px-3 text-[13px] outline-none focus:border-orange"
+
+      {/* OA tabs */}
+      <div
+        className="mb-3 flex gap-1 overflow-x-auto rounded-lg bg-bg p-1"
+        role="tablist"
+        aria-label="LINE 官方帳號"
+      >
+        {oaTabs.map((tab) => {
+          const active = tab.key === activeOa?.key;
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setSelectedOaKey(tab.key)}
+              className={cn(
+                "flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] transition-colors",
+                active
+                  ? "bg-white font-semibold text-orange shadow-sm"
+                  : "text-gray-500 hover:text-orange",
+              )}
+            >
+              <span>{tab.name}</span>
+              <span
+                className={cn(
+                  "rounded-full px-1.5 text-[10px] tabular-nums",
+                  active ? "bg-orange-bg text-orange" : "bg-white text-gray-300",
+                )}
+              >
+                {tab.count}
+              </span>
+              {tab.role === "viewer" && (
+                <span className="rounded-full bg-gray-100 px-1 text-[9px] font-semibold text-gray-500">
+                  唯讀
+                </span>
+              )}
+              {tab.role === "admin" && (
+                <span className="rounded-full bg-emerald-50 px-1 text-[9px] font-semibold text-emerald-600">
+                  共享
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-[190px_minmax(0,1fr)]">
+        <FolderSidebar
+          channelId={activeOa?.channelId ?? null}
+          folders={oaFolders}
+          selected={selectedFolder}
+          onSelect={setSelectedFolder}
+          allCount={oaGroups.length}
+          uncategorisedCount={uncategorisedCount}
+          canManage={canManageFolders}
         />
-        <span className="shrink-0 text-[11px] text-gray-300">
-          {filtered.length} / {groups.length}
-        </span>
+
+        <div className="min-w-0">
+          <div className="mb-3 flex items-center gap-2">
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.currentTarget.value)}
+              placeholder={`在「${activeOa?.name ?? ""}」搜尋群組名稱或 ID`}
+              className="h-9 w-full rounded-lg border border-border bg-white px-3 text-[13px] outline-none focus:border-orange"
+            />
+            <span className="shrink-0 text-[11px] text-gray-300">
+              {visibleGroups.length} / {oaGroups.length}
+            </span>
+          </div>
+          <div className="overflow-x-auto rounded-xl border border-border bg-white">
+            <table className="w-full min-w-[560px] border-collapse text-[13px]">
+              <thead className="border-b border-border bg-bg text-left">
+                <tr>
+                  <th className="w-12 px-3 py-2 font-semibold text-gray-500">No.</th>
+                  <th className="px-3 py-2 font-semibold text-gray-500">群組</th>
+                  <th className="w-32 px-3 py-2 font-semibold text-gray-500">資料夾</th>
+                  <th className="px-3 py-2 font-semibold text-gray-500">已設定的推播</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleGroups.length === 0 ? (
+                  <tr>
+                    <td className="px-3 py-4 text-center text-[12px] text-gray-300" colSpan={4}>
+                      {query.trim() ? "無符合搜尋條件的群組" : "此分類尚無群組"}
+                    </td>
+                  </tr>
+                ) : (
+                  visibleGroups.map((g, idx) => {
+                    const displayName = g.group_name?.trim() || g.group_id;
+                    return (
+                      <GroupRow
+                        key={g.group_id}
+                        no={idx + 1}
+                        group={g}
+                        folders={oaFolders}
+                        canManageFolders={canManageFolders}
+                        accessibleAccountIds={accessibleAccountIds}
+                        canEdit={g.my_role === "owner" || g.my_role === "admin"}
+                        onAddPush={() =>
+                          tryAddPush({
+                            groupId: g.group_id,
+                            groupDisplayName: displayName,
+                            editing: null,
+                          })
+                        }
+                        onEditPush={(cfg) =>
+                          setEditTarget({
+                            groupId: g.group_id,
+                            groupDisplayName: displayName,
+                            editing: cfg,
+                          })
+                        }
+                      />
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
-      <div className="overflow-x-auto rounded-xl border border-border bg-white">
-        <table className="w-full min-w-[640px] border-collapse text-[13px]">
-          <thead className="border-b border-border bg-bg text-left">
-            <tr>
-              <th className="w-12 px-3 py-2 font-semibold text-gray-500">No.</th>
-              <SortableTh
-                label="推播官方帳號"
-                active={sortKey === "channel"}
-                dir={sortDir}
-                onClick={() => onSort("channel")}
-              />
-              <SortableTh
-                label="群組"
-                active={sortKey === "group"}
-                dir={sortDir}
-                onClick={() => onSort("group")}
-              />
-              <th className="px-3 py-2 font-semibold text-gray-500">已設定的推播</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.length === 0 ? (
-              <tr>
-                <td className="px-3 py-4 text-center text-[12px] text-gray-300" colSpan={4}>
-                  無符合搜尋條件的群組
-                </td>
-              </tr>
-            ) : (
-              filtered.map((g, idx) => {
-                const displayName = g.group_name?.trim() || g.group_id;
-                return (
-                  <GroupRow
-                    key={g.group_id}
-                    no={idx + 1}
-                    group={g}
-                    accessibleAccountIds={accessibleAccountIds}
-                    // canEdit = owner OR admin grantee. Viewers see
-                    // configs but no add/edit/delete/test buttons.
-                    canEdit={g.my_role === "owner" || g.my_role === "admin"}
-                    onAddPush={() =>
-                      tryAddPush({
-                        groupId: g.group_id,
-                        groupDisplayName: displayName,
-                        editing: null,
-                      })
-                    }
-                    onEditPush={(cfg) =>
-                      setEditTarget({
-                        groupId: g.group_id,
-                        groupDisplayName: displayName,
-                        editing: cfg,
-                      })
-                    }
-                  />
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
+
       {editTarget && (
         <GroupPushConfigModal
           open={!!editTarget}
@@ -293,40 +390,264 @@ export function LineGroupsContent() {
   );
 }
 
-function SortableTh({
-  label,
-  active,
-  dir,
-  onClick,
+// ── Left folder list (per-OA categorisation) ──────────────────
+
+function FolderSidebar({
+  channelId,
+  folders,
+  selected,
+  onSelect,
+  allCount,
+  uncategorisedCount,
+  canManage,
 }: {
-  label: string;
-  active: boolean;
-  dir: "asc" | "desc";
-  onClick: () => void;
+  channelId: string | null;
+  folders: LineGroupFolder[];
+  selected: string;
+  onSelect: (folder: string) => void;
+  allCount: number;
+  uncategorisedCount: number;
+  canManage: boolean;
 }) {
-  return (
-    <th className="px-3 py-2 font-semibold text-gray-500">
+  const createMutation = useCreateLineFolder();
+  const updateMutation = useUpdateLineFolder();
+  const deleteMutation = useDeleteLineFolder();
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameName, setRenameName] = useState("");
+
+  const onCreate = async () => {
+    const name = newName.trim();
+    if (!name || !channelId) return;
+    try {
+      await createMutation.mutateAsync({ channelId, name });
+      setNewName("");
+      setAdding(false);
+      toast("已新增資料夾", "success");
+    } catch (e) {
+      toast(`新增失敗:${e instanceof Error ? e.message : String(e)}`, "error", 4500);
+    }
+  };
+
+  const onRename = async (id: string) => {
+    const name = renameName.trim();
+    if (!name) return;
+    try {
+      await updateMutation.mutateAsync({ folderId: id, body: { name } });
+      setRenamingId(null);
+      toast("已更名", "success");
+    } catch (e) {
+      toast(`更名失敗:${e instanceof Error ? e.message : String(e)}`, "error", 4500);
+    }
+  };
+
+  const onDelete = async (f: LineGroupFolder) => {
+    const ok = await confirm(
+      `確定要刪除資料夾「${f.name}」？裡面的 ${f.group_count} 個群組會移回「未分類」,不會被刪除。`,
+    );
+    if (!ok) return;
+    try {
+      await deleteMutation.mutateAsync(f.id);
+      if (selected === f.id) onSelect(FOLDER_ALL);
+      toast("已刪除資料夾", "success");
+    } catch (e) {
+      toast(`刪除失敗:${e instanceof Error ? e.message : String(e)}`, "error", 4500);
+    }
+  };
+
+  const chip = (key: string, label: string, count: number) => {
+    const active = selected === key;
+    return (
       <button
+        key={key}
         type="button"
-        onClick={onClick}
+        onClick={() => onSelect(key)}
         className={cn(
-          "flex items-center gap-1 hover:text-orange",
-          active && "text-orange",
+          "flex shrink-0 items-center justify-between gap-2 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-[12px] transition-colors md:w-full",
+          active
+            ? "bg-orange-bg font-semibold text-orange"
+            : "text-gray-500 hover:bg-bg hover:text-ink",
         )}
-        aria-sort={active ? (dir === "asc" ? "ascending" : "descending") : "none"}
       >
-        <span>{label}</span>
-        <span className="text-[9px] leading-none">
-          {active ? (dir === "asc" ? "▲" : "▼") : "↕"}
-        </span>
+        <span className="truncate">{label}</span>
+        <span className="shrink-0 tabular-nums text-[10px] text-gray-300">{count}</span>
       </button>
-    </th>
+    );
+  };
+
+  return (
+    <aside className="md:sticky md:top-0 md:self-start">
+      <div className="flex gap-1 overflow-x-auto rounded-lg border border-border bg-white p-1.5 md:flex-col md:gap-0.5">
+        {chip(FOLDER_ALL, "全部", allCount)}
+        {chip(FOLDER_NONE, "未分類", uncategorisedCount)}
+        {folders.length > 0 && <div className="my-1 hidden border-t border-border md:block" />}
+        {folders.map((f) => {
+          const active = selected === f.id;
+          if (renamingId === f.id) {
+            return (
+              <div key={f.id} className="flex shrink-0 items-center gap-1 px-1 py-0.5 md:w-full">
+                <input
+                  ref={(el) => el?.focus()}
+                  value={renameName}
+                  onChange={(e) => setRenameName(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void onRename(f.id);
+                    if (e.key === "Escape") setRenamingId(null);
+                  }}
+                  className="h-7 w-full min-w-[90px] rounded border border-orange px-1.5 text-[12px] outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => void onRename(f.id)}
+                  className="shrink-0 rounded px-1 text-[11px] text-orange hover:underline"
+                >
+                  存
+                </button>
+              </div>
+            );
+          }
+          return (
+            <div
+              key={f.id}
+              className={cn(
+                "group/folder flex shrink-0 items-center gap-1 rounded-lg md:w-full",
+                active && "bg-orange-bg",
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => onSelect(f.id)}
+                className={cn(
+                  "flex min-w-0 flex-1 items-center justify-between gap-2 whitespace-nowrap px-2.5 py-1.5 text-[12px]",
+                  active ? "font-semibold text-orange" : "text-gray-500 hover:text-ink",
+                )}
+              >
+                <span className="truncate">{f.name}</span>
+                <span className="shrink-0 tabular-nums text-[10px] text-gray-300">
+                  {f.group_count}
+                </span>
+              </button>
+              {canManage && (
+                <div
+                  className={cn(
+                    "flex shrink-0 items-center gap-0.5 pr-1",
+                    "opacity-0 group-hover/folder:opacity-100",
+                    active && "opacity-100",
+                  )}
+                >
+                  <button
+                    type="button"
+                    title="更名"
+                    onClick={() => {
+                      setRenamingId(f.id);
+                      setRenameName(f.name);
+                    }}
+                    className="rounded px-1 text-[11px] text-gray-400 hover:text-orange"
+                  >
+                    改名
+                  </button>
+                  <button
+                    type="button"
+                    title="刪除"
+                    onClick={() => void onDelete(f)}
+                    className="rounded px-1 text-[11px] text-gray-400 hover:text-red"
+                  >
+                    刪
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {canManage &&
+          (adding ? (
+            <div className="flex shrink-0 items-center gap-1 px-1 py-0.5 md:w-full">
+              <input
+                ref={(el) => el?.focus()}
+                value={newName}
+                onChange={(e) => setNewName(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void onCreate();
+                  if (e.key === "Escape") {
+                    setAdding(false);
+                    setNewName("");
+                  }
+                }}
+                placeholder="資料夾名稱"
+                className="h-7 w-full min-w-[90px] rounded border border-orange px-1.5 text-[12px] outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => void onCreate()}
+                disabled={createMutation.isPending}
+                className="shrink-0 rounded px-1 text-[11px] text-orange hover:underline disabled:opacity-50"
+              >
+                新增
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAdding(true)}
+              className="shrink-0 whitespace-nowrap rounded-lg border border-dashed border-border px-2.5 py-1.5 text-[12px] text-gray-500 hover:border-orange hover:text-orange md:w-full md:text-left"
+            >
+              + 新增資料夾
+            </button>
+          ))}
+      </div>
+    </aside>
+  );
+}
+
+/** Per-row control to move a group into / out of a folder. */
+function GroupFolderSelect({
+  group,
+  folders,
+  canManage,
+}: {
+  group: LineGroup;
+  folders: LineGroupFolder[];
+  canManage: boolean;
+}) {
+  const setFolder = useSetLineGroupFolder();
+  const current = folders.find((f) => f.id === group.folder_id);
+
+  if (!canManage) {
+    return <span className="text-[12px] text-gray-500">{current?.name ?? "未分類"}</span>;
+  }
+
+  return (
+    <select
+      value={group.folder_id ?? ""}
+      disabled={setFolder.isPending}
+      onChange={(e) => {
+        const v = e.currentTarget.value;
+        void setFolder
+          .mutateAsync({ groupId: group.group_id, folderId: v || null })
+          .then(() => toast("已移動群組", "success"))
+          .catch((err) =>
+            toast(`移動失敗:${err instanceof Error ? err.message : String(err)}`, "error", 4500),
+          );
+      }}
+      className="h-7 w-full max-w-[120px] rounded border border-border bg-white px-1.5 text-[12px] text-ink outline-none focus:border-orange disabled:opacity-50"
+    >
+      <option value="">未分類</option>
+      {folders.map((f) => (
+        <option key={f.id} value={f.id}>
+          {f.name}
+        </option>
+      ))}
+    </select>
   );
 }
 
 function GroupRow({
   no,
   group,
+  folders,
+  canManageFolders,
   accessibleAccountIds,
   canEdit,
   onAddPush,
@@ -334,9 +655,10 @@ function GroupRow({
 }: {
   no: number;
   group: LineGroup;
+  folders: LineGroupFolder[];
+  canManageFolders: boolean;
   accessibleAccountIds: Set<string>;
-  /** Caller can mutate configs (add / edit / delete / test).
-   *  False for viewer-role grantees → read-only display. */
+  /** Caller can mutate configs (add / edit / delete / test). */
   canEdit: boolean;
   onAddPush: () => void;
   onEditPush: (cfg: LinePushConfig) => void;
@@ -348,33 +670,6 @@ function GroupRow({
     <tr className="border-b border-border last:border-b-0 align-top">
       <td className="px-3 py-2.5 text-center text-[11px] tabular-nums text-gray-300">{no}</td>
       <td className="px-3 py-2.5">
-        {group.channel_name ? (
-          <span className="inline-flex items-center gap-1">
-            <span className="rounded-full bg-orange-bg px-2 py-[1px] text-[11px] font-semibold text-orange">
-              {group.channel_name}
-            </span>
-            {group.my_role === "viewer" && (
-              <span
-                className="rounded-full bg-gray-100 px-1.5 py-[1px] text-[10px] font-semibold text-gray-500"
-                title="你對此官方帳號為唯讀權限"
-              >
-                唯讀
-              </span>
-            )}
-            {group.my_role === "admin" && (
-              <span
-                className="rounded-full bg-emerald-50 px-1.5 py-[1px] text-[10px] font-semibold text-emerald-600"
-                title="你對此官方帳號為管理員權限(共享)"
-              >
-                共享 · 管理員
-              </span>
-            )}
-          </span>
-        ) : (
-          <span className="text-[11px] text-gray-300">—</span>
-        )}
-      </td>
-      <td className="px-3 py-2.5">
         <span
           className={cn("block truncate font-bold", hasName ? "text-ink" : "text-gray-300")}
           title={displayName}
@@ -383,7 +678,9 @@ function GroupRow({
         </span>
         <div className="mt-0.5 truncate font-mono text-[10px] text-gray-300">{group.group_id}</div>
       </td>
-
+      <td className="px-3 py-2.5">
+        <GroupFolderSelect group={group} folders={folders} canManage={canManageFolders} />
+      </td>
       <td className="px-3 py-2.5">
         <GroupPushConfigsList
           groupId={group.group_id}
@@ -413,8 +710,6 @@ function GroupPushConfigsList({
 }) {
   const query = useLineGroupPushConfigs(groupId);
   const allConfigs = query.data ?? [];
-  // Hide configs whose account_id isn't in the current FB user's
-  // accessible set — they belong to a teammate's account scope.
   const configs = useMemo(
     () => allConfigs.filter((c) => accessibleAccountIds.has(c.account_id)),
     [allConfigs, accessibleAccountIds],
@@ -452,21 +747,14 @@ function PushConfigRow({
   onEdit,
 }: {
   cfg: LinePushConfig & { campaign_nickname?: string };
-  /** Owner OR admin grantee: full edit. Viewer / no-access: read-only. */
   canEdit: boolean;
   onEdit: (cfg: LinePushConfig) => void;
 }) {
-  // Display fallback: nickname (店家·設計師) → cached FB campaign name
-  // → campaign_id. Cached name comes from `campaign_name` persisted on
-  // the row at save-time, so the user sees「ICONI 南京 · Cherry 燙髮」
-  // instead of「6949544757391」when no team-wide nickname is set.
   const name = cfg.campaign_nickname?.trim() || cfg.campaign_name?.trim() || cfg.campaign_id;
   const dateLabel = formatDateRangeLabel(cfg);
   const rule = formatPushRule(cfg);
   const deleteMutation = useDeleteLinePushConfig();
   const testMutation = useTestLinePush();
-  // Edit controls visible when the caller can write on this OA.
-  // canEdit is true for owners and admin-role grantees.
   const editable = canEdit;
 
   const onUnbind = async () => {

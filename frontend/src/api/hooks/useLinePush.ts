@@ -57,7 +57,10 @@ export function useUpdateLineChannel() {
   const qc = useQueryClient();
   const { user } = useFbAuth();
   return useMutation({
-    mutationFn: ({ id, body }: { id: string; body: Parameters<typeof api.lineChannels.update>[2] }) =>
+    mutationFn: ({
+      id,
+      body,
+    }: { id: string; body: Parameters<typeof api.lineChannels.update>[2] }) =>
       api.lineChannels.update(user?.id ?? "", id, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: CHANNELS_KEY });
@@ -168,5 +171,76 @@ export function useTestLinePush() {
   const { user } = useFbAuth();
   return useMutation({
     mutationFn: (id: string) => api.linePush.test(user?.id ?? "", id),
+  });
+}
+
+// ── Group folders (per-OA categorisation) ─────────────────────
+
+const FOLDERS_KEY = ["lineFolders"] as const;
+
+export function useLineGroupFolders() {
+  const { user } = useFbAuth();
+  const uid = user?.id ?? "";
+  return useQuery({
+    queryKey: ["lineFolders", uid] as const,
+    queryFn: async () => (await api.lineFolders.list(uid)).data,
+    enabled: !!uid,
+    staleTime: 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+  });
+}
+
+export function useCreateLineFolder() {
+  const qc = useQueryClient();
+  const { user } = useFbAuth();
+  return useMutation({
+    mutationFn: ({ channelId, name }: { channelId: string; name: string }) =>
+      api.lineFolders.create(user?.id ?? "", channelId, name),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: FOLDERS_KEY });
+    },
+  });
+}
+
+export function useUpdateLineFolder() {
+  const qc = useQueryClient();
+  const { user } = useFbAuth();
+  return useMutation({
+    mutationFn: ({
+      folderId,
+      body,
+    }: {
+      folderId: string;
+      body: { name?: string; sort_order?: number };
+    }) => api.lineFolders.update(user?.id ?? "", folderId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: FOLDERS_KEY });
+    },
+  });
+}
+
+export function useDeleteLineFolder() {
+  const qc = useQueryClient();
+  const { user } = useFbAuth();
+  return useMutation({
+    mutationFn: (folderId: string) => api.lineFolders.delete(user?.id ?? "", folderId),
+    onSuccess: () => {
+      // Deleting a folder un-categorises its groups → refetch both.
+      qc.invalidateQueries({ queryKey: FOLDERS_KEY });
+      qc.invalidateQueries({ queryKey: GROUPS_KEY });
+    },
+  });
+}
+
+export function useSetLineGroupFolder() {
+  const qc = useQueryClient();
+  const { user } = useFbAuth();
+  return useMutation({
+    mutationFn: ({ groupId, folderId }: { groupId: string; folderId: string | null }) =>
+      api.linePush.setGroupFolder(user?.id ?? "", groupId, folderId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: GROUPS_KEY });
+      qc.invalidateQueries({ queryKey: FOLDERS_KEY });
+    },
   });
 }
