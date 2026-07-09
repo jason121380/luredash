@@ -27,9 +27,11 @@ export interface FinanceState {
   pinnedIds: string[];
   defaultMarkup: number;
   showNicknames: boolean;
-  /** Dashboard report KPI selection (team-wide). null = each report's
-   *  built-in default layout; non-null = only these KPI codes. */
-  reportFields: string[] | null;
+  /** Dashboard report KPI selection, **per campaign** (team-wide). The
+   *  value array is ORDERED — it drives both which KPIs show and their
+   *  order (drag-to-reorder). A campaign with no entry → each report's
+   *  built-in default layout. */
+  reportFieldsByCampaign: Record<string, string[]>;
 
   /** One-way seed from server — set by SettingsProvider on first load.
    * Does NOT trigger a POST back. */
@@ -38,14 +40,16 @@ export interface FinanceState {
     pinnedIds: string[];
     defaultMarkup: number;
     showNicknames: boolean;
-    reportFields: string[] | null;
+    reportFieldsByCampaign: Record<string, string[]>;
   }) => void;
 
   setRowMarkup: (campaignId: string, percent: number) => void;
   togglePin: (campaignId: string) => void;
   setDefaultMarkup: (v: number) => void;
   setShowNicknames: (v: boolean) => void;
-  setReportFields: (v: string[] | null) => void;
+  /** Set (or clear with null) the ordered KPI selection for one
+   *  campaign. Persists the whole map team-wide. */
+  setReportFields: (campaignId: string, v: string[] | null) => void;
 }
 
 // Typed-input writers (markup %) are debounced so we don't POST on
@@ -77,12 +81,12 @@ const postShowNicknames = (v: boolean) => {
     .then(invalidateSharedSettings)
     .catch(() => {});
 };
-const postReportFields = (v: string[] | null) => {
+const postReportFields = debounce((m: Record<string, string[]>) => {
   api.settings
-    .setShared("report_selected_fields", v)
+    .setShared("report_selected_fields", m)
     .then(invalidateSharedSettings)
     .catch(() => {});
-};
+}, 500);
 
 // Belt-and-suspenders for the debounced typed-input writers: if the
 // user navigates away mid-debounce, flush the pending write so the
@@ -92,6 +96,7 @@ if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", () => {
     postRowMarkups.flush();
     postDefaultMarkup.flush();
+    postReportFields.flush();
   });
 }
 
@@ -100,10 +105,15 @@ export const useFinanceStore = create<FinanceState>((set) => ({
   pinnedIds: [],
   defaultMarkup: 5,
   showNicknames: true,
-  reportFields: null,
+  reportFieldsByCampaign: {},
 
-  hydrateFromServer: ({ rowMarkups, pinnedIds, defaultMarkup, showNicknames, reportFields }) =>
-    set({ rowMarkups, pinnedIds, defaultMarkup, showNicknames, reportFields }),
+  hydrateFromServer: ({
+    rowMarkups,
+    pinnedIds,
+    defaultMarkup,
+    showNicknames,
+    reportFieldsByCampaign,
+  }) => set({ rowMarkups, pinnedIds, defaultMarkup, showNicknames, reportFieldsByCampaign }),
 
   setRowMarkup: (campaignId, percent) =>
     set((state) => {
@@ -129,10 +139,16 @@ export const useFinanceStore = create<FinanceState>((set) => ({
     set({ showNicknames: v });
     postShowNicknames(v);
   },
-  setReportFields: (v) => {
-    set({ reportFields: v });
-    postReportFields(v);
-  },
+  setReportFields: (campaignId, v) =>
+    set((state) => {
+      const next = { ...state.reportFieldsByCampaign };
+      // null → clear (back to built-in default). An array (incl. empty,
+      // while the picker is mid-edit) is stored so the picker stays open.
+      if (v === null) delete next[campaignId];
+      else next[campaignId] = v;
+      postReportFields(next);
+      return { reportFieldsByCampaign: next };
+    }),
 }));
 
 // Settings persistence lives in PostgreSQL now. These helpers remain

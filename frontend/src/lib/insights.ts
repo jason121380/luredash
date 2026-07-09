@@ -62,6 +62,18 @@ export function getShares(item: FbBaseEntity): number {
   return sumAction(item, "post");
 }
 
+/** 收藏數 — FB usually keys saves as `onsite_conversion.post_save`;
+ *  some placements report a bare `post_save`. First-found wins. 0 when
+ *  no one saved (or the placement doesn't report saves). */
+export function getPostSaves(item: FbBaseEntity): number {
+  const actions = getIns(item).actions ?? [];
+  for (const type of ["onsite_conversion.post_save", "post_save"]) {
+    const hit = actions.find((a) => a.action_type === type);
+    if (hit) return Number(hit.value) || 0;
+  }
+  return 0;
+}
+
 /** Average seconds the video was watched. 0 for non-video creatives
  *  (FB omits `video_avg_time_watched_actions` for them). */
 export function getAvgWatchSeconds(item: FbBaseEntity): number {
