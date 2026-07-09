@@ -95,6 +95,8 @@ export function ShareReportPage() {
               date={date}
               useSpendPlus={useSpendPlus}
               markupPercent={markupPercent}
+              selectedFields={selectedFields}
+              disablePreview
             />
           ) : (
             <ReportContent
@@ -109,6 +111,7 @@ export function ShareReportPage() {
               markupPercent={markupPercent}
               showRecommendations={showRecommendations}
               selectedFields={selectedFields}
+              disablePreview
             />
           )}
         </div>

@@ -23,7 +23,8 @@ import { cn } from "@/lib/cn";
 import { DEFAULT_REPORT_FIELDS } from "@/lib/reportFields";
 import { formatNickname } from "@/views/finance/financeData";
 import * as Popover from "@radix-ui/react-popover";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import type React from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * Group-side push config editor — opened from the LINE 群組管理 table.
@@ -83,6 +84,8 @@ interface PerFreqState {
   reportFields: string[];
   /** Show「查看完整報告」footer button on the flex card. */
   includeReportButton: boolean;
+  /** Which report version the button links to. */
+  reportVariant: "standard" | "perf";
   /** Render「優化建議」bullet list in the flex body. */
   includeRecommendations: boolean;
   /** ISO YYYY-MM-DD; only meaningful when dateRange === "custom". */
@@ -129,6 +132,7 @@ const blankFreq = (): PerFreqState => ({
   dateRange: "month_to_yesterday",
   reportFields: ["spend_plus", "msgs", "msg_cost"],
   includeReportButton: false,
+  reportVariant: "standard",
   includeRecommendations: false,
   customFrom: "",
   customTo: "",
@@ -167,6 +171,7 @@ function freqFromConfig(c: LinePushConfig): PerFreqState {
     // explicit default list so the UI checkboxes start populated.
     reportFields: c.report_fields?.length ? c.report_fields : [...DEFAULT_REPORT_FIELDS],
     includeReportButton: !!c.include_report_button,
+    reportVariant: c.report_variant === "perf" ? "perf" : "standard",
     includeRecommendations: !!c.include_recommendations,
     customFrom: c.date_from ?? "",
     customTo: c.date_to ?? "",
@@ -336,13 +341,12 @@ export function GroupPushConfigModal({
           enabled: true,
           report_fields: s.reportFields,
           include_report_button: s.includeReportButton,
+          report_variant: s.reportVariant,
           include_recommendations: s.includeRecommendations,
           campaign_name: state.campaignName,
           adset_ids: effectiveAdsetIds,
           ad_ids: effectiveAdIds,
-          ...(s.dateRange === "custom"
-            ? { date_from: s.customFrom, date_to: s.customTo }
-            : {}),
+          ...(s.dateRange === "custom" ? { date_from: s.customFrom, date_to: s.customTo } : {}),
         };
         await saveMutation.mutateAsync(payload);
       }
@@ -677,16 +681,36 @@ export function GroupPushConfigModal({
         />
 
         {/* Footer report-button toggle. Default off so old configs keep
-            their "no button" behaviour after migration. */}
-        <label className="flex items-center gap-2 text-[13px] text-ink">
-          <input
-            type="checkbox"
-            className="custom-cb"
-            checked={active.includeReportButton}
-            onChange={(e) => updateActive({ includeReportButton: e.currentTarget.checked })}
-          />
-          是否出現按鈕
-        </label>
+            their "no button" behaviour after migration. When on, a
+            dropdown picks which report version the button links to. */}
+        <div className="flex flex-col gap-2">
+          <label className="flex items-center gap-2 text-[13px] text-ink">
+            <input
+              type="checkbox"
+              className="custom-cb"
+              checked={active.includeReportButton}
+              onChange={(e) => updateActive({ includeReportButton: e.currentTarget.checked })}
+            />
+            是否出現按鈕
+          </label>
+          {active.includeReportButton && (
+            <label className="ml-6 flex items-center gap-2 text-[12px] text-gray-500">
+              <span className="whitespace-nowrap">報告版本</span>
+              <select
+                value={active.reportVariant}
+                onChange={(e) =>
+                  updateActive({
+                    reportVariant: e.currentTarget.value === "perf" ? "perf" : "standard",
+                  })
+                }
+                className="h-8 rounded-lg border border-border bg-white px-2 text-[12px] text-ink outline-none focus:border-orange"
+              >
+                <option value="standard">以廣告組合報告</option>
+                <option value="perf">以廣告報告</option>
+              </select>
+            </label>
+          )}
+        </div>
 
         {/* Recommendations toggle. Default off — many recipients are
             external (業主) and only want raw numbers. */}
@@ -978,9 +1002,7 @@ function AdsetMultiPicker({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return adsets;
-    return adsets.filter(
-      (a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q),
-    );
+    return adsets.filter((a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q));
   }, [adsets, query]);
 
   const toggle = (id: string) => {
@@ -1058,9 +1080,7 @@ function AdsetMultiPicker({
             }}
           >
             {adsetsQuery.isLoading ? (
-              <div className="px-2 py-3 text-center text-[12px] text-gray-300">
-                載入中...
-              </div>
+              <div className="px-2 py-3 text-center text-[12px] text-gray-300">載入中...</div>
             ) : filtered.length === 0 ? (
               <div className="px-2 py-3 text-center text-[12px] text-gray-300">
                 {adsets.length === 0 ? "此活動沒有廣告組合" : "無符合的項目"}

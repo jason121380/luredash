@@ -55,6 +55,10 @@ export interface LinePushConfig {
   report_fields: string[];
   /** Show the「查看完整報告」footer button on the LINE flex card. */
   include_report_button: boolean;
+  /** Which report version that button links to: "standard" (以廣告組合
+   *  報告) or "perf" (以廣告報告 / 素材成效). Only used when
+   *  include_report_button is true. */
+  report_variant: "standard" | "perf";
   /** Render the「優化建議」bullet list in the flex body. */
   include_recommendations: boolean;
   /** Cached FB campaign name at save-time. Falls back to ID when empty. */
@@ -105,6 +109,7 @@ export interface LinePushConfigInput {
   enabled: boolean;
   report_fields?: string[];
   include_report_button?: boolean;
+  report_variant?: "standard" | "perf";
   include_recommendations?: boolean;
   /** FB campaign name; cached on the row at save-time so the group
    *  management UI doesn't have to fall back to the bare campaign_id. */

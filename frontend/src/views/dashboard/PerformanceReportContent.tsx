@@ -5,9 +5,11 @@ import { type DateConfig, resolveRange } from "@/lib/datePicker";
 import { fM, fN, fP } from "@/lib/format";
 import { getAvgWatchSeconds, getIns, getPostReactions, getShares } from "@/lib/insights";
 import { translateObjective } from "@/lib/objective";
+import { isTrafficObjective } from "@/lib/recommendations";
 import type { FbAdset, FbCampaign, FbCreativeEntity } from "@/types/fb";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
+import { buildKpiCells, pickCells } from "./ReportContent";
 
 /**
  * 成效報告 — creative-performance view of a single campaign, modelled on
@@ -45,6 +47,13 @@ export interface PerformanceReportContentProps {
   /** When true, 花費 renders as 花費* using the marked-up amount. */
   useSpendPlus?: boolean;
   markupPercent?: number;
+  /** KPI codes to show in the campaign header. null → the built-in
+   *  花費 / 曝光 / 觸及 / CPC / CTR set. Per-creative card metrics are
+   *  unaffected (they're the report's fixed core). */
+  selectedFields?: string[] | null;
+  /** When true (public share link), creative cards are view-only — no
+   *  click-to-enlarge preview modal. */
+  disablePreview?: boolean;
 }
 
 export function PerformanceReportContent({
@@ -57,6 +66,8 @@ export function PerformanceReportContent({
   date,
   useSpendPlus = false,
   markupPercent = 0,
+  selectedFields = null,
+  disablePreview = false,
 }: PerformanceReportContentProps) {
   const ins = getIns(campaign);
 
@@ -69,6 +80,21 @@ export function PerformanceReportContent({
     if (!Number.isFinite(raw) || raw === 0) return money(ins.spend);
     return `$${fM(useSpendPlus ? Math.ceil(raw * (1 + markupPercent / 100)) : raw)}`;
   })();
+
+  // When the user picked specific KPI fields, render exactly those in
+  // the campaign header (shared catalog with the standard report).
+  const headerCells = selectedFields?.length
+    ? pickCells(
+        buildKpiCells(campaign, {
+          hideMoney,
+          spendLabel,
+          applyMarkup: (raw: number) =>
+            useSpendPlus ? Math.ceil(raw * (1 + markupPercent / 100)) : raw,
+          trafficMode: isTrafficObjective(campaign.objective),
+        }),
+        selectedFields,
+      )
+    : null;
 
   // Fetch ads for every adset that spent, reusing the shared report-ads
   // cache. Ranking across the whole campaign needs all of them.
@@ -125,11 +151,19 @@ export function PerformanceReportContent({
 
       {/* Campaign KPIs */}
       <div className="grid grid-cols-2 gap-2.5 md:grid-cols-5">
-        <Stat label={spendLabel} value={spendValue} highlight />
-        <Stat label="曝光" value={fN(ins.impressions)} />
-        <Stat label="觸及" value={fN(ins.reach)} />
-        <Stat label="CPC" value={money(ins.cpc)} />
-        <Stat label="CTR" value={fP(ins.ctr)} highlight />
+        {headerCells ? (
+          headerCells.map((c) => (
+            <Stat key={c.code} label={c.label} value={c.value} highlight={c.highlight} />
+          ))
+        ) : (
+          <>
+            <Stat label={spendLabel} value={spendValue} highlight />
+            <Stat label="曝光" value={fN(ins.impressions)} />
+            <Stat label="觸及" value={fN(ins.reach)} />
+            <Stat label="CPC" value={money(ins.cpc)} />
+            <Stat label="CTR" value={fP(ins.ctr)} highlight />
+          </>
+        )}
       </div>
 
       {/* All spending ads, ranked by CTR */}
@@ -163,6 +197,7 @@ export function PerformanceReportContent({
                 ad={s.ad}
                 campaignName={campaign.name}
                 money={money}
+                disablePreview={disablePreview}
               />
             ))}
           </div>
@@ -177,11 +212,13 @@ function CreativeCard({
   ad,
   campaignName,
   money,
+  disablePreview,
 }: {
   rank: number;
   ad: FbCreativeEntity;
   campaignName: string;
   money: (v: number | string | null | undefined) => string;
+  disablePreview: boolean;
 }) {
   const ai = getIns(ad);
   const reactions = getPostReactions(ad);
@@ -208,7 +245,7 @@ function CreativeCard({
   const img =
     ad.creative?.image_url || hiresQuery.data?.thumbnail_url || ad.creative?.thumbnail_url;
   const [previewOpen, setPreviewOpen] = useState(false);
-  const canPreview = Boolean(ad.creative?.thumbnail_url);
+  const canPreview = Boolean(ad.creative?.thumbnail_url) && !disablePreview;
 
   return (
     <div
