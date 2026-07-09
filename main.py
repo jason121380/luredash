@@ -733,6 +733,16 @@ async def lifespan(app: FastAPI):
                     ADD COLUMN IF NOT EXISTS include_report_button BOOLEAN NOT NULL DEFAULT FALSE
                     """
                 )
+                # Migration (2026-07-09): which report version the 查看完整
+                # 報告 button links to — 'standard' (以廣告組合報告) or
+                # 'perf' (以廣告報告 / 素材成效). Only meaningful when
+                # include_report_button is TRUE.
+                await conn.execute(
+                    """
+                    ALTER TABLE campaign_line_push_configs
+                    ADD COLUMN IF NOT EXISTS report_variant TEXT NOT NULL DEFAULT 'standard'
+                    """
+                )
                 # Migration (2026-04-29): include_recommendations toggles
                 # the 「優化建議」 section in the LINE flex body. Default
                 # FALSE — many recipients are external (業主) and don't
@@ -7334,6 +7344,7 @@ def _share_url_for_config(
     use_spend_plus: bool = False,
     markup_pct: float = 0.0,
     selected_fields: Optional[List[str]] = None,
+    report_variant: str = "standard",
 ) -> Optional[str]:
     """Build the public /r/<campaign_id> share URL when PUBLIC_SITE_URL
     is configured. Returns None otherwise — the caller will simply omit
@@ -7382,6 +7393,9 @@ def _share_url_for_config(
     # its legacy "show everything" layout for non-push share links.
     if selected_fields:
         params["fields"] = ",".join(selected_fields)
+    # 報告版本:'perf' → 以廣告報告(素材成效);其餘 → 標準的以廣告組合報告。
+    if report_variant == "perf":
+        params["report"] = "perf"
     qs = urlencode(params)
     return f"{PUBLIC_SITE_URL}/r/{quote(campaign_id, safe='')}?{qs}"
 
@@ -7747,6 +7761,7 @@ async def _build_flex_for_config(cfg: dict) -> dict:
             use_spend_plus=use_spend_plus,
             markup_pct=markup_pct,
             selected_fields=share_fields,
+            report_variant=str(cfg.get("report_variant") or "standard"),
         )
         if cfg.get("include_report_button")
         else None
@@ -9119,6 +9134,10 @@ class LinePushConfigPayload(BaseModel):
     # When True, append a「查看完整報告」footer button linking to the
     # public share page. Default False so the button is opt-in.
     include_report_button: bool = False
+    # Which report version that button links to: 'standard' (以廣告組合
+    # 報告) or 'perf' (以廣告報告 / 素材成效). Only used when
+    # include_report_button is True.
+    report_variant: str = "standard"
     # When True, render the「優化建議」bullet list in the flex body.
     # Default False — recommendations are opt-in because many recipients
     # are external (業主) and only want raw numbers.
@@ -9156,6 +9175,7 @@ def _config_row_to_dict(r: asyncpg.Record) -> dict:
         "enabled": r["enabled"],
         "report_fields": list(r["report_fields"] or []),
         "include_report_button": bool(r["include_report_button"]),
+        "report_variant": r["report_variant"] or "standard",
         "include_recommendations": bool(r["include_recommendations"]),
         "campaign_name": r["campaign_name"] or "",
         "adset_ids": list(r["adset_ids"] or []),
@@ -9167,6 +9187,12 @@ def _config_row_to_dict(r: asyncpg.Record) -> dict:
         "last_error": r["last_error"],
         "fail_count": r["fail_count"],
     }
+
+
+def _norm_report_variant(v: Optional[str]) -> str:
+    """Whitelist the report-button variant so only known values reach
+    the DB / share URL."""
+    return "perf" if str(v or "").strip() == "perf" else "standard"
 
 
 def _validate_push_payload(p: LinePushConfigPayload) -> None:
@@ -9302,7 +9328,8 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                     include_recommendations = $13, campaign_name = $14,
                     date_from = $15, date_to = $16, adset_ids = $17,
                     ad_ids = $18,
-                    next_run_at = $19, fail_count = 0, last_error = NULL,
+                    next_run_at = $19, report_variant = $21,
+                    fail_count = 0, last_error = NULL,
                     updated_at = NOW()
                 WHERE id = $20::uuid
                 RETURNING *
@@ -9327,6 +9354,7 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                 ad_ids_clean,
                 next_run,
                 payload.id,
+                _norm_report_variant(payload.report_variant),
             )
             if row is None:
                 raise HTTPException(status_code=404, detail="Config not found")
@@ -9341,9 +9369,10 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                     frequency, weekdays, month_day, hour, minute,
                     date_range, enabled, report_fields, include_report_button,
                     include_recommendations, campaign_name,
-                    date_from, date_to, adset_ids, ad_ids, next_run_at
+                    date_from, date_to, adset_ids, ad_ids, next_run_at,
+                    report_variant
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
                 ON CONFLICT (campaign_id, group_id, frequency) DO UPDATE
                 SET account_id = EXCLUDED.account_id,
                     weekdays = EXCLUDED.weekdays,
@@ -9361,6 +9390,7 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                     adset_ids = EXCLUDED.adset_ids,
                     ad_ids = EXCLUDED.ad_ids,
                     next_run_at = EXCLUDED.next_run_at,
+                    report_variant = EXCLUDED.report_variant,
                     fail_count = 0,
                     last_error = NULL,
                     updated_at = NOW()
@@ -9385,6 +9415,7 @@ async def upsert_push_config(payload: LinePushConfigPayload, fb_user_id: Optiona
                 adset_ids_clean,
                 ad_ids_clean,
                 next_run,
+                _norm_report_variant(payload.report_variant),
             )
     return {"ok": True, "data": _config_row_to_dict(row)}
 

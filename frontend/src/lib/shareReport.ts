@@ -35,17 +35,29 @@ export interface ShareReportParams {
    *  Encoded as `?report=perf` so the recipient sees the same version
    *  the operator shared. */
   variant?: "standard" | "perf";
+  /** KPI codes the operator picked (metric selector). Encoded as
+   *  `?fields=a,b,c`; null/empty → the report's built-in layout. */
+  selectedFields?: string[] | null;
 }
 
 /** Build an absolute share URL the user can paste anywhere. */
 export function buildShareUrl(params: ShareReportParams): string {
-  const { campaignId, accountId, hideMoney, datePreset, useSpendPlus, markupPercent, variant } =
-    params;
+  const {
+    campaignId,
+    accountId,
+    hideMoney,
+    datePreset,
+    useSpendPlus,
+    markupPercent,
+    variant,
+    selectedFields,
+  } = params;
   const search = new URLSearchParams();
   search.set("acct", accountId);
   if (hideMoney) search.set("hide", "1");
   if (datePreset) search.set("date", datePreset);
   if (variant === "perf") search.set("report", "perf");
+  if (selectedFields?.length) search.set("fields", selectedFields.join(","));
   if (useSpendPlus) {
     search.set("plus", "1");
     if (markupPercent !== undefined && markupPercent > 0) {

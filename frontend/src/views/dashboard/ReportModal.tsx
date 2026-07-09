@@ -1,10 +1,12 @@
 import { useAdsets } from "@/api/hooks/useAdsets";
 import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
+import { ReportFieldsPicker } from "@/components/ReportFieldsPicker";
 import { toast } from "@/components/Toast";
 import { cn } from "@/lib/cn";
 import type { DateConfig } from "@/lib/datePicker";
 import { toLabel } from "@/lib/datePicker";
+import { DEFAULT_REPORT_FIELDS } from "@/lib/reportFields";
 import { buildShareUrl } from "@/lib/shareReport";
 import { useFinanceStore } from "@/stores/financeStore";
 import type { FbCampaign } from "@/types/fb";
@@ -47,11 +49,17 @@ export function ReportModal({
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
   const [useSpendPlus, setUseSpendPlus] = useState(false);
   const [variant, setVariant] = useState<ReportVariant>("chooser");
+  // null → each report's built-in KPI layout; non-null → only these
+  // KPI codes (metric selector, same catalog as the LINE push picker).
+  const [selectedFields, setSelectedFields] = useState<string[] | null>(null);
 
-  // Always reopen on the chooser step so the user picks a version each
-  // time (matches the "先跳彈窗選格式" flow).
+  // Always reopen on the chooser step + default fields so each open
+  // starts clean (matches the "先跳彈窗選版本" flow).
   useEffect(() => {
-    if (open) setVariant("chooser");
+    if (open) {
+      setVariant("chooser");
+      setSelectedFields(null);
+    }
   }, [open]);
 
   if (!campaign) return null;
@@ -67,6 +75,7 @@ export function ReportModal({
       useSpendPlus,
       markupPercent,
       variant: variant === "perf" ? "perf" : "standard",
+      selectedFields,
     });
     try {
       await navigator.clipboard.writeText(url);
@@ -78,6 +87,7 @@ export function ReportModal({
   };
 
   const isChooser = variant === "chooser";
+  const showFieldPicker = selectedFields !== null;
 
   return (
     <Modal
@@ -86,56 +96,80 @@ export function ReportModal({
       title="行銷活動報告"
       subtitle={isChooser ? "選擇報告版本" : toLabel(date)}
       width={780}
-      footer={
-        isChooser ? null : (
-          <>
+    >
+      {isChooser ? (
+        <VersionChooser onPick={setVariant} campaignName={campaign.name} />
+      ) : (
+        <>
+          {/* Top action row (moved out of the modal footer). */}
+          <div className="mb-3 flex items-center gap-2">
             <Button variant="ghost" size="sm" onClick={() => setVariant("chooser")}>
               ← 換版本
             </Button>
             <Button variant="primary" size="sm" onClick={onShare}>
               複製分享連結
             </Button>
-          </>
-        )
-      }
-    >
-      {isChooser ? (
-        <VersionChooser onPick={setVariant} campaignName={campaign.name} />
-      ) : (
-        <>
-          {/* 花費 / 花費+% mutex toggle — affects every 花費 cell in
-              both report versions (and the share page). */}
-          <div className="mb-4 flex items-center gap-2">
-            <span className="text-[12px] font-semibold text-gray-500">花費顯示</span>
-            <div className="flex gap-1">
+          </div>
+
+          {/* Controls: 花費顯示 mutex toggle + 指標選擇 disclosure. */}
+          <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[12px] font-semibold text-gray-500">花費顯示</span>
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  onClick={() => setUseSpendPlus(false)}
+                  aria-pressed={!useSpendPlus}
+                  className={cn(
+                    "h-7 rounded-full border px-3 text-[11px] font-semibold transition",
+                    !useSpendPlus
+                      ? "border-orange bg-orange-bg text-orange"
+                      : "border-border bg-white text-gray-500 hover:border-orange",
+                  )}
+                >
+                  花費
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUseSpendPlus(true)}
+                  aria-pressed={useSpendPlus}
+                  className={cn(
+                    "h-7 rounded-full border px-3 text-[11px] font-semibold transition",
+                    useSpendPlus
+                      ? "border-orange bg-orange-bg text-orange"
+                      : "border-border bg-white text-gray-500 hover:border-orange",
+                  )}
+                >
+                  花費+{markupPercent}%
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[12px] font-semibold text-gray-500">顯示指標</span>
               <button
                 type="button"
-                onClick={() => setUseSpendPlus(false)}
-                aria-pressed={!useSpendPlus}
+                onClick={() =>
+                  setSelectedFields((prev) => (prev === null ? [...DEFAULT_REPORT_FIELDS] : null))
+                }
+                aria-pressed={showFieldPicker}
                 className={cn(
                   "h-7 rounded-full border px-3 text-[11px] font-semibold transition",
-                  !useSpendPlus
+                  showFieldPicker
                     ? "border-orange bg-orange-bg text-orange"
                     : "border-border bg-white text-gray-500 hover:border-orange",
                 )}
               >
-                花費
-              </button>
-              <button
-                type="button"
-                onClick={() => setUseSpendPlus(true)}
-                aria-pressed={useSpendPlus}
-                className={cn(
-                  "h-7 rounded-full border px-3 text-[11px] font-semibold transition",
-                  useSpendPlus
-                    ? "border-orange bg-orange-bg text-orange"
-                    : "border-border bg-white text-gray-500 hover:border-orange",
-                )}
-              >
-                花費+{markupPercent}%
+                {showFieldPicker ? "自訂中" : "預設"}
               </button>
             </div>
           </div>
+
+          {/* Metric picker — same catalog as the LINE push report. */}
+          {showFieldPicker && (
+            <div className="mb-4 rounded-xl border border-border bg-bg/50 p-3">
+              <ReportFieldsPicker value={selectedFields ?? []} onChange={setSelectedFields} />
+            </div>
+          )}
 
           {variant === "perf" ? (
             <PerformanceReportContent
@@ -148,6 +182,7 @@ export function ReportModal({
               date={date}
               useSpendPlus={useSpendPlus}
               markupPercent={markupPercent}
+              selectedFields={selectedFields}
             />
           ) : (
             <ReportContent
@@ -160,6 +195,7 @@ export function ReportModal({
               date={date}
               useSpendPlus={useSpendPlus}
               markupPercent={markupPercent}
+              selectedFields={selectedFields}
             />
           )}
         </>

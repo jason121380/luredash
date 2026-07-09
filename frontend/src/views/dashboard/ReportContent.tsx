@@ -1,3 +1,4 @@
+import { api } from "@/api/client";
 import { useReportAds } from "@/api/hooks/useReportCampaign";
 import { Badge } from "@/components/Badge";
 import { CreativePreviewModal } from "@/components/CreativePreviewModal";
@@ -17,8 +18,14 @@ import {
 import { translateObjective } from "@/lib/objective";
 import { buildCampaignRecommendations, isTrafficObjective } from "@/lib/recommendations";
 import type { FbAdset, FbBaseEntity, FbCampaign, FbCreativeEntity } from "@/types/fb";
-import { type ReactNode, useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { type ReactNode, createContext, useContext, useEffect, useState } from "react";
 import { BreakdownInsightStrip } from "./BreakdownInsightStrip";
+
+/** When true (public share page), ad cards are view-only — no click-to-
+ *  preview modal. Read by `AdCard` deep in the adset tree so we don't
+ *  thread the flag through every level. */
+const PreviewDisabledContext = createContext(false);
 
 /**
  * Insight-oriented campaign report. Designed to answer the operator's
@@ -54,14 +61,14 @@ const num = (v: string | number | null | undefined): number => {
  * `value` is already formatted (with hideMoney / markup applied) so
  * the renderer just drops it into a Stat / Cell / inline span.
  */
-interface KpiCell {
+export interface KpiCell {
   code: string;
   label: string;
   value: string;
   highlight?: boolean;
 }
 
-interface KpiOpts {
+export interface KpiOpts {
   hideMoney: boolean;
   spendLabel: string;
   applyMarkup: (n: number) => number;
@@ -79,7 +86,7 @@ interface KpiOpts {
  * value already reflects useSpendPlus / markup; the LINE push config's
  * mutex pair means at most one of them appears in selectedFields.
  */
-function buildKpiCells(entity: FbBaseEntity, opts: KpiOpts): KpiCell[] {
+export function buildKpiCells(entity: FbBaseEntity, opts: KpiOpts): KpiCell[] {
   const ins = getIns(entity);
   const msgs = getMsgCount(entity);
   const spend = num(ins.spend);
@@ -153,7 +160,7 @@ function buildKpiCells(entity: FbBaseEntity, opts: KpiOpts): KpiCell[] {
 /** Filter and reorder cells to match selectedFields (when supplied).
  * Returns the input untouched when selectedFields is null/undefined,
  * preserving the existing layout for legacy share links. */
-function pickCells(all: KpiCell[], selectedFields: string[] | null | undefined): KpiCell[] {
+export function pickCells(all: KpiCell[], selectedFields: string[] | null | undefined): KpiCell[] {
   if (!selectedFields?.length) return all;
   const map = new Map(all.map((c) => [c.code, c] as const));
   const out: KpiCell[] = [];
@@ -197,6 +204,9 @@ export interface ReportContentProps {
    *  undefined → fall back to the legacy 12-cell layout (preserves
    *  the dashboard report-modal share flow). */
   selectedFields?: string[] | null;
+  /** When true (public share link), ad thumbnails are view-only — no
+   *  click-to-enlarge preview modal. */
+  disablePreview?: boolean;
 }
 
 export function ReportContent({
@@ -211,6 +221,7 @@ export function ReportContent({
   markupPercent = 0,
   showRecommendations = true,
   selectedFields = null,
+  disablePreview = false,
 }: ReportContentProps) {
   const ins = getIns(campaign);
   const msgs = getMsgCount(campaign);
@@ -245,114 +256,116 @@ export function ReportContent({
   };
 
   return (
-    <div className="flex flex-col gap-5">
-      {/* Header — concrete date range top-left, big + orange so the
+    <PreviewDisabledContext.Provider value={disablePreview}>
+      <div className="flex flex-col gap-5">
+        {/* Header — concrete date range top-left, big + orange so the
           reader anchors on the period before reading numbers. */}
-      <div className="flex flex-col gap-2">
-        <div className="text-[12px] font-semibold uppercase tracking-wide text-gray-500">
-          資料區間 {dateLabel ? `(${dateLabel})` : ""}
-        </div>
-        <div className="text-[24px] font-bold text-orange md:text-[28px]">
-          {concreteRangeLabel(date)}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge status={campaign.status} />
-          {campaign.objective && (
-            <span className="rounded-full border border-border px-2.5 py-[3px] text-[12px] text-gray-500">
-              {translateObjective(campaign.objective)}
-            </span>
+        <div className="flex flex-col gap-2">
+          <div className="text-[12px] font-semibold uppercase tracking-wide text-gray-500">
+            資料區間 {dateLabel ? `(${dateLabel})` : ""}
+          </div>
+          <div className="text-[24px] font-bold text-orange md:text-[28px]">
+            {concreteRangeLabel(date)}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge status={campaign.status} />
+            {campaign.objective && (
+              <span className="rounded-full border border-border px-2.5 py-[3px] text-[12px] text-gray-500">
+                {translateObjective(campaign.objective)}
+              </span>
+            )}
+          </div>
+          <div className="text-[17px] font-bold text-ink md:text-[18px]">{campaign.name}</div>
+          {campaign._accountName && (
+            <div className="text-[12px] text-gray-500">{campaign._accountName}</div>
           )}
         </div>
-        <div className="text-[17px] font-bold text-ink md:text-[18px]">{campaign.name}</div>
-        {campaign._accountName && (
-          <div className="text-[12px] text-gray-500">{campaign._accountName}</div>
-        )}
-      </div>
 
-      {/* Campaign-wide KPIs */}
-      <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
-        {selectedFields?.length ? (
-          pickCells(
-            buildKpiCells(campaign, { hideMoney, spendLabel, applyMarkup, trafficMode }),
-            selectedFields,
-          ).map((c) => (
-            <Stat key={c.code} label={c.label} value={c.value} highlight={c.highlight} />
-          ))
-        ) : (
-          <>
-            <Stat label={spendLabel} value={spendMoney(ins.spend)} highlight />
-            <Stat label="曝光" value={fN(ins.impressions)} />
-            <Stat label="點擊" value={fN(ins.clicks)} />
-            <Stat label="CTR" value={fP(ins.ctr)} highlight={trafficMode} />
-            <Stat label="CPC" value={money(ins.cpc)} highlight={trafficMode} />
-            <Stat label="CPM" value={money(ins.cpm)} />
-            <Stat label="頻次" value={fF(ins.frequency)} />
-            <Stat label="觸及" value={fN(ins.reach)} />
-            {!trafficMode && (
-              <>
-                <Stat label="私訊數" value={msgs > 0 ? fN(msgs) : "—"} highlight={msgs > 0} />
-                <Stat
-                  label="私訊成本"
-                  value={msgs > 0 ? money(msgCost) : "—"}
-                  highlight={msgs > 0}
-                />
-              </>
-            )}
-            <Stat
-              label="預算"
-              value={
-                hideMoney
-                  ? "—"
-                  : campaign.daily_budget
-                    ? `日 $${fM(campaign.daily_budget)}`
-                    : campaign.lifetime_budget
-                      ? `總 $${fM(campaign.lifetime_budget)}`
-                      : "組合層級"
-              }
-            />
-          </>
-        )}
-      </div>
-
-      {/* Recommendations narrative */}
-      {showRecommendations && recommendations.length > 0 && (
-        <div className="rounded-xl border border-orange/30 bg-orange-bg/40 px-4 py-3.5">
-          <div className="mb-2 text-[13px] font-bold text-orange">優化建議</div>
-          <ul className="flex flex-col gap-1.5">
-            {recommendations.map((r, i) => (
-              <li
-                // biome-ignore lint/suspicious/noArrayIndexKey: stable bullet list
-                key={i}
-                className="flex items-start gap-2 text-[14px] text-ink"
-              >
-                <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-orange" />
-                <span>{r}</span>
-              </li>
-            ))}
-          </ul>
+        {/* Campaign-wide KPIs */}
+        <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
+          {selectedFields?.length ? (
+            pickCells(
+              buildKpiCells(campaign, { hideMoney, spendLabel, applyMarkup, trafficMode }),
+              selectedFields,
+            ).map((c) => (
+              <Stat key={c.code} label={c.label} value={c.value} highlight={c.highlight} />
+            ))
+          ) : (
+            <>
+              <Stat label={spendLabel} value={spendMoney(ins.spend)} highlight />
+              <Stat label="曝光" value={fN(ins.impressions)} />
+              <Stat label="點擊" value={fN(ins.clicks)} />
+              <Stat label="CTR" value={fP(ins.ctr)} highlight={trafficMode} />
+              <Stat label="CPC" value={money(ins.cpc)} highlight={trafficMode} />
+              <Stat label="CPM" value={money(ins.cpm)} />
+              <Stat label="頻次" value={fF(ins.frequency)} />
+              <Stat label="觸及" value={fN(ins.reach)} />
+              {!trafficMode && (
+                <>
+                  <Stat label="私訊數" value={msgs > 0 ? fN(msgs) : "—"} highlight={msgs > 0} />
+                  <Stat
+                    label="私訊成本"
+                    value={msgs > 0 ? money(msgCost) : "—"}
+                    highlight={msgs > 0}
+                  />
+                </>
+              )}
+              <Stat
+                label="預算"
+                value={
+                  hideMoney
+                    ? "—"
+                    : campaign.daily_budget
+                      ? `日 $${fM(campaign.daily_budget)}`
+                      : campaign.lifetime_budget
+                        ? `總 $${fM(campaign.lifetime_budget)}`
+                        : "組合層級"
+                }
+              />
+            </>
+          )}
         </div>
-      )}
 
-      {/* Adsets — top 3 by spend auto-expand to keep the first paint
+        {/* Recommendations narrative */}
+        {showRecommendations && recommendations.length > 0 && (
+          <div className="rounded-xl border border-orange/30 bg-orange-bg/40 px-4 py-3.5">
+            <div className="mb-2 text-[13px] font-bold text-orange">優化建議</div>
+            <ul className="flex flex-col gap-1.5">
+              {recommendations.map((r, i) => (
+                <li
+                  // biome-ignore lint/suspicious/noArrayIndexKey: stable bullet list
+                  key={i}
+                  className="flex items-start gap-2 text-[14px] text-ink"
+                >
+                  <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-orange" />
+                  <span>{r}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Adsets — top 3 by spend auto-expand to keep the first paint
           insight-rich; the rest collapse to a header-only row that
           can be expanded on demand. Hides FB-call burst by default
           since each expanded adset fires a breakdown strip + ads
           list (~5 calls per adset). */}
-      <AdsetSection
-        adsets={adsets}
-        adsetsLoading={adsetsLoading}
-        adsetsError={adsetsError}
-        date={date}
-        hideMoney={hideMoney}
-        money={money}
-        spendMoney={spendMoney}
-        spendLabel={spendLabel}
-        trafficMode={trafficMode}
-        campaignName={campaign.name}
-        applyMarkup={applyMarkup}
-        selectedFields={selectedFields}
-      />
-    </div>
+        <AdsetSection
+          adsets={adsets}
+          adsetsLoading={adsetsLoading}
+          adsetsError={adsetsError}
+          date={date}
+          hideMoney={hideMoney}
+          money={money}
+          spendMoney={spendMoney}
+          spendLabel={spendLabel}
+          trafficMode={trafficMode}
+          campaignName={campaign.name}
+          applyMarkup={applyMarkup}
+          selectedFields={selectedFields}
+        />
+      </div>
+    </PreviewDisabledContext.Provider>
   );
 }
 
@@ -716,7 +729,21 @@ function AdCard({
   const m = getMsgCount(ad);
   const spend = num(ai.spend);
   const msgCost = m > 0 ? spend / m : null;
-  const thumb = ad.creative?.thumbnail_url;
+  const previewDisabled = useContext(PreviewDisabledContext);
+  // Sharp thumbnail: image_url (image creatives) → 600px server
+  // thumbnail (videos have no image_url; the ~64px field-expanded
+  // thumbnail_url is blurry) → raw thumbnail_url. Shares the preview
+  // modal's cache key; no auth gate so it works on the /r/ share page.
+  const creativeId = ad.creative?.id;
+  const needsHires = !ad.creative?.image_url && !!creativeId;
+  const hiresQuery = useQuery({
+    queryKey: ["hires-thumbnail", creativeId, 600] as const,
+    queryFn: async () => (creativeId ? api.creatives.hiresThumbnail(creativeId, 600) : null),
+    enabled: needsHires,
+    staleTime: 30 * 60_000,
+  });
+  const thumb =
+    ad.creative?.image_url || hiresQuery.data?.thumbnail_url || ad.creative?.thumbnail_url;
   const [previewOpen, setPreviewOpen] = useState(false);
   const showMsg = !trafficMode && m > 0;
   const adCells = selectedFields?.length
@@ -725,7 +752,8 @@ function AdCard({
         selectedFields,
       )
     : null;
-  const canPreview = Boolean(thumb);
+  // View-only on the share page: no click-to-enlarge for clients.
+  const canPreview = Boolean(ad.creative?.thumbnail_url) && !previewDisabled;
   const openPreview = () => {
     if (canPreview) setPreviewOpen(true);
   };
