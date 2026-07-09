@@ -140,14 +140,14 @@ describe("financeStore — PG-backed shared settings", () => {
       pinnedIds: ["cmp_2"],
       defaultMarkup: 10,
       showNicknames: false,
-      reportFields: ["spend", "ctr"],
+      reportFieldsByCampaign: { cmp_1: ["spend", "ctr"] },
     });
     const s = useFinanceStore.getState();
     expect(s.rowMarkups).toEqual({ cmp_1: 7.5 });
     expect(s.pinnedIds).toEqual(["cmp_2"]);
     expect(s.defaultMarkup).toBe(10);
     expect(s.showNicknames).toBe(false);
-    expect(s.reportFields).toEqual(["spend", "ctr"]);
+    expect(s.reportFieldsByCampaign).toEqual({ cmp_1: ["spend", "ctr"] });
     expect(api.settings.setShared).not.toHaveBeenCalled();
   });
 
@@ -167,15 +167,28 @@ describe("financeStore — PG-backed shared settings", () => {
     expect(api.settings.setShared).toHaveBeenCalledWith("finance_row_markups", { cmp_9: 12.5 });
   });
 
-  it("setReportFields stores + POSTs team-wide (null clears)", () => {
-    useFinanceStore.getState().setReportFields(["spend", "msgs"]);
-    expect(useFinanceStore.getState().reportFields).toEqual(["spend", "msgs"]);
-    expect(api.settings.setShared).toHaveBeenCalledWith("report_selected_fields", [
-      "spend",
-      "msgs",
-    ]);
-    useFinanceStore.getState().setReportFields(null);
-    expect(useFinanceStore.getState().reportFields).toBeNull();
-    expect(api.settings.setShared).toHaveBeenLastCalledWith("report_selected_fields", null);
+  it("setReportFields stores per-campaign + POSTs the map (null clears the entry)", async () => {
+    // Reset the shared map first — earlier tests seed other campaigns.
+    useFinanceStore.getState().hydrateFromServer({
+      rowMarkups: {},
+      pinnedIds: [],
+      defaultMarkup: 5,
+      showNicknames: true,
+      reportFieldsByCampaign: {},
+    });
+    useFinanceStore.getState().setReportFields("cmp_A", ["spend", "msgs"]);
+    useFinanceStore.getState().setReportFields("cmp_B", ["ctr"]);
+    expect(useFinanceStore.getState().reportFieldsByCampaign).toEqual({
+      cmp_A: ["spend", "msgs"],
+      cmp_B: ["ctr"],
+    });
+    await new Promise((r) => setTimeout(r, 550));
+    expect(api.settings.setShared).toHaveBeenLastCalledWith("report_selected_fields", {
+      cmp_A: ["spend", "msgs"],
+      cmp_B: ["ctr"],
+    });
+    // null clears just that campaign's entry.
+    useFinanceStore.getState().setReportFields("cmp_A", null);
+    expect(useFinanceStore.getState().reportFieldsByCampaign).toEqual({ cmp_B: ["ctr"] });
   });
 });

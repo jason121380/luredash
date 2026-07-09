@@ -49,11 +49,11 @@ export function ReportModal({
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
   const [useSpendPlus, setUseSpendPlus] = useState(false);
   const [variant, setVariant] = useState<ReportVariant>("chooser");
-  // Metric selection (team-wide, persisted to shared_settings via the
-  // finance store). null → each report's built-in KPI layout; non-null
-  // → only these KPI codes. `updateFields` writes through to the DB.
-  const selectedFields = useFinanceStore((s) => s.reportFields);
-  const updateFields = useFinanceStore((s) => s.setReportFields);
+  // Metric selection is per-campaign + team-wide (persisted to
+  // shared_settings via the finance store). The stored array is ordered
+  // (drag-to-reorder). null (no entry) → each report's default layout.
+  const reportFieldsByCampaign = useFinanceStore((s) => s.reportFieldsByCampaign);
+  const setReportFieldsStore = useFinanceStore((s) => s.setReportFields);
 
   // Reopen on the chooser step each time (version is picked per open).
   useEffect(() => {
@@ -61,6 +61,9 @@ export function ReportModal({
   }, [open]);
 
   if (!campaign) return null;
+
+  const selectedFields = reportFieldsByCampaign[campaign.id] ?? null;
+  const updateFields = (next: string[] | null) => setReportFieldsStore(campaign.id, next);
 
   const markupPercent = markupFor(campaign.id, rowMarkups, defaultMarkup);
 
@@ -165,7 +168,11 @@ export function ReportModal({
           {/* Metric picker — same catalog as the LINE push report. */}
           {showFieldPicker && (
             <div className="mb-4 rounded-xl border border-border bg-bg/50 p-3">
-              <ReportFieldsPicker value={selectedFields ?? []} onChange={updateFields} />
+              <ReportFieldsPicker
+                value={selectedFields ?? []}
+                onChange={updateFields}
+                reorderable
+              />
             </div>
           )}
 

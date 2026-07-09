@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
 import { getAct, getIns, getMsgCount, spendOf, sumAction } from "@/lib/insights";
 import type { FbBaseEntity } from "@/types/fb";
+import { describe, expect, it } from "vitest";
 
-const mkEntity = (actions: { action_type: string; value: string }[] = [], spend = "0"): FbBaseEntity => ({
+const mkEntity = (
+  actions: { action_type: string; value: string }[] = [],
+  spend = "0",
+): FbBaseEntity => ({
   id: "1",
   name: "test",
   status: "ACTIVE",
@@ -43,9 +46,7 @@ describe("getMsgCount (CRITICAL — see CLAUDE.md)", () => {
     expect(getMsgCount(entity)).toBe(7);
   });
   it("falls back to messaging_conversation_started_7d when onsite_conversion absent", () => {
-    const entity = mkEntity([
-      { action_type: "messaging_conversation_started_7d", value: "5" },
-    ]);
+    const entity = mkEntity([{ action_type: "messaging_conversation_started_7d", value: "5" }]);
     expect(getMsgCount(entity)).toBe(5);
   });
   it("returns 0 when no message actions present", () => {
@@ -115,5 +116,16 @@ describe("getAvgWatchSeconds (成效報告)", () => {
   it("returns 0 for non-video creatives (field absent)", async () => {
     const { getAvgWatchSeconds } = await import("@/lib/insights");
     expect(getAvgWatchSeconds(mkEntity())).toBe(0);
+  });
+});
+
+describe("getPostSaves (成效報告 收藏)", () => {
+  it("reads onsite_conversion.post_save first, falls back to post_save", async () => {
+    const { getPostSaves } = await import("@/lib/insights");
+    expect(
+      getPostSaves(mkEntity([{ action_type: "onsite_conversion.post_save", value: "12" }])),
+    ).toBe(12);
+    expect(getPostSaves(mkEntity([{ action_type: "post_save", value: "4" }]))).toBe(4);
+    expect(getPostSaves(mkEntity([{ action_type: "post", value: "9" }]))).toBe(0);
   });
 });

@@ -83,3 +83,29 @@ export function normalizeReportFields(input: string[] | null | undefined): strin
   if (input?.length) return input;
   return [...DEFAULT_REPORT_FIELDS];
 }
+
+/** 加入一個 code,**保留使用者現有順序**、把新的接在最後(reorderable
+ *  模式用,不像 toggleReportField 會重排成 catalog 順序)。同 mutex 群組
+ *  的其他 code 會被移除。 */
+export function addReportFieldOrdered(current: string[], code: string): string[] {
+  const blocked = new Set<string>();
+  for (const group of MUTEX_GROUPS) {
+    if (group.includes(code)) {
+      for (const sibling of group) if (sibling !== code) blocked.add(sibling);
+    }
+  }
+  const kept = current.filter((c) => c !== code && !blocked.has(c));
+  return [...kept, code];
+}
+
+/** 把 `from` 位置的 code 搬到 `to` 位置(拖曳排序用)。索引越界時原樣回傳。 */
+export function moveReportField(current: string[], from: number, to: number): string[] {
+  if (from === to || from < 0 || to < 0 || from >= current.length || to >= current.length) {
+    return current;
+  }
+  const next = [...current];
+  const [moved] = next.splice(from, 1);
+  if (moved === undefined) return current;
+  next.splice(to, 0, moved);
+  return next;
+}

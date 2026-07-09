@@ -3,7 +3,13 @@ import { Badge } from "@/components/Badge";
 import { CreativePreviewModal } from "@/components/CreativePreviewModal";
 import { type DateConfig, resolveRange } from "@/lib/datePicker";
 import { fM, fN, fP } from "@/lib/format";
-import { getAvgWatchSeconds, getIns, getPostReactions, getShares } from "@/lib/insights";
+import {
+  getAvgWatchSeconds,
+  getIns,
+  getPostReactions,
+  getPostSaves,
+  getShares,
+} from "@/lib/insights";
 import { translateObjective } from "@/lib/objective";
 import { isTrafficObjective } from "@/lib/recommendations";
 import type { FbAdset, FbCampaign, FbCreativeEntity } from "@/types/fb";
@@ -222,6 +228,7 @@ function CreativeCard({
 }) {
   const ai = getIns(ad);
   const reactions = getPostReactions(ad);
+  const saves = getPostSaves(ad);
   const shares = getShares(ad);
   const watchSec = getAvgWatchSeconds(ad);
   // Image priority for a sharp card:
@@ -293,6 +300,7 @@ function CreativeCard({
           <Row label="曝光" value={fN(ai.impressions)} />
           {watchSec > 0 && <Row label="平均播放時間" value={formatWatch(watchSec)} />}
           <Row label="按讚" value={fN(reactions)} />
+          <Row label="收藏" value={fN(saves)} />
           <Row label="分享" value={fN(shares)} />
         </div>
       </div>

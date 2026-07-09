@@ -72,18 +72,25 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       typeof s.finance_default_markup === "number" ? s.finance_default_markup : 5;
     const showNicknames =
       typeof s.finance_show_nicknames === "boolean" ? s.finance_show_nicknames : true;
-    // Dashboard report KPI selection (team-wide). Array → those codes;
-    // anything else (incl. absent) → null = each report's default layout.
-    const reportFields = Array.isArray(s.report_selected_fields)
-      ? (s.report_selected_fields as unknown[]).filter((v): v is string => typeof v === "string")
-      : null;
+    // Dashboard report KPI selection, per campaign (team-wide):
+    // { campaignId: ["spend", "ctr", …] }. Ordered arrays. Legacy flat-
+    // array values (or anything non-object) → empty map.
+    const rawReportFields = s.report_selected_fields;
+    const reportFieldsByCampaign: Record<string, string[]> = {};
+    if (rawReportFields && typeof rawReportFields === "object" && !Array.isArray(rawReportFields)) {
+      for (const [cid, codes] of Object.entries(rawReportFields as Record<string, unknown>)) {
+        if (Array.isArray(codes)) {
+          reportFieldsByCampaign[cid] = codes.filter((v): v is string => typeof v === "string");
+        }
+      }
+    }
 
     useFinanceStore.getState().hydrateFromServer({
       rowMarkups,
       pinnedIds,
       defaultMarkup,
       showNicknames,
-      reportFields,
+      reportFieldsByCampaign,
     });
 
     const paymentAccounts: PaymentAccount[] = Array.isArray(s.payment_accounts)
