@@ -134,18 +134,20 @@ describe("filtersStore — localStorage bridge", () => {
 });
 
 describe("financeStore — PG-backed shared settings", () => {
-  it("hydrateFromServer seeds all four fields without POSTing", () => {
+  it("hydrateFromServer seeds all fields without POSTing", () => {
     useFinanceStore.getState().hydrateFromServer({
       rowMarkups: { cmp_1: 7.5 },
       pinnedIds: ["cmp_2"],
       defaultMarkup: 10,
       showNicknames: false,
+      reportFields: ["spend", "ctr"],
     });
     const s = useFinanceStore.getState();
     expect(s.rowMarkups).toEqual({ cmp_1: 7.5 });
     expect(s.pinnedIds).toEqual(["cmp_2"]);
     expect(s.defaultMarkup).toBe(10);
     expect(s.showNicknames).toBe(false);
+    expect(s.reportFields).toEqual(["spend", "ctr"]);
     expect(api.settings.setShared).not.toHaveBeenCalled();
   });
 
@@ -163,5 +165,17 @@ describe("financeStore — PG-backed shared settings", () => {
     expect(useFinanceStore.getState().rowMarkups).toEqual({ cmp_9: 12.5 });
     await new Promise((r) => setTimeout(r, 550));
     expect(api.settings.setShared).toHaveBeenCalledWith("finance_row_markups", { cmp_9: 12.5 });
+  });
+
+  it("setReportFields stores + POSTs team-wide (null clears)", () => {
+    useFinanceStore.getState().setReportFields(["spend", "msgs"]);
+    expect(useFinanceStore.getState().reportFields).toEqual(["spend", "msgs"]);
+    expect(api.settings.setShared).toHaveBeenCalledWith("report_selected_fields", [
+      "spend",
+      "msgs",
+    ]);
+    useFinanceStore.getState().setReportFields(null);
+    expect(useFinanceStore.getState().reportFields).toBeNull();
+    expect(api.settings.setShared).toHaveBeenLastCalledWith("report_selected_fields", null);
   });
 });

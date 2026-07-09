@@ -72,12 +72,18 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       typeof s.finance_default_markup === "number" ? s.finance_default_markup : 5;
     const showNicknames =
       typeof s.finance_show_nicknames === "boolean" ? s.finance_show_nicknames : true;
+    // Dashboard report KPI selection (team-wide). Array → those codes;
+    // anything else (incl. absent) → null = each report's default layout.
+    const reportFields = Array.isArray(s.report_selected_fields)
+      ? (s.report_selected_fields as unknown[]).filter((v): v is string => typeof v === "string")
+      : null;
 
     useFinanceStore.getState().hydrateFromServer({
       rowMarkups,
       pinnedIds,
       defaultMarkup,
       showNicknames,
+      reportFields,
     });
 
     const paymentAccounts: PaymentAccount[] = Array.isArray(s.payment_accounts)
