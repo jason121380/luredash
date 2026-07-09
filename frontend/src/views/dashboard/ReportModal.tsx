@@ -33,6 +33,31 @@ import { ReportContent } from "./ReportContent";
 
 type ReportVariant = "chooser" | "standard" | "perf";
 
+// Persist the operator's metric selection across opens / reloads
+// (per-browser UI preference, like the other dashboard prefs). null →
+// each report's built-in default layout.
+const FIELDS_STORAGE_KEY = "report_selected_fields";
+
+function loadStoredFields(): string[] | null {
+  try {
+    const raw = localStorage.getItem(FIELDS_STORAGE_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredFields(v: string[] | null): void {
+  try {
+    if (v === null) localStorage.removeItem(FIELDS_STORAGE_KEY);
+    else localStorage.setItem(FIELDS_STORAGE_KEY, JSON.stringify(v));
+  } catch {
+    /* private-mode / quota — non-fatal, selection just won't persist */
+  }
+}
+
 export function ReportModal({
   open,
   onOpenChange,
@@ -51,16 +76,23 @@ export function ReportModal({
   const [variant, setVariant] = useState<ReportVariant>("chooser");
   // null → each report's built-in KPI layout; non-null → only these
   // KPI codes (metric selector, same catalog as the LINE push picker).
-  const [selectedFields, setSelectedFields] = useState<string[] | null>(null);
+  // Seeded from localStorage so the operator's pick persists.
+  const [selectedFields, setSelectedFields] = useState<string[] | null>(() => loadStoredFields());
 
-  // Always reopen on the chooser step + default fields so each open
-  // starts clean (matches the "先跳彈窗選版本" flow).
+  // Reopen on the chooser step each time (version is picked per open);
+  // re-hydrate the saved metric selection so it survives across opens.
   useEffect(() => {
     if (open) {
       setVariant("chooser");
-      setSelectedFields(null);
+      setSelectedFields(loadStoredFields());
     }
   }, [open]);
+
+  // Wrap the setter so every user change is persisted.
+  const updateFields = (next: string[] | null) => {
+    setSelectedFields(next);
+    saveStoredFields(next);
+  };
 
   if (!campaign) return null;
 
@@ -149,7 +181,7 @@ export function ReportModal({
               <button
                 type="button"
                 onClick={() =>
-                  setSelectedFields((prev) => (prev === null ? [...DEFAULT_REPORT_FIELDS] : null))
+                  updateFields(selectedFields === null ? [...DEFAULT_REPORT_FIELDS] : null)
                 }
                 aria-pressed={showFieldPicker}
                 className={cn(
@@ -167,7 +199,7 @@ export function ReportModal({
           {/* Metric picker — same catalog as the LINE push report. */}
           {showFieldPicker && (
             <div className="mb-4 rounded-xl border border-border bg-bg/50 p-3">
-              <ReportFieldsPicker value={selectedFields ?? []} onChange={setSelectedFields} />
+              <ReportFieldsPicker value={selectedFields ?? []} onChange={updateFields} />
             </div>
           )}
 
