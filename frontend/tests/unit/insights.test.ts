@@ -79,3 +79,41 @@ describe("sumAction / spendOf", () => {
     expect(spendOf(entity)).toBe(1234.56);
   });
 });
+
+describe("getPostReactions / getShares (成效報告)", () => {
+  it("reads post_reaction as 按讚", async () => {
+    const { getPostReactions } = await import("@/lib/insights");
+    const e = mkEntity([{ action_type: "post_reaction", value: "38" }]);
+    expect(getPostReactions(e)).toBe(38);
+  });
+  it("reads post as 分享", async () => {
+    const { getShares } = await import("@/lib/insights");
+    const e = mkEntity([{ action_type: "post", value: "5" }]);
+    expect(getShares(e)).toBe(5);
+  });
+  it("returns 0 when the action type is absent", async () => {
+    const { getPostReactions, getShares } = await import("@/lib/insights");
+    const e = mkEntity([{ action_type: "link_click", value: "9" }]);
+    expect(getPostReactions(e)).toBe(0);
+    expect(getShares(e)).toBe(0);
+  });
+});
+
+describe("getAvgWatchSeconds (成效報告)", () => {
+  it("reads the first positive video_avg_time_watched value", async () => {
+    const { getAvgWatchSeconds } = await import("@/lib/insights");
+    const e: FbBaseEntity = {
+      id: "1",
+      name: "v",
+      status: "ACTIVE",
+      insights: {
+        data: [{ video_avg_time_watched_actions: [{ action_type: "video_view", value: "15" }] }],
+      },
+    };
+    expect(getAvgWatchSeconds(e)).toBe(15);
+  });
+  it("returns 0 for non-video creatives (field absent)", async () => {
+    const { getAvgWatchSeconds } = await import("@/lib/insights");
+    expect(getAvgWatchSeconds(mkEntity())).toBe(0);
+  });
+});

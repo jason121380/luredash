@@ -180,13 +180,13 @@ function VersionChooser({
       <div className="text-[12px] text-gray-500">{campaignName} — 請選擇要產生的報告版本</div>
       <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
         <ChooserCard
-          title="標準報告"
+          title="以廣告組合報告"
           desc="完整 KPI 總覽 + 廣告組合 / 受眾洞察 / 素材表現 + 優化建議。"
           onClick={() => onPick("standard")}
         />
         <ChooserCard
-          title="成效報告"
-          desc="活動 KPI 摘要 + 點擊率前 5 素材(縮圖 + 點擊率 / 點擊成本 / 曝光)。"
+          title="以廣告報告"
+          desc="活動 KPI 摘要 + 所有有花費素材依點擊率排序(縮圖 + 點擊率 / 點擊成本 / 曝光 / 平均播放時間 / 按讚 / 分享)。"
           onClick={() => onPick("perf")}
         />
       </div>

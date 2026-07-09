@@ -278,8 +278,8 @@ The same recommendation logic runs in two places — keep them in sync:
 ### Report versions (dashboard 報告 icon)
 
 The dashboard `CampaignRow` 報告 icon opens `<ReportModal/>`, which **first shows a version chooser** (2026-07-09) — the user picks before any report renders:
-- **標準報告** → `ReportContent` (the insight report below).
-- **成效報告** → `PerformanceReportContent` — campaign KPI summary (花費 / 曝光 / 觸及 / CPC / CTR) + **點擊率前 5 素材** (top 5 ads by CTR across the whole campaign, each a vertical creative card: thumbnail + 點擊率 / 點擊成本 / 曝光). Ads are fetched per-adset via `useQueries` (reusing the `["report-ads", …]` cache), flattened, ranked by CTR. **Only FB-auto-available metrics** are shown — the manual Google-Sheet's organic figures (IG 追蹤 / 收藏 / 按讚 / 分享 / 觀看率 / 平均播放時間) are NOT in the Marketing API and are intentionally omitted.
+- **以廣告組合報告** (`standard`) → `ReportContent` (the insight report below — KPI grid + per-adset breakdown).
+- **以廣告報告** (`perf`) → `PerformanceReportContent` — campaign KPI summary (花費 / 曝光 / 觸及 / CPC / CTR) + **素材成效(依點擊率排序)**: EVERY ad that spent, ranked by CTR desc (zero-spend dropped, zero-CTR kept at bottom), each a vertical creative card: thumbnail + 點擊率 / 點擊成本 / 曝光 / 平均播放時間 / 按讚 / 分享. Ads are fetched per-adset via `useQueries` (reusing the `["report-ads", …]` cache), flattened, ranked. Card image uses the 600px hires thumbnail (`api.creatives.hiresThumbnail`, same `["hires-thumbnail", id, 600]` cache as the preview modal, no auth gate so it works on the logged-out share page) because video creatives have no `image_url` and the field-expanded `thumbnail_url` is only ~64px → blurry when stretched. Metrics: 按讚 = `actions[]` `post_reaction`, 分享 = `post`, 平均播放時間 = `video_avg_time_watched_actions` (added to `get_ads`; video creatives only, hidden when 0). Still omitted (not in the Marketing API): IG 追蹤 / 收藏 / 觀看率.
 
 Both versions share the 花費/花費+% toggle and the 複製分享連結 button. The share URL carries `?report=perf` for 成效報告 (`buildShareUrl({variant})` → `ShareReportPage` parses `report` and renders the matching component). `translateObjective` was extracted to `@/lib/objective` so both report components use it.
 

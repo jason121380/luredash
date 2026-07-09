@@ -5885,7 +5885,9 @@ async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Opti
     ins = _insights_clause(
         "spend,impressions,clicks,ctr,cpc,cpm,actions,"
         "inline_link_clicks,cost_per_inline_link_click,"
-        "cost_per_action_type,purchase_roas,website_purchase_roas",
+        "cost_per_action_type,purchase_roas,website_purchase_roas,"
+        # 成效報告用:平均播放時間(影片素材才有;非影片回空陣列)。
+        "video_avg_time_watched_actions",
         date_preset,
         time_range,
     )
