@@ -3,6 +3,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { LoadingState } from "@/components/LoadingState";
 import type { DateConfig, DatePreset } from "@/lib/datePicker";
 import { toLabel } from "@/lib/datePicker";
+import { PerformanceReportContent } from "@/views/dashboard/PerformanceReportContent";
 import { ReportContent } from "@/views/dashboard/ReportContent";
 import { useMemo } from "react";
 
@@ -30,6 +31,7 @@ export function ShareReportPage() {
     markupPercent,
     showRecommendations,
     selectedFields,
+    reportVariant,
   } = useMemo(() => parseUrl(), []);
 
   // When the LINE push sent us explicit `from` / `to` query params
@@ -82,6 +84,18 @@ export function ShareReportPage() {
             </EmptyState>
           ) : !campaign ? (
             <EmptyState>找不到此行銷活動</EmptyState>
+          ) : reportVariant === "perf" ? (
+            <PerformanceReportContent
+              campaign={campaign}
+              adsets={adsetsQuery.data ?? null}
+              adsetsLoading={adsetsQuery.isLoading}
+              adsetsError={adsetsQuery.error instanceof Error ? adsetsQuery.error.message : null}
+              hideMoney={hideMoney}
+              dateLabel={toLabel(date)}
+              date={date}
+              useSpendPlus={useSpendPlus}
+              markupPercent={markupPercent}
+            />
           ) : (
             <ReportContent
               campaign={campaign}
@@ -122,6 +136,9 @@ function parseUrl(): {
    *  (legacy share-link / dashboard-modal links keep their full
    *  12-cell layout). */
   selectedFields: string[] | null;
+  /** `?report=perf` → render the 成效報告 (Top 5 by CTR). Anything
+   *  else (incl. absent) → the standard report. */
+  reportVariant: "standard" | "perf";
 } {
   if (typeof window === "undefined") {
     return {
@@ -135,6 +152,7 @@ function parseUrl(): {
       markupPercent: 0,
       showRecommendations: true,
       selectedFields: null,
+      reportVariant: "standard",
     };
   }
   const path = window.location.pathname;
@@ -166,6 +184,7 @@ function parseUrl(): {
         .map((s) => s.trim())
         .filter(Boolean)
     : null;
+  const reportVariant = params.get("report") === "perf" ? "perf" : "standard";
   return {
     campaignId,
     accountId,
@@ -177,6 +196,7 @@ function parseUrl(): {
     markupPercent,
     showRecommendations,
     selectedFields,
+    reportVariant,
   };
 }
 
