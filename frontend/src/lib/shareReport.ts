@@ -30,15 +30,22 @@ export interface ShareReportParams {
    *  Encoded into the URL so the share page renders without needing
    *  to look up shared_settings.finance_row_markups. */
   markupPercent?: number;
+  /** Which report layout to render. "standard" (default) = the full
+   *  KPI + adset breakdown; "perf" = the 成效報告 (Top 5 by CTR).
+   *  Encoded as `?report=perf` so the recipient sees the same version
+   *  the operator shared. */
+  variant?: "standard" | "perf";
 }
 
 /** Build an absolute share URL the user can paste anywhere. */
 export function buildShareUrl(params: ShareReportParams): string {
-  const { campaignId, accountId, hideMoney, datePreset, useSpendPlus, markupPercent } = params;
+  const { campaignId, accountId, hideMoney, datePreset, useSpendPlus, markupPercent, variant } =
+    params;
   const search = new URLSearchParams();
   search.set("acct", accountId);
   if (hideMoney) search.set("hide", "1");
   if (datePreset) search.set("date", datePreset);
+  if (variant === "perf") search.set("report", "perf");
   if (useSpendPlus) {
     search.set("plus", "1");
     if (markupPercent !== undefined && markupPercent > 0) {

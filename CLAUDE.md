@@ -275,6 +275,14 @@ The same recommendation logic runs in two places — keep them in sync:
 | frequency > 5 + spend > $1,000 | 「過高,擴大受眾」 |
 | frequency > 4 + spend > $500 | 「偏高,留意素材疲勞」 |
 
+### Report versions (dashboard 報告 icon)
+
+The dashboard `CampaignRow` 報告 icon opens `<ReportModal/>`, which **first shows a version chooser** (2026-07-09) — the user picks before any report renders:
+- **標準報告** → `ReportContent` (the insight report below).
+- **成效報告** → `PerformanceReportContent` — campaign KPI summary (花費 / 曝光 / 觸及 / CPC / CTR) + **點擊率前 5 素材** (top 5 ads by CTR across the whole campaign, each a vertical creative card: thumbnail + 點擊率 / 點擊成本 / 曝光). Ads are fetched per-adset via `useQueries` (reusing the `["report-ads", …]` cache), flattened, ranked by CTR. **Only FB-auto-available metrics** are shown — the manual Google-Sheet's organic figures (IG 追蹤 / 收藏 / 按讚 / 分享 / 觀看率 / 平均播放時間) are NOT in the Marketing API and are intentionally omitted.
+
+Both versions share the 花費/花費+% toggle and the 複製分享連結 button. The share URL carries `?report=perf` for 成效報告 (`buildShareUrl({variant})` → `ShareReportPage` parses `report` and renders the matching component). `translateObjective` was extracted to `@/lib/objective` so both report components use it.
+
 ### Share page (`/r/:campaignId`) layout
 
 `ReportContent` (shared by `<ReportModal/>` and `<ShareReportPage/>`) is **insight-oriented**, fully auto-expanded:
