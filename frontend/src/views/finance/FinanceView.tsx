@@ -67,7 +67,6 @@ export function FinanceView() {
 
   const rowMarkups = useFinanceStore((s) => s.rowMarkups);
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
-  const setDefaultMarkup = useFinanceStore((s) => s.setDefaultMarkup);
   const pinnedIds = useFinanceStore((s) => s.pinnedIds);
   const showNicknames = useFinanceStore((s) => s.showNicknames);
   const setShowNicknames = useFinanceStore((s) => s.setShowNicknames);
@@ -312,27 +311,6 @@ export function FinanceView() {
                 />
                 有花費
               </label>
-              <div className="flex items-center gap-1">
-                <span className="whitespace-nowrap text-xs text-gray-500">月%</span>
-                <input
-                  type="number"
-                  value={defaultMarkup === 0 ? "" : defaultMarkup}
-                  placeholder="0"
-                  min={0}
-                  max={100}
-                  step={0.5}
-                  onChange={(e) => {
-                    const raw = e.currentTarget.value;
-                    if (raw === "") {
-                      setDefaultMarkup(0);
-                      return;
-                    }
-                    const v = Number.parseFloat(raw);
-                    if (!Number.isNaN(v)) setDefaultMarkup(v);
-                  }}
-                  className="h-10 w-[58px] rounded-lg border-[1.5px] border-border px-1 text-center text-[13px] md:h-8 md:w-[54px]"
-                />
-              </div>
             </div>
 
             <div className="w-full overflow-x-auto">
