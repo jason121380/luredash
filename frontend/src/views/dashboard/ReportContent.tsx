@@ -848,29 +848,20 @@ function concreteRangeLabel(date: DateConfig): string {
   return `${s.m}/${s.d} - ${e.m}/${e.d}`;
 }
 
+// Uniform grey KPI card — no orange highlight (all metrics look the
+// same regardless of their `highlight` hint, per design feedback).
 function Stat({
   label,
   value,
-  highlight = false,
 }: {
   label: string;
   value: ReactNode;
   highlight?: boolean;
 }) {
   return (
-    <div
-      className={`rounded-xl border bg-white px-3.5 py-3 md:px-4 md:py-3.5 ${
-        highlight ? "border-orange" : "border-border"
-      }`}
-    >
+    <div className="rounded-xl border border-border bg-white px-3.5 py-3 md:px-4 md:py-3.5">
       <div className="text-[12px] text-gray-500">{label}</div>
-      <div
-        className={`mt-1 text-[17px] font-bold tabular-nums md:text-[19px] ${
-          highlight ? "text-orange" : "text-ink"
-        }`}
-      >
-        {value}
-      </div>
+      <div className="mt-1 text-[17px] font-bold tabular-nums text-ink md:text-[19px]">{value}</div>
     </div>
   );
 }

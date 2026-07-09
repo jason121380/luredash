@@ -324,29 +324,20 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
+// Uniform grey KPI card — no orange highlight (all metrics look the
+// same regardless of their `highlight` hint, per design feedback).
 function Stat({
   label,
   value,
-  highlight = false,
 }: {
   label: string;
   value: ReactNode;
   highlight?: boolean;
 }) {
   return (
-    <div
-      className={`rounded-xl border bg-white px-3 py-2.5 md:px-3.5 md:py-3 ${
-        highlight ? "border-orange" : "border-border"
-      }`}
-    >
+    <div className="rounded-xl border border-border bg-white px-3 py-2.5 md:px-3.5 md:py-3">
       <div className="text-[12px] text-gray-500">{label}</div>
-      <div
-        className={`mt-1 text-[16px] font-bold tabular-nums md:text-[18px] ${
-          highlight ? "text-orange" : "text-ink"
-        }`}
-      >
-        {value}
-      </div>
+      <div className="mt-1 text-[16px] font-bold tabular-nums text-ink md:text-[18px]">{value}</div>
     </div>
   );
 }
