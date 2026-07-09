@@ -3,10 +3,10 @@ import { Badge } from "@/components/Badge";
 import { CreativePreviewModal } from "@/components/CreativePreviewModal";
 import { type DateConfig, resolveRange } from "@/lib/datePicker";
 import { fM, fN, fP } from "@/lib/format";
-import { getIns } from "@/lib/insights";
+import { getAvgWatchSeconds, getIns, getPostReactions, getShares } from "@/lib/insights";
 import { translateObjective } from "@/lib/objective";
 import type { FbAdset, FbCampaign, FbCreativeEntity } from "@/types/fb";
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 
 /**
@@ -14,12 +14,15 @@ import { type ReactNode, useState } from "react";
  * the team's manual Google-Sheet report:
  *   [Header]  campaign name + date range + campaign KPIs
  *             (花費 / 曝光 / 觸及 / CPC / CTR)
- *   [點擊率前 5]  the campaign's top 5 ads by CTR, each a vertical
- *             creative card (thumbnail + 點擊率 / 點擊成本 / 曝光).
+ *   [素材成效]  every ad that spent, ranked by CTR desc, each a vertical
+ *             creative card (thumbnail + 點擊率 / 點擊成本 / 曝光 /
+ *             平均播放時間 / 按讚 / 分享).
  *
- * Only FB-auto-available metrics are shown — organic figures the manual
- * sheet carried (IG 追蹤 / 收藏 / 按讚 / 分享 / 觀看率 / 平均播放時間)
- * are not exposed by the Marketing API and are intentionally omitted.
+ * Shows only FB-auto-available metrics. 按讚 (post_reaction) / 分享
+ * (post) come from `actions[]`; 平均播放時間 from
+ * `video_avg_time_watched_actions` (video creatives only). The manual
+ * sheet's IG 追蹤 / 收藏 / 觀看率 are NOT in the Marketing API and are
+ * intentionally omitted.
  *
  * Ads are fetched per-adset (reusing the same `["report-ads", ...]`
  * query cache as the standard report) via `useQueries`, then flattened
@@ -30,8 +33,6 @@ const num = (v: string | number | null | undefined): number => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 };
-
-const TOP_N = 5;
 
 export interface PerformanceReportContentProps {
   campaign: FbCampaign;
@@ -90,13 +91,13 @@ export function PerformanceReportContent({
       ? (adQueries.find((q) => q.isError)?.error as Error).message
       : null);
 
-  // Flatten → keep spend>0 & a real CTR → rank by CTR desc → top 5.
+  // Flatten → keep every ad that spent → rank by CTR desc (zero-CTR
+  // ads keep their slot at the bottom; zero-spend ads are dropped).
   const allAds = adQueries.flatMap((q) => q.data ?? []);
-  const topAds = allAds
+  const rankedAds = allAds
     .map((ad) => ({ ad, ctr: num(getIns(ad).ctr), spend: num(getIns(ad).spend) }))
-    .filter((s) => s.spend > 0 && s.ctr > 0)
-    .sort((a, b) => b.ctr - a.ctr)
-    .slice(0, TOP_N);
+    .filter((s) => s.spend > 0)
+    .sort((a, b) => b.ctr - a.ctr);
 
   return (
     <div className="flex flex-col gap-5">
@@ -131,9 +132,16 @@ export function PerformanceReportContent({
         <Stat label="CTR" value={fP(ins.ctr)} highlight />
       </div>
 
-      {/* Top 5 by CTR */}
+      {/* All spending ads, ranked by CTR */}
       <div className="flex flex-col gap-3">
-        <div className="text-[15px] font-bold text-ink">點擊率前 5 素材</div>
+        <div className="text-[15px] font-bold text-ink">
+          素材成效(依點擊率排序)
+          {rankedAds.length > 0 && (
+            <span className="ml-1.5 text-[12px] font-normal text-gray-400">
+              共 {rankedAds.length} 則
+            </span>
+          )}
+        </div>
         {adsLoading ? (
           <div className="rounded-xl border border-border bg-white px-3 py-4 text-[13px] text-gray-300">
             載入中...
@@ -142,13 +150,13 @@ export function PerformanceReportContent({
           <div className="rounded-xl border border-border bg-white px-3 py-4 text-[13px] text-red">
             載入失敗:{adsError}
           </div>
-        ) : topAds.length === 0 ? (
+        ) : rankedAds.length === 0 ? (
           <div className="rounded-xl border border-border bg-white px-3 py-4 text-[13px] text-gray-300">
-            此區間無可排名的素材
+            此區間無有花費的素材
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
-            {topAds.map((s, i) => (
+            {rankedAds.map((s, i) => (
               <CreativeCard
                 key={s.ad.id}
                 rank={i + 1}
@@ -176,9 +184,29 @@ function CreativeCard({
   money: (v: number | string | null | undefined) => string;
 }) {
   const ai = getIns(ad);
-  // Full-res asset for a sharp card image; fall back to the small
-  // thumbnail (video / carousel creatives have no image_url).
-  const img = ad.creative?.image_url || ad.creative?.thumbnail_url;
+  const reactions = getPostReactions(ad);
+  const shares = getShares(ad);
+  const watchSec = getAvgWatchSeconds(ad);
+  // Image priority for a sharp card:
+  //   image_url (full-res still, image creatives) →
+  //   600px server thumbnail (video creatives have no image_url; the
+  //     field-expanded thumbnail_url is only ~64px → blurry when
+  //     stretched to card size) →
+  //   raw thumbnail_url (last resort).
+  // The hires query shares the same key as `useHiresThumbnail` so the
+  // preview modal's fetch is reused. No auth gate here on purpose: the
+  // endpoint uses the backend's shared token, so it also works on the
+  // logged-out /r/ share page.
+  const creativeId = ad.creative?.id;
+  const needsHires = !ad.creative?.image_url && !!creativeId;
+  const hiresQuery = useQuery({
+    queryKey: ["hires-thumbnail", creativeId, 600] as const,
+    queryFn: async () => (creativeId ? api.creatives.hiresThumbnail(creativeId, 600) : null),
+    enabled: needsHires,
+    staleTime: 30 * 60_000,
+  });
+  const img =
+    ad.creative?.image_url || hiresQuery.data?.thumbnail_url || ad.creative?.thumbnail_url;
   const [previewOpen, setPreviewOpen] = useState(false);
   const canPreview = Boolean(ad.creative?.thumbnail_url);
 
@@ -226,6 +254,9 @@ function CreativeCard({
           <Row label="點擊率" value={fP(ai.ctr)} />
           <Row label="點擊成本" value={money(ai.cpc)} />
           <Row label="曝光" value={fN(ai.impressions)} />
+          {watchSec > 0 && <Row label="平均播放時間" value={formatWatch(watchSec)} />}
+          <Row label="按讚" value={fN(reactions)} />
+          <Row label="分享" value={fN(shares)} />
         </div>
       </div>
       {previewOpen && (
@@ -273,6 +304,12 @@ function Stat({
       </div>
     </div>
   );
+}
+
+/** Seconds → "m:ss" (e.g. 15 → "0:15"), matching the manual report. */
+function formatWatch(sec: number): string {
+  const s = Math.round(sec);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
 /** "M/D - M/D" (single "M/D" when start == end). */

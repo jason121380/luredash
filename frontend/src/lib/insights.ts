@@ -52,6 +52,27 @@ export function sumAction(item: FbBaseEntity, type: string): number {
   return Number(getAct(item, type) || 0);
 }
 
+/** 貼文按讚 / 表情數 (post_reaction) attributed to this ad. */
+export function getPostReactions(item: FbBaseEntity): number {
+  return sumAction(item, "post_reaction");
+}
+
+/** 分享數 (post) attributed to this ad. */
+export function getShares(item: FbBaseEntity): number {
+  return sumAction(item, "post");
+}
+
+/** Average seconds the video was watched. 0 for non-video creatives
+ *  (FB omits `video_avg_time_watched_actions` for them). */
+export function getAvgWatchSeconds(item: FbBaseEntity): number {
+  const arr = getIns(item).video_avg_time_watched_actions;
+  if (!arr || arr.length === 0) return 0;
+  // FB usually keys this by action_type "video_view"; take the first
+  // positive value regardless of the exact key.
+  const hit = arr.find((a) => Number(a.value) > 0) ?? arr[0];
+  return Number(hit?.value) || 0;
+}
+
 /** Convenience: numeric spend from an entity's first insights row. */
 export function spendOf(item: FbBaseEntity): number {
   return Number(getIns(item).spend || 0);

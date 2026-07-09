@@ -29,6 +29,9 @@ export interface FbInsights {
   cost_per_action_type?: FbAction[];
   purchase_roas?: FbAction[];
   website_purchase_roas?: FbAction[];
+  /** Avg seconds the video was watched. Present only for video
+   *  creatives; the value lives in the first entry's `value`. */
+  video_avg_time_watched_actions?: FbAction[];
 }
 
 export interface FbInsightsEnvelope {
