@@ -27,6 +27,9 @@ export interface FinanceState {
   pinnedIds: string[];
   defaultMarkup: number;
   showNicknames: boolean;
+  /** Dashboard report KPI selection (team-wide). null = each report's
+   *  built-in default layout; non-null = only these KPI codes. */
+  reportFields: string[] | null;
 
   /** One-way seed from server — set by SettingsProvider on first load.
    * Does NOT trigger a POST back. */
@@ -35,12 +38,14 @@ export interface FinanceState {
     pinnedIds: string[];
     defaultMarkup: number;
     showNicknames: boolean;
+    reportFields: string[] | null;
   }) => void;
 
   setRowMarkup: (campaignId: string, percent: number) => void;
   togglePin: (campaignId: string) => void;
   setDefaultMarkup: (v: number) => void;
   setShowNicknames: (v: boolean) => void;
+  setReportFields: (v: string[] | null) => void;
 }
 
 // Typed-input writers (markup %) are debounced so we don't POST on
@@ -72,6 +77,12 @@ const postShowNicknames = (v: boolean) => {
     .then(invalidateSharedSettings)
     .catch(() => {});
 };
+const postReportFields = (v: string[] | null) => {
+  api.settings
+    .setShared("report_selected_fields", v)
+    .then(invalidateSharedSettings)
+    .catch(() => {});
+};
 
 // Belt-and-suspenders for the debounced typed-input writers: if the
 // user navigates away mid-debounce, flush the pending write so the
@@ -89,9 +100,10 @@ export const useFinanceStore = create<FinanceState>((set) => ({
   pinnedIds: [],
   defaultMarkup: 5,
   showNicknames: true,
+  reportFields: null,
 
-  hydrateFromServer: ({ rowMarkups, pinnedIds, defaultMarkup, showNicknames }) =>
-    set({ rowMarkups, pinnedIds, defaultMarkup, showNicknames }),
+  hydrateFromServer: ({ rowMarkups, pinnedIds, defaultMarkup, showNicknames, reportFields }) =>
+    set({ rowMarkups, pinnedIds, defaultMarkup, showNicknames, reportFields }),
 
   setRowMarkup: (campaignId, percent) =>
     set((state) => {
@@ -116,6 +128,10 @@ export const useFinanceStore = create<FinanceState>((set) => ({
   setShowNicknames: (v) => {
     set({ showNicknames: v });
     postShowNicknames(v);
+  },
+  setReportFields: (v) => {
+    set({ reportFields: v });
+    postReportFields(v);
   },
 }));
 

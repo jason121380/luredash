@@ -33,31 +33,6 @@ import { ReportContent } from "./ReportContent";
 
 type ReportVariant = "chooser" | "standard" | "perf";
 
-// Persist the operator's metric selection across opens / reloads
-// (per-browser UI preference, like the other dashboard prefs). null →
-// each report's built-in default layout.
-const FIELDS_STORAGE_KEY = "report_selected_fields";
-
-function loadStoredFields(): string[] | null {
-  try {
-    const raw = localStorage.getItem(FIELDS_STORAGE_KEY);
-    if (!raw) return null;
-    const v = JSON.parse(raw);
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveStoredFields(v: string[] | null): void {
-  try {
-    if (v === null) localStorage.removeItem(FIELDS_STORAGE_KEY);
-    else localStorage.setItem(FIELDS_STORAGE_KEY, JSON.stringify(v));
-  } catch {
-    /* private-mode / quota — non-fatal, selection just won't persist */
-  }
-}
-
 export function ReportModal({
   open,
   onOpenChange,
@@ -74,25 +49,16 @@ export function ReportModal({
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
   const [useSpendPlus, setUseSpendPlus] = useState(false);
   const [variant, setVariant] = useState<ReportVariant>("chooser");
-  // null → each report's built-in KPI layout; non-null → only these
-  // KPI codes (metric selector, same catalog as the LINE push picker).
-  // Seeded from localStorage so the operator's pick persists.
-  const [selectedFields, setSelectedFields] = useState<string[] | null>(() => loadStoredFields());
+  // Metric selection (team-wide, persisted to shared_settings via the
+  // finance store). null → each report's built-in KPI layout; non-null
+  // → only these KPI codes. `updateFields` writes through to the DB.
+  const selectedFields = useFinanceStore((s) => s.reportFields);
+  const updateFields = useFinanceStore((s) => s.setReportFields);
 
-  // Reopen on the chooser step each time (version is picked per open);
-  // re-hydrate the saved metric selection so it survives across opens.
+  // Reopen on the chooser step each time (version is picked per open).
   useEffect(() => {
-    if (open) {
-      setVariant("chooser");
-      setSelectedFields(loadStoredFields());
-    }
+    if (open) setVariant("chooser");
   }, [open]);
-
-  // Wrap the setter so every user change is persisted.
-  const updateFields = (next: string[] | null) => {
-    setSelectedFields(next);
-    saveStoredFields(next);
-  };
 
   if (!campaign) return null;
 
