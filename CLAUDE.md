@@ -159,7 +159,7 @@ Renames (2026-05-26):
 
 ### Settings view
 Sidebar 工具區拆成兩個入口（2026-04-26 後）:
-- **廣告帳號設定** `/settings` — BM panel + 帳戶啟用 / 多選 / 拖曳排序
+- **廣告帳號設定** `/settings` — BM panel + 帳戶啟用 / 多選 / 拖曳排序。Topbar 右上有 **廣告金額預設%** input(2026-07-09 從費用中心工具列搬來):寫 `finance_default_markup` shared setting,是費用中心「沒有 per-row override 的活動」的 fallback markup(讀寫同一個 `useFinanceStore`,`SettingsProvider` 登入時 hydrate,任何頁面都可用)。
 - **LINE 推播設定** `/line-push` — `LineGroupsContent` **用 OA(channel)分頁**呈現(2026-07-07 改版:一個 tab 一個官方帳號,無「全部」總覽,預設第一個 OA);每個分頁內**左側是該 OA 的資料夾清單**(全部 / 未分類 / 使用者自訂資料夾 + 新增/改名/刪除,owner/admin 才可管理),右側表格列出該分類的群組(只顯示 `left_at IS NULL`)+ 每列一個「資料夾」下拉可搬移群組 + 該群組綁定的所有 push configs(一個 group 多 campaign)。**搜尋框 scope 在當下 OA 分頁**(選了資料夾則再收窄)。`channel_id` 為 NULL 的舊群組歸在「未指定官方帳號」分頁(無資料夾)。Topbar 右上有 **重新整理** icon:點擊後 `POST /api/line-groups/refresh-all` 批次拉每個 group 的 LINE display name、若 LINE 回 404(bot 已被踢出 / token 失效)就把 row 標記 `left_at = NOW()` 從 UI 中移除,接著 `refetchQueries(['lineGroups', 'lineGroupConfigs'])` 並 toast「已更新 N 個群組名稱、移除 M 個已退出群組」。每筆 config 有編輯/刪除按鈕,新增推播時用可搜尋的 `GroupPushConfigModal` 選帳戶 / 行銷活動(combobox 顯示活動狀態 badge)。
 - 推播設定 modal 預設值:每週五 09:00 / 本月1日-昨日 / 花費+%/私訊數/私訊成本 / `include_report_button=false` / `include_recommendations=false`(兩者都是 opt-in)。
 

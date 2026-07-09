@@ -11,6 +11,7 @@ import { accountStatusColor, accountStatusLabel } from "@/lib/accountStatus";
 import { cn } from "@/lib/cn";
 import { queryClient } from "@/lib/queryClient";
 import { useAccountsStore } from "@/stores/accountsStore";
+import { useFinanceStore } from "@/stores/financeStore";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -40,6 +41,11 @@ export function SettingsView() {
   const setSelectedIds = useAccountsStore((s) => s.setSelectedIds);
   const order = useAccountsStore((s) => s.order);
   const setOrder = useAccountsStore((s) => s.setOrder);
+  // 廣告金額預設% — team-wide fallback markup used by 費用中心 when a
+  // campaign has no per-row override. Lives here (moved out of 費用中心
+  // toolbar) but reads/writes the same finance store / shared setting.
+  const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
+  const setDefaultMarkup = useFinanceStore((s) => s.setDefaultMarkup);
 
   const groups = useMemo(() => groupAccountsByBusiness(allAccounts), [allAccounts]);
   const [activeBmKey, setActiveBmKey] = useState<string | null>(null);
@@ -145,6 +151,31 @@ export function SettingsView() {
     <>
       <Topbar title="廣告帳號設定">
         <div className="flex items-center gap-2 md:gap-3">
+          <div className="flex items-center gap-1">
+            <span className="hidden whitespace-nowrap text-xs text-gray-500 sm:inline">
+              廣告金額預設%
+            </span>
+            <span className="whitespace-nowrap text-xs text-gray-500 sm:hidden">預設%</span>
+            <input
+              type="number"
+              value={defaultMarkup === 0 ? "" : defaultMarkup}
+              placeholder="0"
+              min={0}
+              max={100}
+              step={0.5}
+              onChange={(e) => {
+                const raw = e.currentTarget.value;
+                if (raw === "") {
+                  setDefaultMarkup(0);
+                  return;
+                }
+                const v = Number.parseFloat(raw);
+                if (!Number.isNaN(v)) setDefaultMarkup(v);
+              }}
+              aria-label="廣告金額預設百分比"
+              className="h-9 w-[56px] rounded-lg border-[1.5px] border-border px-1 text-center text-[13px] outline-none focus:border-orange md:h-8 md:w-[54px]"
+            />
+          </div>
           <span
             className={cn(
               "hidden text-xs md:inline",
@@ -162,7 +193,11 @@ export function SettingsView() {
       </Topbar>
       <UpgradeModal state={upgradeState} onClose={() => setUpgradeState(null)} />
 
-      <GraceBanner usage={usageQuery.data} resource="ad_accounts" className="mx-3 mt-3 md:mx-5 md:mt-4" />
+      <GraceBanner
+        usage={usageQuery.data}
+        resource="ad_accounts"
+        className="mx-3 mt-3 md:mx-5 md:mt-4"
+      />
 
       <div className="flex flex-1 flex-col overflow-hidden md:flex-row">
         {/* Left: BM panel — full-width horizontal scroll on mobile,
