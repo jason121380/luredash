@@ -281,50 +281,42 @@ export function ReportContent({
           )}
         </div>
 
-        {/* Campaign-wide KPIs */}
-        <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
-          {selectedFields?.length ? (
-            pickCells(
-              buildKpiCells(campaign, { hideMoney, spendLabel, applyMarkup, trafficMode }),
-              selectedFields,
-            ).map((c) => (
-              <Stat key={c.code} label={c.label} value={c.value} highlight={c.highlight} />
-            ))
-          ) : (
-            <>
-              <Stat label={spendLabel} value={spendMoney(ins.spend)} highlight />
-              <Stat label="曝光" value={fN(ins.impressions)} />
-              <Stat label="點擊" value={fN(ins.clicks)} />
-              <Stat label="CTR" value={fP(ins.ctr)} highlight={trafficMode} />
-              <Stat label="CPC" value={money(ins.cpc)} highlight={trafficMode} />
-              <Stat label="CPM" value={money(ins.cpm)} />
-              <Stat label="頻次" value={fF(ins.frequency)} />
-              <Stat label="觸及" value={fN(ins.reach)} />
-              {!trafficMode && (
-                <>
-                  <Stat label="私訊數" value={msgs > 0 ? fN(msgs) : "—"} highlight={msgs > 0} />
-                  <Stat
-                    label="私訊成本"
-                    value={msgs > 0 ? money(msgCost) : "—"}
-                    highlight={msgs > 0}
-                  />
-                </>
-              )}
-              <Stat
-                label="預算"
-                value={
-                  hideMoney
-                    ? "—"
-                    : campaign.daily_budget
-                      ? `日 $${fM(campaign.daily_budget)}`
-                      : campaign.lifetime_budget
-                        ? `總 $${fM(campaign.lifetime_budget)}`
-                        : "組合層級"
-                }
-              />
-            </>
-          )}
-        </div>
+        {/* Campaign-wide KPIs — single-row table. */}
+        <KpiTable
+          cells={
+            selectedFields?.length
+              ? pickCells(
+                  buildKpiCells(campaign, { hideMoney, spendLabel, applyMarkup, trafficMode }),
+                  selectedFields,
+                )
+              : [
+                  { label: spendLabel, value: spendMoney(ins.spend) },
+                  { label: "曝光", value: fN(ins.impressions) },
+                  { label: "點擊", value: fN(ins.clicks) },
+                  { label: "CTR", value: fP(ins.ctr) },
+                  { label: "CPC", value: money(ins.cpc) },
+                  { label: "CPM", value: money(ins.cpm) },
+                  { label: "頻次", value: fF(ins.frequency) },
+                  { label: "觸及", value: fN(ins.reach) },
+                  ...(!trafficMode
+                    ? [
+                        { label: "私訊數", value: msgs > 0 ? fN(msgs) : "—" },
+                        { label: "私訊成本", value: msgs > 0 ? money(msgCost) : "—" },
+                      ]
+                    : []),
+                  {
+                    label: "預算",
+                    value: hideMoney
+                      ? "—"
+                      : campaign.daily_budget
+                        ? `日 $${fM(campaign.daily_budget)}`
+                        : campaign.lifetime_budget
+                          ? `總 $${fM(campaign.lifetime_budget)}`
+                          : "組合層級",
+                  },
+                ]
+          }
+        />
 
         {/* Recommendations narrative */}
         {showRecommendations && recommendations.length > 0 && (
@@ -848,20 +840,41 @@ function concreteRangeLabel(date: DateConfig): string {
   return `${s.m}/${s.d} - ${e.m}/${e.d}`;
 }
 
-// Uniform grey KPI card — no orange highlight (all metrics look the
-// same regardless of their `highlight` hint, per design feedback).
-function Stat({
-  label,
-  value,
-}: {
-  label: string;
-  value: ReactNode;
-  highlight?: boolean;
-}) {
+/** Campaign KPI presented as a single-row table (labels in the header,
+ *  one row of values). Scrolls horizontally when the selection is wide.
+ *  Shared with `PerformanceReportContent`. */
+export function KpiTable({ cells }: { cells: { label: string; value: ReactNode }[] }) {
+  if (cells.length === 0) return null;
   return (
-    <div className="rounded-xl border border-border bg-white px-3.5 py-3 md:px-4 md:py-3.5">
-      <div className="text-[12px] text-gray-500">{label}</div>
-      <div className="mt-1 text-[17px] font-bold tabular-nums text-ink md:text-[19px]">{value}</div>
+    <div className="overflow-x-auto rounded-xl border border-border bg-white">
+      <table className="w-full border-collapse text-left">
+        <thead>
+          <tr className="border-b border-border">
+            {cells.map((c, i) => (
+              <th
+                // biome-ignore lint/suspicious/noArrayIndexKey: labels can repeat; index is stable here
+                key={i}
+                className="whitespace-nowrap px-3 py-2 text-[12px] font-medium text-gray-500"
+              >
+                {c.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            {cells.map((c, i) => (
+              <td
+                // biome-ignore lint/suspicious/noArrayIndexKey: pairs with the header cell above
+                key={i}
+                className="whitespace-nowrap px-3 py-2.5 text-[16px] font-bold tabular-nums text-ink md:text-[18px]"
+              >
+                {c.value}
+              </td>
+            ))}
+          </tr>
+        </tbody>
+      </table>
     </div>
   );
 }

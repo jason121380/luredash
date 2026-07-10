@@ -15,7 +15,7 @@ import { isTrafficObjective } from "@/lib/recommendations";
 import type { FbAdset, FbCampaign, FbCreativeEntity } from "@/types/fb";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
-import { buildKpiCells, pickCells } from "./ReportContent";
+import { KpiTable, buildKpiCells, pickCells } from "./ReportContent";
 
 /**
  * 成效報告 — creative-performance view of a single campaign, modelled on
@@ -155,22 +155,18 @@ export function PerformanceReportContent({
         )}
       </div>
 
-      {/* Campaign KPIs */}
-      <div className="grid grid-cols-2 gap-2.5 md:grid-cols-5">
-        {headerCells ? (
-          headerCells.map((c) => (
-            <Stat key={c.code} label={c.label} value={c.value} highlight={c.highlight} />
-          ))
-        ) : (
-          <>
-            <Stat label={spendLabel} value={spendValue} highlight />
-            <Stat label="曝光" value={fN(ins.impressions)} />
-            <Stat label="觸及" value={fN(ins.reach)} />
-            <Stat label="CPC" value={money(ins.cpc)} />
-            <Stat label="CTR" value={fP(ins.ctr)} highlight />
-          </>
-        )}
-      </div>
+      {/* Campaign KPIs — single-row table. */}
+      <KpiTable
+        cells={
+          headerCells ?? [
+            { label: spendLabel, value: spendValue },
+            { label: "曝光", value: fN(ins.impressions) },
+            { label: "觸及", value: fN(ins.reach) },
+            { label: "CPC", value: money(ins.cpc) },
+            { label: "CTR", value: fP(ins.ctr) },
+          ]
+        }
+      />
 
       {/* All spending ads, ranked by CTR */}
       <div className="flex flex-col gap-3">
@@ -320,24 +316,6 @@ function Row({ label, value }: { label: string; value: string }) {
     <div className="flex items-center justify-between gap-2">
       <span>{label}</span>
       <span className="font-semibold tabular-nums text-ink">{value}</span>
-    </div>
-  );
-}
-
-// Uniform grey KPI card — no orange highlight (all metrics look the
-// same regardless of their `highlight` hint, per design feedback).
-function Stat({
-  label,
-  value,
-}: {
-  label: string;
-  value: ReactNode;
-  highlight?: boolean;
-}) {
-  return (
-    <div className="rounded-xl border border-border bg-white px-3 py-2.5 md:px-3.5 md:py-3">
-      <div className="text-[12px] text-gray-500">{label}</div>
-      <div className="mt-1 text-[16px] font-bold tabular-nums text-ink md:text-[18px]">{value}</div>
     </div>
   );
 }
