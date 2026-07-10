@@ -329,10 +329,10 @@ function CreativeCard({
           alt=""
           loading={captureMode ? "eager" : "lazy"}
           decoding="async"
-          className="aspect-[3/4] w-full bg-black object-contain"
+          className="aspect-square w-full bg-black object-contain"
         />
       ) : (
-        <div className="flex aspect-[3/4] w-full items-center justify-center bg-bg text-[11px] text-gray-300">
+        <div className="flex aspect-square w-full items-center justify-center bg-bg text-[11px] text-gray-300">
           無縮圖
         </div>
       )}
