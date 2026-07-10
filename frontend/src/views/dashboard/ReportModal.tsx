@@ -7,10 +7,11 @@ import { toast } from "@/components/Toast";
 import type { DateConfig } from "@/lib/datePicker";
 import { toLabel } from "@/lib/datePicker";
 import { DEFAULT_REPORT_FIELDS } from "@/lib/reportFields";
-import { buildShareUrl, buildSnapshotShareUrl } from "@/lib/shareReport";
+import { buildSnapshotShareUrl } from "@/lib/shareReport";
 import { useFinanceStore } from "@/stores/financeStore";
-import type { FbCampaign } from "@/types/fb";
+import type { FbAdset, FbCampaign, FbCreativeEntity } from "@/types/fb";
 import { markupFor } from "@/views/finance/financeData";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { PerformanceReportContent } from "./PerformanceReportContent";
 import { ReportContent } from "./ReportContent";
@@ -46,6 +47,7 @@ export function ReportModal({
   date: DateConfig;
 }) {
   const adsetsQuery = useAdsets(campaign?.id ?? null, date, open && !!campaign);
+  const queryClient = useQueryClient();
   const rowMarkups = useFinanceStore((s) => s.rowMarkups);
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
   const [variant, setVariant] = useState<ReportVariant>("chooser");
@@ -81,29 +83,54 @@ export function ReportModal({
   const savedCreativeFields = creativeFieldsByCampaign[campaign.id] ?? null;
   const updateCreativeFields = (next: string[]) => setCreativeFieldsStore(campaign.id, next);
 
-  const shareUrl = (opts?: { print?: boolean; shot?: boolean }) =>
-    buildShareUrl({
-      campaignId: campaign.id,
-      accountId: campaign._accountId ?? "",
-      hideMoney: false,
-      datePreset: date.preset !== "custom" ? date.preset : undefined,
-      useSpendPlus,
-      markupPercent,
-      variant: variant === "perf" ? "perf" : "standard",
-      selectedFields: effectiveFields,
-      creativeFields: variant === "perf" ? (savedCreativeFields ?? undefined) : undefined,
-      print: opts?.print,
-      shot: opts?.shot,
-    });
+  // Gather the report data the browser has ALREADY loaded (in the React
+  // Query cache) so the backend freezes that instead of re-fetching from
+  // FB — this is what makes 生成報告 fast and avoids the ad-account rate
+  // limit. For each adset we send its cached ads (with the best thumbnail
+  // URL resolved from cache) + cached breakdowns.
+  const buildClientPayload = () => {
+    const adsets = (adsetsQuery.data ?? []) as FbAdset[];
+    const adsByAdset: Record<string, unknown[]> = {};
+    const breakdownsByAdset: Record<string, Record<string, unknown[]>> = {};
+    for (const a of adsets) {
+      const ads = queryClient.getQueryData<FbCreativeEntity[]>(["report-ads", a.id, date]);
+      if (Array.isArray(ads)) {
+        adsByAdset[a.id] = ads.map((ad) => {
+          const cid = ad.creative?.id;
+          const hires = cid
+            ? queryClient.getQueryData<{ thumbnail_url?: string | null }>([
+                "hires-thumbnail",
+                cid,
+                600,
+              ])
+            : null;
+          const best = ad.creative?.image_url || hires?.thumbnail_url || ad.creative?.thumbnail_url;
+          if (best && ad.creative) {
+            return { ...ad, creative: { ...ad.creative, image_url: best } };
+          }
+          return ad;
+        });
+      }
+      if (variant !== "perf") {
+        const dims: Record<string, unknown[]> = {};
+        for (const dim of ["publisher_platform", "gender", "age", "region"]) {
+          const rows = queryClient.getQueryData<unknown[]>(["breakdown", "adset", a.id, dim, date]);
+          if (Array.isArray(rows)) dims[dim] = rows;
+        }
+        if (Object.keys(dims).length > 0) breakdownsByAdset[a.id] = dims;
+      }
+    }
+    return { campaign, adsets, adsByAdset, breakdownsByAdset };
+  };
 
-  // 生成快照: freeze the whole report (data + thumbnails) to the DB and
-  // copy a permanent /r/s/:id link that serves the frozen copy — the
-  // share link no longer hits Facebook on every open. Each click is a
-  // NEW immutable snapshot (see 快照紀錄).
+  // 生成報告: freeze the currently-loaded report (data + thumbnails) to
+  // the DB and copy a permanent /r/s/:id link that serves the frozen copy
+  // — the share link no longer hits Facebook on every open. Each click is
+  // a NEW immutable snapshot (see 生成紀錄).
   const onGenerateSnapshot = async () => {
     if (generating) return;
     setGenerating(true);
-    toast("生成快照中,請稍候(需抓完整份報告)...", "success", 3000);
+    toast("生成報告中,請稍候...", "success", 2500);
     try {
       const dateApi =
         date.preset === "custom" && date.from && date.to
@@ -120,29 +147,21 @@ export function ReportModal({
         markup_percent: markupPercent,
         selected_fields: effectiveFields,
         creative_fields: variant === "perf" ? (savedCreativeFields ?? undefined) : undefined,
+        payload: buildClientPayload(),
       });
       const url = buildSnapshotShareUrl(res.id);
       try {
         await navigator.clipboard.writeText(url);
-        toast("已生成快照並複製分享連結", "success", 3000);
+        toast("已生成報告並複製分享連結", "success", 3000);
       } catch {
-        toast("已生成快照(複製連結失敗,請至快照紀錄複製)", "success", 3000);
+        toast("已生成報告(複製連結失敗,請至生成紀錄複製)", "success", 3000);
       }
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (e) {
-      toast(`生成快照失敗:${friendlyApiError(e)}`, "error", 5000);
+      toast(`生成報告失敗:${friendlyApiError(e)}`, "error", 5000);
     } finally {
       setGenerating(false);
     }
-  };
-
-  // 下載 JPG: open the clean share page with ?shot=1 — it auto-captures
-  // itself to a high-DPI JPEG (long screenshot) and downloads it. FB
-  // thumbnails render through the same-origin proxy so the canvas isn't
-  // tainted.
-  const onDownloadJpg = () => {
-    window.open(shareUrl({ shot: true }), "_blank", "noopener,noreferrer");
-    toast("已開啟報告,長截圖 JPG 產生後會自動下載", "success", 4000);
   };
 
   const isChooser = variant === "chooser";
@@ -160,14 +179,11 @@ export function ReportModal({
         titleAction={
           isChooser ? undefined : (
             <div className="flex items-center gap-2">
-              <Button variant="ghost" size="sm" onClick={onDownloadJpg}>
-                下載 JPG
-              </Button>
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setHistoryOpen(true)}
-                aria-label="快照紀錄"
+                aria-label="生成紀錄"
               >
                 <svg
                   width="14"
@@ -185,7 +201,7 @@ export function ReportModal({
                   <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
                   <path d="M12 7v5l3 2" />
                 </svg>
-                紀錄
+                生成紀錄
               </Button>
               <Button
                 variant="primary"
@@ -193,7 +209,7 @@ export function ReportModal({
                 onClick={onGenerateSnapshot}
                 disabled={generating}
               >
-                {generating ? "生成中..." : "生成快照"}
+                {generating ? "生成中..." : "生成報告"}
               </Button>
             </div>
           )

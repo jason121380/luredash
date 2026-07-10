@@ -54,7 +54,7 @@ export function SnapshotHistoryModal({
     <Modal
       open={open}
       onOpenChange={onOpenChange}
-      title="快照紀錄"
+      title="生成紀錄"
       subtitle={campaignLabel}
       width={640}
     >
@@ -66,7 +66,7 @@ export function SnapshotHistoryModal({
         </div>
       ) : rows.length === 0 ? (
         <div className="px-1 py-8 text-center text-[13px] text-gray-300">
-          尚無快照,回報告按「生成快照」建立第一個。
+          尚無紀錄,回報告按「生成報告」建立第一份。
         </div>
       ) : (
         <div className="flex flex-col gap-2">
