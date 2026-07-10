@@ -15,7 +15,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { PerformanceReportContent } from "./PerformanceReportContent";
 import { ReportContent } from "./ReportContent";
-import { SnapshotHistoryModal } from "./SnapshotHistoryModal";
+import { SnapshotHistoryPanel } from "./SnapshotHistoryModal";
 
 /**
  * Campaign report modal — two report versions selected via a chooser
@@ -52,7 +52,7 @@ export function ReportModal({
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
   const [variant, setVariant] = useState<ReportVariant>("chooser");
   const [generating, setGenerating] = useState(false);
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   // Metric selection is per-campaign + team-wide (ordered, drag-to-
   // reorder), persisted to shared_settings via the finance store.
   const reportFieldsByCampaign = useFinanceStore((s) => s.reportFieldsByCampaign);
@@ -61,9 +61,13 @@ export function ReportModal({
   const creativeFieldsByCampaign = useFinanceStore((s) => s.creativeFieldsByCampaign);
   const setCreativeFieldsStore = useFinanceStore((s) => s.setCreativeFields);
 
-  // Reopen on the chooser step each time (version is picked per open).
+  // Reopen on the chooser step each time (version is picked per open),
+  // and never land straight in the 生成紀錄 view.
   useEffect(() => {
-    if (open) setVariant("chooser");
+    if (open) {
+      setVariant("chooser");
+      setShowHistory(false);
+    }
   }, [open]);
 
   if (!campaign) return null;
@@ -169,103 +173,132 @@ export function ReportModal({
 
   const campaignLabel = campaign.nickname?.trim() || campaign.name;
 
-  return (
-    <>
-      <Modal
-        open={open}
-        onOpenChange={onOpenChange}
-        title={isChooser ? "行銷活動報告" : reportTitle}
-        subtitle={isChooser ? "選擇報告版本" : toLabel(date)}
-        titleAction={
-          isChooser ? undefined : (
-            <div className="flex items-center gap-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setHistoryOpen(true)}
-                aria-label="生成紀錄"
-              >
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                  className="mr-1"
-                >
-                  <path d="M3 3v5h5" />
-                  <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
-                  <path d="M12 7v5l3 2" />
-                </svg>
-                生成紀錄
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={onGenerateSnapshot}
-                disabled={generating}
-              >
-                {generating ? "生成中..." : "生成報告"}
-              </Button>
-            </div>
-          )
-        }
-        width={780}
+  // 生成紀錄 is an IN-PLACE view of this same modal (not a second modal):
+  // the title becomes a 返回 arrow + 「生成紀錄」 that goes back to the
+  // report, and the body swaps to the snapshot list.
+  const modalTitle = showHistory ? (
+    <span className="flex items-center gap-1">
+      <button
+        type="button"
+        aria-label="返回"
+        onClick={() => setShowHistory(false)}
+        onPointerUp={() => setShowHistory(false)}
+        style={{ touchAction: "manipulation" }}
+        className="-ml-1.5 flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-full text-gray-500 hover:bg-bg hover:text-ink"
       >
-        {isChooser ? (
-          <VersionChooser onPick={setVariant} campaignName={campaign.name} />
-        ) : (
-          <>
-            {/* Metric picker — always expanded. 花費 / 花費+% is chosen
-              here too (mutex chips), so there's no separate toggle. */}
-            <div className="mb-4 rounded-xl border border-border bg-bg/50 p-3">
-              <ReportFieldsPicker value={effectiveFields} onChange={updateFields} reorderable />
-            </div>
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          className="pointer-events-none"
+        >
+          <path d="M15 18l-6-6 6-6" />
+        </svg>
+      </button>
+      生成紀錄
+    </span>
+  ) : isChooser ? (
+    "行銷活動報告"
+  ) : (
+    reportTitle
+  );
+  const modalSubtitle = showHistory ? campaignLabel : isChooser ? "選擇報告版本" : toLabel(date);
 
-            {variant === "perf" ? (
-              <PerformanceReportContent
-                campaign={campaign}
-                adsets={adsetsQuery.data ?? null}
-                adsetsLoading={adsetsQuery.isLoading || adsetsQuery.isPending}
-                adsetsError={adsetsQuery.error instanceof Error ? adsetsQuery.error.message : null}
-                hideMoney={false}
-                dateLabel={toLabel(date)}
-                date={date}
-                useSpendPlus={useSpendPlus}
-                markupPercent={markupPercent}
-                selectedFields={effectiveFields}
-                creativeFields={savedCreativeFields}
-                onCreativeFieldsChange={updateCreativeFields}
-              />
-            ) : (
-              <ReportContent
-                campaign={campaign}
-                adsets={adsetsQuery.data ?? null}
-                adsetsLoading={adsetsQuery.isLoading || adsetsQuery.isPending}
-                adsetsError={adsetsQuery.error instanceof Error ? adsetsQuery.error.message : null}
-                hideMoney={false}
-                dateLabel={toLabel(date)}
-                date={date}
-                useSpendPlus={useSpendPlus}
-                markupPercent={markupPercent}
-                selectedFields={effectiveFields}
-              />
-            )}
-          </>
-        )}
-      </Modal>
-      <SnapshotHistoryModal
-        open={historyOpen}
-        onOpenChange={setHistoryOpen}
-        campaignId={campaign.id}
-        campaignLabel={campaignLabel}
-        variant={variant === "perf" ? "perf" : "standard"}
-      />
-    </>
+  return (
+    <Modal
+      open={open}
+      onOpenChange={onOpenChange}
+      title={modalTitle}
+      subtitle={modalSubtitle}
+      titleAction={
+        showHistory || isChooser ? undefined : (
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowHistory(true)}
+              aria-label="生成紀錄"
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+                className="mr-1"
+              >
+                <path d="M3 3v5h5" />
+                <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
+                <path d="M12 7v5l3 2" />
+              </svg>
+              生成紀錄
+            </Button>
+            <Button variant="primary" size="sm" onClick={onGenerateSnapshot} disabled={generating}>
+              {generating ? "生成中..." : "生成報告"}
+            </Button>
+          </div>
+        )
+      }
+      width={780}
+    >
+      {showHistory ? (
+        <SnapshotHistoryPanel
+          campaignId={campaign.id}
+          variant={variant === "perf" ? "perf" : "standard"}
+          active={showHistory}
+        />
+      ) : isChooser ? (
+        <VersionChooser onPick={setVariant} campaignName={campaign.name} />
+      ) : (
+        <>
+          {/* Metric picker — always expanded. 花費 / 花費+% is chosen
+              here too (mutex chips), so there's no separate toggle. */}
+          <div className="mb-4 rounded-xl border border-border bg-bg/50 p-3">
+            <ReportFieldsPicker value={effectiveFields} onChange={updateFields} reorderable />
+          </div>
+
+          {variant === "perf" ? (
+            <PerformanceReportContent
+              campaign={campaign}
+              adsets={adsetsQuery.data ?? null}
+              adsetsLoading={adsetsQuery.isLoading || adsetsQuery.isPending}
+              adsetsError={adsetsQuery.error instanceof Error ? adsetsQuery.error.message : null}
+              hideMoney={false}
+              dateLabel={toLabel(date)}
+              date={date}
+              useSpendPlus={useSpendPlus}
+              markupPercent={markupPercent}
+              selectedFields={effectiveFields}
+              creativeFields={savedCreativeFields}
+              onCreativeFieldsChange={updateCreativeFields}
+            />
+          ) : (
+            <ReportContent
+              campaign={campaign}
+              adsets={adsetsQuery.data ?? null}
+              adsetsLoading={adsetsQuery.isLoading || adsetsQuery.isPending}
+              adsetsError={adsetsQuery.error instanceof Error ? adsetsQuery.error.message : null}
+              hideMoney={false}
+              dateLabel={toLabel(date)}
+              date={date}
+              useSpendPlus={useSpendPlus}
+              markupPercent={markupPercent}
+              selectedFields={effectiveFields}
+            />
+          )}
+        </>
+      )}
+    </Modal>
   );
 }
 
