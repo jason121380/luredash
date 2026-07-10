@@ -3,7 +3,6 @@ import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
 import { ReportFieldsPicker } from "@/components/ReportFieldsPicker";
 import { toast } from "@/components/Toast";
-import { cn } from "@/lib/cn";
 import type { DateConfig } from "@/lib/datePicker";
 import { toLabel } from "@/lib/datePicker";
 import { DEFAULT_REPORT_FIELDS } from "@/lib/reportFields";
@@ -47,11 +46,9 @@ export function ReportModal({
   const adsetsQuery = useAdsets(campaign?.id ?? null, date, open && !!campaign);
   const rowMarkups = useFinanceStore((s) => s.rowMarkups);
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
-  const [useSpendPlus, setUseSpendPlus] = useState(false);
   const [variant, setVariant] = useState<ReportVariant>("chooser");
-  // Metric selection is per-campaign + team-wide (persisted to
-  // shared_settings via the finance store). The stored array is ordered
-  // (drag-to-reorder). null (no entry) → each report's default layout.
+  // Metric selection is per-campaign + team-wide (ordered, drag-to-
+  // reorder), persisted to shared_settings via the finance store.
   const reportFieldsByCampaign = useFinanceStore((s) => s.reportFieldsByCampaign);
   const setReportFieldsStore = useFinanceStore((s) => s.setReportFields);
 
@@ -62,9 +59,14 @@ export function ReportModal({
 
   if (!campaign) return null;
 
-  const selectedFields = reportFieldsByCampaign[campaign.id] ?? null;
-  const updateFields = (next: string[] | null) => setReportFieldsStore(campaign.id, next);
-
+  // The picker is always shown; a campaign with no saved selection
+  // displays the default set (not persisted until the user edits it).
+  const savedFields = reportFieldsByCampaign[campaign.id] ?? null;
+  const effectiveFields = savedFields ?? [...DEFAULT_REPORT_FIELDS];
+  const updateFields = (next: string[]) => setReportFieldsStore(campaign.id, next);
+  // 花費 vs 花費+% is chosen via the 花費 / 花費+% chips in the picker
+  // (mutex) — no separate toggle.
+  const useSpendPlus = effectiveFields.includes("spend_plus");
   const markupPercent = markupFor(campaign.id, rowMarkups, defaultMarkup);
 
   const onShare = async () => {
@@ -76,7 +78,7 @@ export function ReportModal({
       useSpendPlus,
       markupPercent,
       variant: variant === "perf" ? "perf" : "standard",
-      selectedFields,
+      selectedFields: effectiveFields,
     });
     try {
       await navigator.clipboard.writeText(url);
@@ -88,93 +90,32 @@ export function ReportModal({
   };
 
   const isChooser = variant === "chooser";
-  const showFieldPicker = selectedFields !== null;
+  const reportTitle = variant === "perf" ? "以廣告報告" : "以廣告組合報告";
 
   return (
     <Modal
       open={open}
       onOpenChange={onOpenChange}
-      title="行銷活動報告"
+      title={isChooser ? "行銷活動報告" : reportTitle}
       subtitle={isChooser ? "選擇報告版本" : toLabel(date)}
+      titleAction={
+        isChooser ? undefined : (
+          <Button variant="primary" size="sm" onClick={onShare}>
+            複製分享連結
+          </Button>
+        )
+      }
       width={780}
     >
       {isChooser ? (
         <VersionChooser onPick={setVariant} campaignName={campaign.name} />
       ) : (
         <>
-          {/* Top action row (moved out of the modal footer). */}
-          <div className="mb-3 flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={() => setVariant("chooser")}>
-              ← 換版本
-            </Button>
-            <Button variant="primary" size="sm" onClick={onShare}>
-              複製分享連結
-            </Button>
+          {/* Metric picker — always expanded. 花費 / 花費+% is chosen
+              here too (mutex chips), so there's no separate toggle. */}
+          <div className="mb-4 rounded-xl border border-border bg-bg/50 p-3">
+            <ReportFieldsPicker value={effectiveFields} onChange={updateFields} reorderable />
           </div>
-
-          {/* Controls: 花費顯示 mutex toggle + 指標選擇 disclosure. */}
-          <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
-            <div className="flex items-center gap-2">
-              <span className="text-[12px] font-semibold text-gray-500">花費顯示</span>
-              <div className="flex gap-1">
-                <button
-                  type="button"
-                  onClick={() => setUseSpendPlus(false)}
-                  aria-pressed={!useSpendPlus}
-                  className={cn(
-                    "h-7 rounded-full border px-3 text-[11px] font-semibold transition",
-                    !useSpendPlus
-                      ? "border-orange bg-orange-bg text-orange"
-                      : "border-border bg-white text-gray-500 hover:border-orange",
-                  )}
-                >
-                  花費
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setUseSpendPlus(true)}
-                  aria-pressed={useSpendPlus}
-                  className={cn(
-                    "h-7 rounded-full border px-3 text-[11px] font-semibold transition",
-                    useSpendPlus
-                      ? "border-orange bg-orange-bg text-orange"
-                      : "border-border bg-white text-gray-500 hover:border-orange",
-                  )}
-                >
-                  花費+{markupPercent}%
-                </button>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-[12px] font-semibold text-gray-500">顯示指標</span>
-              <button
-                type="button"
-                onClick={() =>
-                  updateFields(selectedFields === null ? [...DEFAULT_REPORT_FIELDS] : null)
-                }
-                aria-pressed={showFieldPicker}
-                className={cn(
-                  "h-7 rounded-full border px-3 text-[11px] font-semibold transition",
-                  showFieldPicker
-                    ? "border-orange bg-orange-bg text-orange"
-                    : "border-border bg-white text-gray-500 hover:border-orange",
-                )}
-              >
-                {showFieldPicker ? "自訂中" : "預設"}
-              </button>
-            </div>
-          </div>
-
-          {/* Metric picker — same catalog as the LINE push report. */}
-          {showFieldPicker && (
-            <div className="mb-4 rounded-xl border border-border bg-bg/50 p-3">
-              <ReportFieldsPicker
-                value={selectedFields ?? []}
-                onChange={updateFields}
-                reorderable
-              />
-            </div>
-          )}
 
           {variant === "perf" ? (
             <PerformanceReportContent
@@ -187,7 +128,7 @@ export function ReportModal({
               date={date}
               useSpendPlus={useSpendPlus}
               markupPercent={markupPercent}
-              selectedFields={selectedFields}
+              selectedFields={effectiveFields}
             />
           ) : (
             <ReportContent
@@ -200,7 +141,7 @@ export function ReportModal({
               date={date}
               useSpendPlus={useSpendPlus}
               markupPercent={markupPercent}
-              selectedFields={selectedFields}
+              selectedFields={effectiveFields}
             />
           )}
         </>
