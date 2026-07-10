@@ -6,6 +6,7 @@ import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
 import { ProgressBar } from "@/components/ProgressBar";
 import { toast } from "@/components/Toast";
+import { actionTypeLabel } from "@/lib/actionTypeLabels";
 import { cn } from "@/lib/cn";
 import { queryClient } from "@/lib/queryClient";
 import { useQuery } from "@tanstack/react-query";
@@ -327,23 +328,47 @@ function ActionTypeProbePanel() {
             </div>
           )}
           {result.action_types.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {result.action_types.map((t) => {
-                const flagged = result.follow_like.includes(t);
-                return (
-                  <span
-                    key={t}
-                    className={cn(
-                      "rounded-full border px-2 py-[2px] text-[11px]",
-                      flagged
-                        ? "border-orange bg-orange-bg font-semibold text-orange"
-                        : "border-border bg-white text-gray-500",
-                    )}
-                  >
-                    {t}
-                  </span>
-                );
-              })}
+            <div className="overflow-x-auto rounded-lg border border-border">
+              <table className="w-full text-[12px]">
+                <thead>
+                  <tr className="border-border border-b bg-bg text-left text-gray-500">
+                    <th className="px-3 py-1.5 font-semibold">action_type(英)</th>
+                    <th className="px-3 py-1.5 font-semibold">中文</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.action_types.map((t) => {
+                    const flagged = result.follow_like.includes(t);
+                    const zh = actionTypeLabel(t);
+                    return (
+                      <tr
+                        key={t}
+                        className={cn(
+                          "border-border border-b last:border-0",
+                          flagged && "bg-orange-bg",
+                        )}
+                      >
+                        <td
+                          className={cn(
+                            "px-3 py-1.5 font-mono text-[11px]",
+                            flagged ? "font-semibold text-orange" : "text-ink",
+                          )}
+                        >
+                          {t}
+                        </td>
+                        <td
+                          className={cn(
+                            "px-3 py-1.5",
+                            flagged ? "font-semibold text-orange" : "text-gray-500",
+                          )}
+                        >
+                          {zh || "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
         </div>

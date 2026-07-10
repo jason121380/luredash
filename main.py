@@ -6331,57 +6331,72 @@ async def _download_snapshot_asset(url: Optional[str]) -> Optional[tuple]:
         return None
 
 
-async def _freeze_ad_thumbnail(conn, sid: str, ad) -> None:
-    """Download the ad's display image, store it under the snapshot, and
-    rewrite `creative.image_url` / `thumbnail_url` to the stored asset URL
-    so the frozen card renders our copy (never the live FB CDN URL)."""
-    if not isinstance(ad, dict):
-        return
-    creative = ad.get("creative")
-    if not isinstance(creative, dict):
-        return
-    src = creative.get("image_url") or creative.get("thumbnail_url")
-    # Video creatives have no image_url; pull the 600px hires thumbnail so
-    # the frozen card isn't blurry (mirrors the live card's needsHires).
-    if not creative.get("image_url") and creative.get("id"):
-        try:
-            hires = await get_creative_hires_thumbnail(str(creative["id"]), 600)
-            if isinstance(hires, dict) and hires.get("thumbnail_url"):
-                src = hires["thumbnail_url"]
-        except Exception:
-            pass
-    fetched = await _download_snapshot_asset(src) if src else None
-    if not fetched:
-        return
-    content, ctype = fetched
-    h = hashlib.sha1(str(src).encode("utf-8")).hexdigest()[:24]
-    await conn.execute(
-        """
-        INSERT INTO report_snapshot_assets (snapshot_id, hash, content_type, bytes)
-        VALUES ($1::uuid, $2, $3, $4)
-        ON CONFLICT (snapshot_id, hash) DO NOTHING
-        """,
-        sid, h, ctype, content,
-    )
-    asset_url = f"/api/report-snapshots/{sid}/asset/{h}"
-    creative["image_url"] = asset_url
-    creative["thumbnail_url"] = asset_url
+async def _freeze_all_thumbnails(conn, sid: str, ads: list) -> None:
+    """Download every ad's display image, store under the snapshot, and
+    rewrite `creative.image_url` / `thumbnail_url` to the stored asset URL.
+    Downloads run concurrently (bounded); DB inserts stay serial on the
+    shared connection.
+
+    Client-supplied payloads already set `image_url` to the best URL the
+    browser had loaded, so NO hires FB call is needed. Only server-fetched
+    video ads without image_url fall back to the hires edge."""
+    entries: list = []  # (creative_dict, src_url)
+    for ad in ads:
+        if not isinstance(ad, dict):
+            continue
+        creative = ad.get("creative")
+        if not isinstance(creative, dict):
+            continue
+        src = creative.get("image_url") or creative.get("thumbnail_url")
+        if not creative.get("image_url") and creative.get("id"):
+            try:
+                hires = await get_creative_hires_thumbnail(str(creative["id"]), 600)
+                if isinstance(hires, dict) and hires.get("thumbnail_url"):
+                    src = hires["thumbnail_url"]
+            except Exception:
+                pass
+        if src:
+            entries.append((creative, src))
+
+    sem = asyncio.Semaphore(8)
+
+    async def _dl(url):
+        async with sem:
+            return await _download_snapshot_asset(url)
+
+    downloaded = await asyncio.gather(*[_dl(src) for (_, src) in entries])
+
+    for (creative, src), fetched in zip(entries, downloaded):
+        if not fetched:
+            continue
+        content, ctype = fetched
+        h = hashlib.sha1(str(src).encode("utf-8")).hexdigest()[:24]
+        await conn.execute(
+            """
+            INSERT INTO report_snapshot_assets (snapshot_id, hash, content_type, bytes)
+            VALUES ($1::uuid, $2, $3, $4)
+            ON CONFLICT (snapshot_id, hash) DO NOTHING
+            """,
+            sid, h, ctype, content,
+        )
+        asset_url = f"/api/report-snapshots/{sid}/asset/{h}"
+        creative["image_url"] = asset_url
+        creative["thumbnail_url"] = asset_url
 
 
 async def _gather_report_snapshot(
-    conn, sid: str, campaign_id: str, date_preset: str, time_range: Optional[str], variant: str
+    conn,
+    sid: str,
+    campaign_id: str,
+    date_preset: str,
+    time_range: Optional[str],
+    variant: str,
+    provided: Optional[dict] = None,
 ) -> dict:
-    """Fetch the full report tree from FB, freeze thumbnails, return the
-    payload dict. One-time cost per generation — the whole point."""
-    campaign_resp = await get_campaign(campaign_id, date_preset, time_range)
-    campaign = campaign_resp.get("data") if isinstance(campaign_resp, dict) else None
-    if not isinstance(campaign, dict):
-        raise HTTPException(status_code=502, detail="無法載入行銷活動資料")
-
-    adsets_resp = await get_adsets(campaign_id, date_preset, time_range)
-    adsets = adsets_resp.get("data", []) if isinstance(adsets_resp, dict) else []
-    if not isinstance(adsets, list):
-        adsets = []
+    """Build the frozen payload. When `provided` (the browser's ALREADY-
+    loaded report data) is present, use ONLY it — zero FB Graph calls, the
+    fast path that avoids the ad-account rate limit (code 17). Otherwise
+    fall back to re-fetching the whole tree from FB."""
 
     def _spend_of(entity) -> float:
         try:
@@ -6390,42 +6405,73 @@ async def _gather_report_snapshot(
         except Exception:
             return 0.0
 
-    ads_by_adset: dict = {}
-    breakdowns_by_adset: dict = {}
-    for adset in adsets:
-        if not isinstance(adset, dict):
-            continue
-        aid = str(adset.get("id") or "")
-        if not aid:
-            continue
+    if provided:
+        campaign = provided.get("campaign") if isinstance(provided.get("campaign"), dict) else {}
+        if not campaign:
+            campaign = {"id": campaign_id}
+        adsets = provided.get("adsets") if isinstance(provided.get("adsets"), list) else []
+        p_ads = provided.get("adsByAdset") if isinstance(provided.get("adsByAdset"), dict) else {}
+        p_bd = provided.get("breakdownsByAdset") if isinstance(provided.get("breakdownsByAdset"), dict) else {}
+        ads_by_adset: dict = {}
+        breakdowns_by_adset: dict = {}
+        for adset in adsets:
+            if not isinstance(adset, dict):
+                continue
+            aid = str(adset.get("id") or "")
+            if not aid:
+                continue
+            ads = p_ads.get(aid)
+            ads_by_adset[aid] = ads if isinstance(ads, list) else []
+            if variant == "standard":
+                bd = p_bd.get(aid)
+                breakdowns_by_adset[aid] = bd if isinstance(bd, dict) else {}
+        # Nickname is a cheap DB lookup (NOT FB) — always attach so the
+        # frozen page shows 店家·設計師 even if the browser's campaign
+        # object didn't carry it.
         try:
-            ads_resp = await get_ads(aid, date_preset, time_range)
-            ads = ads_resp.get("data", []) if isinstance(ads_resp, dict) else []
-        except Exception as exc:
-            print(f"[snapshot] ads fetch failed for {aid}: {exc!r}", flush=True)
-            ads = []
-        if not isinstance(ads, list):
-            ads = []
-        for ad in ads:
-            await _freeze_ad_thumbnail(conn, sid, ad)
-        ads_by_adset[aid] = ads
+            campaign["nickname"] = await _campaign_nickname_display(campaign_id)
+        except Exception:
+            pass
+    else:
+        campaign_resp = await get_campaign(campaign_id, date_preset, time_range)
+        campaign = campaign_resp.get("data") if isinstance(campaign_resp, dict) else None
+        if not isinstance(campaign, dict):
+            raise HTTPException(status_code=502, detail="無法載入行銷活動資料")
+        adsets_resp = await get_adsets(campaign_id, date_preset, time_range)
+        adsets = adsets_resp.get("data", []) if isinstance(adsets_resp, dict) else []
+        if not isinstance(adsets, list):
+            adsets = []
+        ads_by_adset = {}
+        breakdowns_by_adset = {}
+        for adset in adsets:
+            if not isinstance(adset, dict):
+                continue
+            aid = str(adset.get("id") or "")
+            if not aid:
+                continue
+            try:
+                ads_resp = await get_ads(aid, date_preset, time_range)
+                ads = ads_resp.get("data", []) if isinstance(ads_resp, dict) else []
+            except Exception as exc:
+                print(f"[snapshot] ads fetch failed for {aid}: {exc!r}", flush=True)
+                ads = []
+            ads_by_adset[aid] = ads if isinstance(ads, list) else []
+            if variant == "standard":
+                if _spend_of(adset) > 0:
+                    dims: dict = {}
+                    for dim in _SNAPSHOT_BREAKDOWN_DIMS:
+                        try:
+                            bd = await get_insights_breakdown("adset", aid, dim, date_preset, time_range)
+                            dims[dim] = bd.get("data", []) if isinstance(bd, dict) else []
+                        except Exception as exc:
+                            print(f"[snapshot] breakdown {dim} failed for {aid}: {exc!r}", flush=True)
+                            dims[dim] = []
+                    breakdowns_by_adset[aid] = dims
+                else:
+                    breakdowns_by_adset[aid] = {dim: [] for dim in _SNAPSHOT_BREAKDOWN_DIMS}
 
-        # Breakdowns only for the standard report (perf has no strip), and
-        # only for adsets that spent (zero-spend strip is empty anyway —
-        # seed empty so expanding it never fires a live FB call).
-        if variant == "standard":
-            if _spend_of(adset) > 0:
-                dims: dict = {}
-                for dim in _SNAPSHOT_BREAKDOWN_DIMS:
-                    try:
-                        bd = await get_insights_breakdown("adset", aid, dim, date_preset, time_range)
-                        dims[dim] = bd.get("data", []) if isinstance(bd, dict) else []
-                    except Exception as exc:
-                        print(f"[snapshot] breakdown {dim} failed for {aid}: {exc!r}", flush=True)
-                        dims[dim] = []
-                breakdowns_by_adset[aid] = dims
-            else:
-                breakdowns_by_adset[aid] = {dim: [] for dim in _SNAPSHOT_BREAKDOWN_DIMS}
+    flat_ads = [ad for ads in ads_by_adset.values() for ad in (ads or []) if isinstance(ad, dict)]
+    await _freeze_all_thumbnails(conn, sid, flat_ads)
 
     date_from = None
     date_to = None
@@ -6480,9 +6526,12 @@ async def create_report_snapshot(request: Request, fb_user_id: Optional[str] = Q
             campaign_id, account_id, variant, uid, date_label,
         )
         sid = str(row["id"])
+        # The browser posts its already-loaded report tree as `payload`
+        # so we DON'T re-fetch from FB (avoids the ad-account rate limit).
+        provided = body.get("payload") if isinstance(body.get("payload"), dict) else None
         try:
             payload = await _gather_report_snapshot(
-                conn, sid, campaign_id, date_preset, time_range, variant
+                conn, sid, campaign_id, date_preset, time_range, variant, provided
             )
         except Exception:
             # Roll back the shell row so a failed generation leaves no

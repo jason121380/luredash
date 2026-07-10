@@ -647,6 +647,16 @@ export interface ReportSnapshotCreateInput {
   markup_percent?: number;
   selected_fields?: string[] | null;
   creative_fields?: string[] | null;
+  /** The browser's already-loaded report tree (campaign / adsets /
+   *  adsByAdset / breakdownsByAdset). When present the backend freezes
+   *  THIS instead of re-fetching from FB — avoids the ad-account rate
+   *  limit and makes generation near-instant. */
+  payload?: {
+    campaign?: unknown;
+    adsets?: unknown[];
+    adsByAdset?: Record<string, unknown[]>;
+    breakdownsByAdset?: Record<string, Record<string, unknown[]>>;
+  };
 }
 
 export const api = {
