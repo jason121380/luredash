@@ -6,21 +6,39 @@ import type { DateConfig, DatePreset } from "@/lib/datePicker";
 import { toLabel } from "@/lib/datePicker";
 import { PerformanceReportContent } from "@/views/dashboard/PerformanceReportContent";
 import { ReportContent } from "@/views/dashboard/ReportContent";
+import { SnapshotReportPage } from "@/views/report/SnapshotReportPage";
 import { useEffect, useMemo, useRef } from "react";
 
+/** `/r/s/:id` → a frozen snapshot id, else null (live share link). */
+function parseSnapshotIdFromPath(): string | null {
+  if (typeof window === "undefined") return null;
+  const m = window.location.pathname.match(/^\/r\/s\/([^/]+)/);
+  return m?.[1] ? decodeURIComponent(m[1]) : null;
+}
+
 /**
- * Public share-report page. Mounted by App.tsx BEFORE the auth gate
- * when the pathname starts with `/r/` — there is no FB login required
- * to view.
+ * Public share-report route dispatcher. Two flavours:
+ *   - `/r/s/:id`      → frozen snapshot (SnapshotReportPage), zero FB calls.
+ *   - `/r/:campaignId`→ live report (LiveShareReportPage), fetches FB via
+ *                       the server's shared token.
  *
- * Reads campaign_id from the pathname segment and `acct` / `hide` /
- * `date` from the query string. Fetches live data through the backend
- * (which uses the shared runtime token on the server).
- *
- * Layout is intentionally bare — no sidebar, no topbar, no nav. The
- * viewer only sees the report card.
+ * The branch is decided BEFORE any hooks (path is stable per page load),
+ * so each child owns its own hook order.
  */
 export function ShareReportPage() {
+  const snapshotId = parseSnapshotIdFromPath();
+  if (snapshotId) return <SnapshotReportPage snapshotId={snapshotId} />;
+  return <LiveShareReportPage />;
+}
+
+/**
+ * Live share-report page. Mounted for `/r/:campaignId` — no FB login
+ * required; the backend fetches live data with its shared runtime token.
+ *
+ * Reads campaign_id from the pathname segment and `acct` / `hide` /
+ * `date` from the query string.
+ */
+function LiveShareReportPage() {
   const {
     campaignId,
     accountId,

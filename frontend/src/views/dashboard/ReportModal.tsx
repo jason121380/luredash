@@ -1,3 +1,4 @@
+import { api, friendlyApiError } from "@/api/client";
 import { useAdsets } from "@/api/hooks/useAdsets";
 import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
@@ -6,13 +7,14 @@ import { toast } from "@/components/Toast";
 import type { DateConfig } from "@/lib/datePicker";
 import { toLabel } from "@/lib/datePicker";
 import { DEFAULT_REPORT_FIELDS } from "@/lib/reportFields";
-import { buildShareUrl } from "@/lib/shareReport";
+import { buildShareUrl, buildSnapshotShareUrl } from "@/lib/shareReport";
 import { useFinanceStore } from "@/stores/financeStore";
 import type { FbCampaign } from "@/types/fb";
 import { markupFor } from "@/views/finance/financeData";
 import { useEffect, useState } from "react";
 import { PerformanceReportContent } from "./PerformanceReportContent";
 import { ReportContent } from "./ReportContent";
+import { SnapshotHistoryModal } from "./SnapshotHistoryModal";
 
 /**
  * Campaign report modal — two report versions selected via a chooser
@@ -47,6 +49,8 @@ export function ReportModal({
   const rowMarkups = useFinanceStore((s) => s.rowMarkups);
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
   const [variant, setVariant] = useState<ReportVariant>("chooser");
+  const [generating, setGenerating] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   // Metric selection is per-campaign + team-wide (ordered, drag-to-
   // reorder), persisted to shared_settings via the finance store.
   const reportFieldsByCampaign = useFinanceStore((s) => s.reportFieldsByCampaign);
@@ -92,15 +96,44 @@ export function ReportModal({
       shot: opts?.shot,
     });
 
-  const onShare = async () => {
-    const url = shareUrl();
+  // 生成快照: freeze the whole report (data + thumbnails) to the DB and
+  // copy a permanent /r/s/:id link that serves the frozen copy — the
+  // share link no longer hits Facebook on every open. Each click is a
+  // NEW immutable snapshot (see 快照紀錄).
+  const onGenerateSnapshot = async () => {
+    if (generating) return;
+    setGenerating(true);
+    toast("生成快照中,請稍候(需抓完整份報告)...", "success", 3000);
     try {
-      await navigator.clipboard.writeText(url);
-      toast("已複製分享連結", "success", 2500);
-    } catch {
-      /* clipboard write can fail on insecure contexts / iframes */
+      const dateApi =
+        date.preset === "custom" && date.from && date.to
+          ? { time_range: JSON.stringify({ since: date.from, until: date.to }) }
+          : { date_preset: date.preset };
+      const res = await api.reportSnapshots.create(null, {
+        campaign_id: campaign.id,
+        account_id: campaign._accountId ?? undefined,
+        variant: variant === "perf" ? "perf" : "standard",
+        ...dateApi,
+        date_label: toLabel(date),
+        hide_money: false,
+        use_spend_plus: useSpendPlus,
+        markup_percent: markupPercent,
+        selected_fields: effectiveFields,
+        creative_fields: variant === "perf" ? (savedCreativeFields ?? undefined) : undefined,
+      });
+      const url = buildSnapshotShareUrl(res.id);
+      try {
+        await navigator.clipboard.writeText(url);
+        toast("已生成快照並複製分享連結", "success", 3000);
+      } catch {
+        toast("已生成快照(複製連結失敗,請至快照紀錄複製)", "success", 3000);
+      }
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (e) {
+      toast(`生成快照失敗:${friendlyApiError(e)}`, "error", 5000);
+    } finally {
+      setGenerating(false);
     }
-    window.open(url, "_blank", "noopener,noreferrer");
   };
 
   // 下載 JPG: open the clean share page with ?shot=1 — it auto-captures
@@ -115,68 +148,107 @@ export function ReportModal({
   const isChooser = variant === "chooser";
   const reportTitle = variant === "perf" ? "以廣告報告" : "以廣告組合報告";
 
-  return (
-    <Modal
-      open={open}
-      onOpenChange={onOpenChange}
-      title={isChooser ? "行銷活動報告" : reportTitle}
-      subtitle={isChooser ? "選擇報告版本" : toLabel(date)}
-      titleAction={
-        isChooser ? undefined : (
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={onDownloadJpg}>
-              下載 JPG
-            </Button>
-            <Button variant="primary" size="sm" onClick={onShare}>
-              複製分享連結
-            </Button>
-          </div>
-        )
-      }
-      width={780}
-    >
-      {isChooser ? (
-        <VersionChooser onPick={setVariant} campaignName={campaign.name} />
-      ) : (
-        <>
-          {/* Metric picker — always expanded. 花費 / 花費+% is chosen
-              here too (mutex chips), so there's no separate toggle. */}
-          <div className="mb-4 rounded-xl border border-border bg-bg/50 p-3">
-            <ReportFieldsPicker value={effectiveFields} onChange={updateFields} reorderable />
-          </div>
+  const campaignLabel = campaign.nickname?.trim() || campaign.name;
 
-          {variant === "perf" ? (
-            <PerformanceReportContent
-              campaign={campaign}
-              adsets={adsetsQuery.data ?? null}
-              adsetsLoading={adsetsQuery.isLoading || adsetsQuery.isPending}
-              adsetsError={adsetsQuery.error instanceof Error ? adsetsQuery.error.message : null}
-              hideMoney={false}
-              dateLabel={toLabel(date)}
-              date={date}
-              useSpendPlus={useSpendPlus}
-              markupPercent={markupPercent}
-              selectedFields={effectiveFields}
-              creativeFields={savedCreativeFields}
-              onCreativeFieldsChange={updateCreativeFields}
-            />
-          ) : (
-            <ReportContent
-              campaign={campaign}
-              adsets={adsetsQuery.data ?? null}
-              adsetsLoading={adsetsQuery.isLoading || adsetsQuery.isPending}
-              adsetsError={adsetsQuery.error instanceof Error ? adsetsQuery.error.message : null}
-              hideMoney={false}
-              dateLabel={toLabel(date)}
-              date={date}
-              useSpendPlus={useSpendPlus}
-              markupPercent={markupPercent}
-              selectedFields={effectiveFields}
-            />
-          )}
-        </>
-      )}
-    </Modal>
+  return (
+    <>
+      <Modal
+        open={open}
+        onOpenChange={onOpenChange}
+        title={isChooser ? "行銷活動報告" : reportTitle}
+        subtitle={isChooser ? "選擇報告版本" : toLabel(date)}
+        titleAction={
+          isChooser ? undefined : (
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" onClick={onDownloadJpg}>
+                下載 JPG
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setHistoryOpen(true)}
+                aria-label="快照紀錄"
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                  className="mr-1"
+                >
+                  <path d="M3 3v5h5" />
+                  <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
+                  <path d="M12 7v5l3 2" />
+                </svg>
+                紀錄
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={onGenerateSnapshot}
+                disabled={generating}
+              >
+                {generating ? "生成中..." : "生成快照"}
+              </Button>
+            </div>
+          )
+        }
+        width={780}
+      >
+        {isChooser ? (
+          <VersionChooser onPick={setVariant} campaignName={campaign.name} />
+        ) : (
+          <>
+            {/* Metric picker — always expanded. 花費 / 花費+% is chosen
+              here too (mutex chips), so there's no separate toggle. */}
+            <div className="mb-4 rounded-xl border border-border bg-bg/50 p-3">
+              <ReportFieldsPicker value={effectiveFields} onChange={updateFields} reorderable />
+            </div>
+
+            {variant === "perf" ? (
+              <PerformanceReportContent
+                campaign={campaign}
+                adsets={adsetsQuery.data ?? null}
+                adsetsLoading={adsetsQuery.isLoading || adsetsQuery.isPending}
+                adsetsError={adsetsQuery.error instanceof Error ? adsetsQuery.error.message : null}
+                hideMoney={false}
+                dateLabel={toLabel(date)}
+                date={date}
+                useSpendPlus={useSpendPlus}
+                markupPercent={markupPercent}
+                selectedFields={effectiveFields}
+                creativeFields={savedCreativeFields}
+                onCreativeFieldsChange={updateCreativeFields}
+              />
+            ) : (
+              <ReportContent
+                campaign={campaign}
+                adsets={adsetsQuery.data ?? null}
+                adsetsLoading={adsetsQuery.isLoading || adsetsQuery.isPending}
+                adsetsError={adsetsQuery.error instanceof Error ? adsetsQuery.error.message : null}
+                hideMoney={false}
+                dateLabel={toLabel(date)}
+                date={date}
+                useSpendPlus={useSpendPlus}
+                markupPercent={markupPercent}
+                selectedFields={effectiveFields}
+              />
+            )}
+          </>
+        )}
+      </Modal>
+      <SnapshotHistoryModal
+        open={historyOpen}
+        onOpenChange={setHistoryOpen}
+        campaignId={campaign.id}
+        campaignLabel={campaignLabel}
+      />
+    </>
   );
 }
 

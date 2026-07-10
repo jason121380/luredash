@@ -602,6 +602,53 @@ export interface AuthMeResponse {
   picture?: { data: { url: string } };
 }
 
+/** One entry in a campaign's 快照紀錄 list. */
+export interface ReportSnapshotListItem {
+  id: string;
+  variant: "standard" | "perf";
+  label: string | null;
+  date_label: string | null;
+  created_at: string | null;
+}
+
+/** Frozen render payload for a report snapshot. Mirrors the live report
+ *  tree — campaign + adsets + per-adset ads + per-adset breakdowns — with
+ *  thumbnail URLs already rewritten to same-origin stored assets. */
+export interface ReportSnapshotPayload {
+  version: number;
+  campaign: FbCampaign;
+  adsets: FbAdset[];
+  adsByAdset: Record<string, FbCreativeEntity[]>;
+  breakdownsByAdset: Record<string, Record<string, unknown[]>>;
+  meta: {
+    variant: "standard" | "perf";
+    date_preset?: string | null;
+    time_range?: string | null;
+    from?: string | null;
+    to?: string | null;
+    hide_money?: boolean;
+    use_spend_plus?: boolean;
+    markup_percent?: number | null;
+    selected_fields?: string[] | null;
+    creative_fields?: string[] | null;
+    date_label?: string;
+  };
+}
+
+export interface ReportSnapshotCreateInput {
+  campaign_id: string;
+  account_id?: string;
+  variant: "standard" | "perf";
+  date_preset?: string;
+  time_range?: string;
+  date_label?: string;
+  hide_money?: boolean;
+  use_spend_plus?: boolean;
+  markup_percent?: number;
+  selected_fields?: string[] | null;
+  creative_fields?: string[] | null;
+}
+
 export const api = {
   auth: {
     setToken: (token: string) =>
@@ -858,6 +905,40 @@ export const api = {
     source: (videoId: string) =>
       request<{ source?: string; picture?: string }>("GET", `/api/videos/${videoId}/source`, {
         source: "media",
+      }),
+  },
+
+  /** 報告快照 — freeze a campaign report to the DB so the public /r/
+   *  share link serves frozen data (zero FB calls) instead of hitting
+   *  Facebook on every open. Each `create` is a new immutable snapshot. */
+  reportSnapshots: {
+    /** Generate a snapshot. Long-running (gathers the whole report tree
+     *  + downloads thumbnails), so a 5-min timeout. */
+    create: (fbUserId: string | null, input: ReportSnapshotCreateInput) =>
+      request<{ id: string; variant: "standard" | "perf" }>("POST", "/api/report-snapshots", {
+        body: input,
+        query: { fb_user_id: fbUserId ?? undefined },
+        timeoutMs: 300_000,
+        source: "report-snapshot",
+      }),
+    list: (campaignId: string, fbUserId: string | null) =>
+      request<{ data: ReportSnapshotListItem[] }>("GET", "/api/report-snapshots", {
+        query: { campaign_id: campaignId, fb_user_id: fbUserId ?? undefined },
+        source: "report-snapshot",
+      }),
+    /** Public — the share page fetches the frozen payload with no login. */
+    get: (id: string) =>
+      request<{
+        data: ReportSnapshotPayload;
+        variant: "standard" | "perf";
+        label: string | null;
+        date_label: string | null;
+        created_at: string | null;
+      }>("GET", `/api/report-snapshots/${encodeURIComponent(id)}`, { source: "report-snapshot" }),
+    remove: (id: string, fbUserId: string | null) =>
+      request<{ ok: boolean }>("DELETE", `/api/report-snapshots/${encodeURIComponent(id)}`, {
+        query: { fb_user_id: fbUserId ?? undefined },
+        source: "report-snapshot",
       }),
   },
 
