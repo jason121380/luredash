@@ -38,6 +38,10 @@ export interface ShareReportParams {
   /** KPI codes the operator picked (metric selector). Encoded as
    *  `?fields=a,b,c`; null/empty → the report's built-in layout. */
   selectedFields?: string[] | null;
+  /** When true, append `?print=1` — the share page auto-opens the
+   *  browser print dialog once loaded (下載 PDF flow). Native print
+   *  renders the cross-origin FB thumbnails a canvas capture can't. */
+  print?: boolean;
 }
 
 /** Build an absolute share URL the user can paste anywhere. */
@@ -51,6 +55,7 @@ export function buildShareUrl(params: ShareReportParams): string {
     markupPercent,
     variant,
     selectedFields,
+    print,
   } = params;
   const search = new URLSearchParams();
   search.set("acct", accountId);
@@ -58,6 +63,7 @@ export function buildShareUrl(params: ShareReportParams): string {
   if (datePreset) search.set("date", datePreset);
   if (variant === "perf") search.set("report", "perf");
   if (selectedFields?.length) search.set("fields", selectedFields.join(","));
+  if (print) search.set("print", "1");
   if (useSpendPlus) {
     search.set("plus", "1");
     if (markupPercent !== undefined && markupPercent > 0) {

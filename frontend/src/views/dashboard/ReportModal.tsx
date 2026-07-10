@@ -69,8 +69,8 @@ export function ReportModal({
   const useSpendPlus = effectiveFields.includes("spend_plus");
   const markupPercent = markupFor(campaign.id, rowMarkups, defaultMarkup);
 
-  const onShare = async () => {
-    const url = buildShareUrl({
+  const shareUrl = (opts?: { print?: boolean }) =>
+    buildShareUrl({
       campaignId: campaign.id,
       accountId: campaign._accountId ?? "",
       hideMoney: false,
@@ -79,7 +79,11 @@ export function ReportModal({
       markupPercent,
       variant: variant === "perf" ? "perf" : "standard",
       selectedFields: effectiveFields,
+      print: opts?.print,
     });
+
+  const onShare = async () => {
+    const url = shareUrl();
     try {
       await navigator.clipboard.writeText(url);
       toast("已複製分享連結", "success", 2500);
@@ -87,6 +91,14 @@ export function ReportModal({
       /* clipboard write can fail on insecure contexts / iframes */
     }
     window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  // 下載 PDF: open the clean share page with ?print=1 — it auto-opens
+  // the browser print dialog. Native print renders the FB thumbnails a
+  // client-side canvas capture can't (cross-origin, no CORS).
+  const onDownloadPdf = () => {
+    window.open(shareUrl({ print: true }), "_blank", "noopener,noreferrer");
+    toast("已開啟報告,請在列印視窗選擇「儲存為 PDF」", "success", 4000);
   };
 
   const isChooser = variant === "chooser";
@@ -100,9 +112,14 @@ export function ReportModal({
       subtitle={isChooser ? "選擇報告版本" : toLabel(date)}
       titleAction={
         isChooser ? undefined : (
-          <Button variant="primary" size="sm" onClick={onShare}>
-            複製分享連結
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={onDownloadPdf}>
+              下載 PDF
+            </Button>
+            <Button variant="primary" size="sm" onClick={onShare}>
+              複製分享連結
+            </Button>
+          </div>
         )
       }
       width={780}

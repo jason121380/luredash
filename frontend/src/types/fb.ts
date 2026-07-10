@@ -73,6 +73,10 @@ export interface FbCampaign extends FbBaseEntity {
   // account name on multi-account rows
   _accountId?: string;
   _accountName?: string;
+  /** Team-wide 店家 · 設計師 nickname, resolved server-side on
+   *  `GET /api/campaigns/{id}` (share page). Absent on dashboard rows;
+   *  the report falls back to the cached `useNicknames()` map there. */
+  nickname?: string;
 }
 
 /** One row from FB Activity Log (`act_X/activities`). The `extra_data`

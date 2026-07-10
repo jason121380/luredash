@@ -1,4 +1,5 @@
 import { api } from "@/api/client";
+import { useNicknames } from "@/api/hooks/useNicknames";
 import { Badge } from "@/components/Badge";
 import { CreativePreviewModal } from "@/components/CreativePreviewModal";
 import { type DateConfig, resolveRange } from "@/lib/datePicker";
@@ -13,6 +14,7 @@ import {
 import { translateObjective } from "@/lib/objective";
 import { isTrafficObjective } from "@/lib/recommendations";
 import type { FbAdset, FbCampaign, FbCreativeEntity } from "@/types/fb";
+import { formatNickname } from "@/views/finance/financeData";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { KpiTable, buildKpiCells, pickCells } from "./ReportContent";
@@ -76,6 +78,11 @@ export function PerformanceReportContent({
   disablePreview = false,
 }: PerformanceReportContentProps) {
   const ins = getIns(campaign);
+  // 店家 · 設計師 nickname: campaign.nickname (share page) → cached
+  // useNicknames map (dashboard) → raw campaign name.
+  const nicknames = useNicknames();
+  const displayName =
+    campaign.nickname?.trim() || formatNickname(nicknames.data?.[campaign.id]) || campaign.name;
 
   const money = (v: number | string | null | undefined): string =>
     hideMoney ? "—" : v !== null && v !== undefined && v !== "" ? `$${fM(v)}` : "—";
@@ -149,10 +156,7 @@ export function PerformanceReportContent({
             </span>
           )}
         </div>
-        <div className="text-[17px] font-bold text-ink md:text-[18px]">{campaign.name}</div>
-        {campaign._accountName && (
-          <div className="text-[12px] text-gray-500">{campaign._accountName}</div>
-        )}
+        <div className="text-[17px] font-bold text-ink md:text-[18px]">{displayName}</div>
       </div>
 
       {/* Campaign KPIs — single-row table. */}

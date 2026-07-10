@@ -5,7 +5,7 @@ import type { DateConfig, DatePreset } from "@/lib/datePicker";
 import { toLabel } from "@/lib/datePicker";
 import { PerformanceReportContent } from "@/views/dashboard/PerformanceReportContent";
 import { ReportContent } from "@/views/dashboard/ReportContent";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 /**
  * Public share-report page. Mounted by App.tsx BEFORE the auth gate
@@ -32,6 +32,7 @@ export function ShareReportPage() {
     showRecommendations,
     selectedFields,
     reportVariant,
+    autoPrint,
   } = useMemo(() => parseUrl(), []);
 
   // When the LINE push sent us explicit `from` / `to` query params
@@ -55,13 +56,25 @@ export function ShareReportPage() {
 
   const campaign = campaignQuery.data ?? null;
 
+  // 下載 PDF flow: when opened with `?print=1`, auto-open the browser
+  // print dialog once the campaign has loaded. A short delay lets the
+  // KPI table + thumbnails paint first. Native print (unlike a canvas
+  // capture) renders the cross-origin FB CDN images correctly.
+  useEffect(() => {
+    if (!autoPrint || !campaign || campaignQuery.isLoading) return;
+    const t = window.setTimeout(() => window.print(), 1500);
+    return () => window.clearTimeout(t);
+  }, [autoPrint, campaign, campaignQuery.isLoading]);
+
   // `globals.css` locks `html, body` to `overflow: hidden` so the
   // authenticated Shell can manage its own scroll containers. The
   // share page has no Shell wrapping, so we install our own
   // scroll-root via `fixed inset-0 overflow-y-auto`. Without this,
   // any content past the viewport is unreachable on mobile.
   return (
-    <div className="fixed inset-0 overflow-y-auto bg-bg py-6 md:py-10">
+    // print overrides: `fixed`+`overflow` would clip to one viewport
+    // page — force static/visible so the whole report flows onto pages.
+    <div className="fixed inset-0 overflow-y-auto bg-bg py-6 md:py-10 print:static print:overflow-visible print:bg-white print:py-0">
       <div className="mx-auto flex w-full max-w-[960px] flex-col gap-4 px-3 md:px-6">
         <header className="flex items-center gap-3">
           <div className="flex-1">
@@ -142,6 +155,8 @@ function parseUrl(): {
   /** `?report=perf` → render the 成效報告 (Top 5 by CTR). Anything
    *  else (incl. absent) → the standard report. */
   reportVariant: "standard" | "perf";
+  /** `?print=1` → auto-open the print dialog once loaded (下載 PDF). */
+  autoPrint: boolean;
 } {
   if (typeof window === "undefined") {
     return {
@@ -156,6 +171,7 @@ function parseUrl(): {
       showRecommendations: true,
       selectedFields: null,
       reportVariant: "standard",
+      autoPrint: false,
     };
   }
   const path = window.location.pathname;
@@ -188,6 +204,7 @@ function parseUrl(): {
         .filter(Boolean)
     : null;
   const reportVariant = params.get("report") === "perf" ? "perf" : "standard";
+  const autoPrint = params.get("print") === "1";
   return {
     campaignId,
     accountId,
@@ -200,6 +217,7 @@ function parseUrl(): {
     showRecommendations,
     selectedFields,
     reportVariant,
+    autoPrint,
   };
 }
 

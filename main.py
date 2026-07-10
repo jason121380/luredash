@@ -5805,6 +5805,11 @@ async def get_campaign(
             flush=True,
         )
         data = await fb_get(campaign_id, {"fields": base_fields})
+    # Attach the team-wide nickname (店家 · 設計師) so the report / share
+    # page can show it instead of the raw campaign name. Scoped to this
+    # one campaign — we never expose the whole nickname list publicly.
+    if isinstance(data, dict):
+        data["nickname"] = await _campaign_nickname_display(campaign_id)
     return {"data": data}
 
 
