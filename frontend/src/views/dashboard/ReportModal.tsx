@@ -77,7 +77,7 @@ export function ReportModal({
   const savedCreativeFields = creativeFieldsByCampaign[campaign.id] ?? null;
   const updateCreativeFields = (next: string[]) => setCreativeFieldsStore(campaign.id, next);
 
-  const shareUrl = (opts?: { print?: boolean }) =>
+  const shareUrl = (opts?: { print?: boolean; shot?: boolean }) =>
     buildShareUrl({
       campaignId: campaign.id,
       accountId: campaign._accountId ?? "",
@@ -89,6 +89,7 @@ export function ReportModal({
       selectedFields: effectiveFields,
       creativeFields: variant === "perf" ? (savedCreativeFields ?? undefined) : undefined,
       print: opts?.print,
+      shot: opts?.shot,
     });
 
   const onShare = async () => {
@@ -102,12 +103,13 @@ export function ReportModal({
     window.open(url, "_blank", "noopener,noreferrer");
   };
 
-  // 下載 PDF: open the clean share page with ?print=1 — it auto-opens
-  // the browser print dialog. Native print renders the FB thumbnails a
-  // client-side canvas capture can't (cross-origin, no CORS).
-  const onDownloadPdf = () => {
-    window.open(shareUrl({ print: true }), "_blank", "noopener,noreferrer");
-    toast("已開啟報告,請在列印視窗選擇「儲存為 PDF」", "success", 4000);
+  // 下載 JPG: open the clean share page with ?shot=1 — it auto-captures
+  // itself to a high-DPI JPEG (long screenshot) and downloads it. FB
+  // thumbnails render through the same-origin proxy so the canvas isn't
+  // tainted.
+  const onDownloadJpg = () => {
+    window.open(shareUrl({ shot: true }), "_blank", "noopener,noreferrer");
+    toast("已開啟報告,長截圖 JPG 產生後會自動下載", "success", 4000);
   };
 
   const isChooser = variant === "chooser";
@@ -122,8 +124,8 @@ export function ReportModal({
       titleAction={
         isChooser ? undefined : (
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={onDownloadPdf}>
-              下載 PDF
+            <Button variant="ghost" size="sm" onClick={onDownloadJpg}>
+              下載 JPG
             </Button>
             <Button variant="primary" size="sm" onClick={onShare}>
               複製分享連結
