@@ -1,4 +1,5 @@
 import { api } from "@/api/client";
+import { useNicknames } from "@/api/hooks/useNicknames";
 import { useReportAds } from "@/api/hooks/useReportCampaign";
 import { Badge } from "@/components/Badge";
 import { CreativePreviewModal } from "@/components/CreativePreviewModal";
@@ -18,6 +19,7 @@ import {
 import { translateObjective } from "@/lib/objective";
 import { buildCampaignRecommendations, isTrafficObjective } from "@/lib/recommendations";
 import type { FbAdset, FbBaseEntity, FbCampaign, FbCreativeEntity } from "@/types/fb";
+import { formatNickname } from "@/views/finance/financeData";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, createContext, useContext, useEffect, useState } from "react";
 import { BreakdownInsightStrip } from "./BreakdownInsightStrip";
@@ -230,6 +232,11 @@ export function ReportContent({
   const frequency = num(ins.frequency);
   const msgCost = msgs > 0 ? spend / msgs : 0;
   const trafficMode = isTrafficObjective(campaign.objective);
+  // Prefer the 店家 · 設計師 nickname: campaign.nickname (share page,
+  // server-resolved) → cached useNicknames map (dashboard) → raw name.
+  const nicknames = useNicknames();
+  const displayName =
+    campaign.nickname?.trim() || formatNickname(nicknames.data?.[campaign.id]) || campaign.name;
 
   const recommendations = buildCampaignRecommendations({
     spend,
@@ -275,10 +282,7 @@ export function ReportContent({
               </span>
             )}
           </div>
-          <div className="text-[17px] font-bold text-ink md:text-[18px]">{campaign.name}</div>
-          {campaign._accountName && (
-            <div className="text-[12px] text-gray-500">{campaign._accountName}</div>
-          )}
+          <div className="text-[17px] font-bold text-ink md:text-[18px]">{displayName}</div>
         </div>
 
         {/* Campaign-wide KPIs — single-row table. */}

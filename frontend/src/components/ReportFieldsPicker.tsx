@@ -2,6 +2,7 @@ import { cn } from "@/lib/cn";
 import {
   DEFAULT_REPORT_FIELDS,
   REPORT_FIELDS,
+  type ReportFieldDef,
   addReportFieldOrdered,
   moveReportField,
   selectAllReportFields,
@@ -20,6 +21,10 @@ import { useState } from "react";
  *     the value array's order is meaningful and preserved. Unselected
  *     chips follow, tap to add (appended to the end).
  *
+ * `catalog` / `defaults` default to the campaign-KPI set (REPORT_FIELDS)
+ * but can be overridden — the 成效報告 素材卡 selector passes
+ * CREATIVE_FIELDS / DEFAULT_CREATIVE_FIELDS.
+ *
  * Mutex groups (spend / spend_plus) auto-deselect siblings in both
  * modes. 「全選」/「還原預設」 behave the same.
  */
@@ -28,14 +33,18 @@ export interface ReportFieldsPickerProps {
   onChange: (next: string[]) => void;
   /** Enable drag-to-reorder of selected chips (dashboard report). */
   reorderable?: boolean;
+  /** Field catalog. Defaults to the campaign-KPI REPORT_FIELDS. */
+  catalog?: ReportFieldDef[];
+  /** Codes restored by 還原預設. Defaults to DEFAULT_REPORT_FIELDS. */
+  defaults?: string[];
 }
-
-const LABEL_BY_CODE = new Map(REPORT_FIELDS.map((f) => [f.code, f.label] as const));
 
 export function ReportFieldsPicker({
   value,
   onChange,
   reorderable = false,
+  catalog = REPORT_FIELDS,
+  defaults = DEFAULT_REPORT_FIELDS,
 }: ReportFieldsPickerProps) {
   return (
     <div className="flex flex-col gap-1.5">
@@ -44,7 +53,7 @@ export function ReportFieldsPicker({
         <div className="flex items-center gap-2 text-[11px] text-gray-300">
           <button
             type="button"
-            onClick={() => onChange(selectAllReportFields())}
+            onClick={() => onChange(selectAllReportFields(catalog))}
             className="hover:text-orange"
           >
             全選
@@ -52,7 +61,7 @@ export function ReportFieldsPicker({
           <span className="text-gray-300/60">|</span>
           <button
             type="button"
-            onClick={() => onChange([...DEFAULT_REPORT_FIELDS])}
+            onClick={() => onChange([...defaults])}
             className="hover:text-orange"
           >
             還原預設
@@ -61,16 +70,16 @@ export function ReportFieldsPicker({
       </div>
 
       {reorderable ? (
-        <ReorderableChips value={value} onChange={onChange} />
+        <ReorderableChips value={value} onChange={onChange} catalog={catalog} />
       ) : (
         <div className="flex flex-wrap gap-1.5">
-          {REPORT_FIELDS.map((field) => {
+          {catalog.map((field) => {
             const selected = value.includes(field.code);
             return (
               <button
                 key={field.code}
                 type="button"
-                onClick={() => onChange(toggleReportField(value, field.code))}
+                onClick={() => onChange(toggleReportField(value, field.code, catalog))}
                 className={cn(
                   "h-7 rounded-full border px-2.5 text-[11px] font-semibold transition",
                   selected
@@ -96,12 +105,15 @@ export function ReportFieldsPicker({
 function ReorderableChips({
   value,
   onChange,
+  catalog,
 }: {
   value: string[];
   onChange: (next: string[]) => void;
+  catalog: ReportFieldDef[];
 }) {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const unselected = REPORT_FIELDS.filter((f) => !value.includes(f.code));
+  const labelByCode = new Map(catalog.map((f) => [f.code, f.label] as const));
+  const unselected = catalog.filter((f) => !value.includes(f.code));
 
   const onDrop = (targetIndex: number) => {
     if (dragIndex === null) return;
@@ -134,10 +146,10 @@ function ReorderableChips({
                 <span aria-hidden="true" className="text-orange/50">
                   ⠿
                 </span>
-                <span>{LABEL_BY_CODE.get(code) ?? code}</span>
+                <span>{labelByCode.get(code) ?? code}</span>
                 <button
                   type="button"
-                  aria-label={`移除 ${LABEL_BY_CODE.get(code) ?? code}`}
+                  aria-label={`移除 ${labelByCode.get(code) ?? code}`}
                   onClick={() => onChange(value.filter((c) => c !== code))}
                   className="ml-0.5 text-orange/60 hover:text-orange"
                 >

@@ -37,6 +37,38 @@ export const REPORT_FIELDS: ReportFieldDef[] = [
  *  跟加成後的花費)。 */
 export const MUTEX_GROUPS: string[][] = [["spend", "spend_plus"]];
 
+/** 成效報告「素材卡」可選的欄位(每張素材卡顯示的指標)。跟活動 KPI
+ *  的 REPORT_FIELDS 不同:多了影片 / 自然互動的素材專屬指標。 */
+export const CREATIVE_FIELDS: ReportFieldDef[] = [
+  { code: "ctr", label: "點擊率" },
+  { code: "cpc", label: "點擊成本" },
+  { code: "impressions", label: "曝光" },
+  { code: "avg_watch", label: "平均播放時間" },
+  { code: "reactions", label: "按讚" },
+  { code: "saves", label: "收藏" },
+  { code: "shares", label: "分享" },
+  { code: "spend", label: "花費" },
+  { code: "clicks", label: "點擊" },
+  { code: "cpm", label: "CPM" },
+  { code: "reach", label: "觸及" },
+  { code: "frequency", label: "頻次" },
+  { code: "link_clicks", label: "連結點擊" },
+  { code: "cost_per_link_click", label: "連結點擊成本" },
+  { code: "msgs", label: "私訊數" },
+  { code: "msg_cost", label: "私訊成本" },
+];
+
+/** 素材卡預設欄位 — 等於改版前卡片本來就顯示的那幾個。 */
+export const DEFAULT_CREATIVE_FIELDS = [
+  "ctr",
+  "cpc",
+  "impressions",
+  "avg_watch",
+  "reactions",
+  "saves",
+  "shares",
+];
+
 /** 預設選擇 — 與 backend 內建預設一致 (spend 而非 spend_plus,
  *  因為對內監控通常想看真實花費)。 */
 export const DEFAULT_REPORT_FIELDS = [
@@ -50,18 +82,22 @@ export const DEFAULT_REPORT_FIELDS = [
 ];
 
 /** 計算「全選」時的 code 陣列 — 互斥群組各只取第一個 code 避免
- *  spend / spend_plus 被同時勾起。 */
-export function selectAllReportFields(): string[] {
+ *  spend / spend_plus 被同時勾起。可傳入自訂 catalog(素材卡用)。 */
+export function selectAllReportFields(catalog: ReportFieldDef[] = REPORT_FIELDS): string[] {
   const blocked = new Set<string>();
   for (const group of MUTEX_GROUPS) {
     for (const code of group.slice(1)) blocked.add(code);
   }
-  return REPORT_FIELDS.filter((f) => !blocked.has(f.code)).map((f) => f.code);
+  return catalog.filter((f) => !blocked.has(f.code)).map((f) => f.code);
 }
 
 /** Toggle 一個 code 的勾選狀態,並依 mutex 規則自動清掉同群組的
  *  其他 code。回傳依 catalog 順序排好的新 code 陣列。 */
-export function toggleReportField(current: string[], code: string): string[] {
+export function toggleReportField(
+  current: string[],
+  code: string,
+  catalog: ReportFieldDef[] = REPORT_FIELDS,
+): string[] {
   const set = new Set(current);
   if (set.has(code)) {
     set.delete(code);
@@ -75,7 +111,7 @@ export function toggleReportField(current: string[], code: string): string[] {
     }
     set.add(code);
   }
-  return REPORT_FIELDS.filter((f) => set.has(f.code)).map((f) => f.code);
+  return catalog.filter((f) => set.has(f.code)).map((f) => f.code);
 }
 
 /** 從 server config 的 report_fields 解析:空陣列 → fallback 到預設。 */

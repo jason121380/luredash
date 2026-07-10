@@ -141,6 +141,7 @@ describe("financeStore — PG-backed shared settings", () => {
       defaultMarkup: 10,
       showNicknames: false,
       reportFieldsByCampaign: { cmp_1: ["spend", "ctr"] },
+      creativeFieldsByCampaign: { cmp_1: ["ctr", "saves"] },
     });
     const s = useFinanceStore.getState();
     expect(s.rowMarkups).toEqual({ cmp_1: 7.5 });
@@ -148,6 +149,7 @@ describe("financeStore — PG-backed shared settings", () => {
     expect(s.defaultMarkup).toBe(10);
     expect(s.showNicknames).toBe(false);
     expect(s.reportFieldsByCampaign).toEqual({ cmp_1: ["spend", "ctr"] });
+    expect(s.creativeFieldsByCampaign).toEqual({ cmp_1: ["ctr", "saves"] });
     expect(api.settings.setShared).not.toHaveBeenCalled();
   });
 
@@ -175,6 +177,7 @@ describe("financeStore — PG-backed shared settings", () => {
       defaultMarkup: 5,
       showNicknames: true,
       reportFieldsByCampaign: {},
+      creativeFieldsByCampaign: {},
     });
     useFinanceStore.getState().setReportFields("cmp_A", ["spend", "msgs"]);
     useFinanceStore.getState().setReportFields("cmp_B", ["ctr"]);
@@ -190,5 +193,29 @@ describe("financeStore — PG-backed shared settings", () => {
     // null clears just that campaign's entry.
     useFinanceStore.getState().setReportFields("cmp_A", null);
     expect(useFinanceStore.getState().reportFieldsByCampaign).toEqual({ cmp_B: ["ctr"] });
+  });
+
+  it("setCreativeFields stores per-campaign + POSTs the map (null clears the entry)", async () => {
+    useFinanceStore.getState().hydrateFromServer({
+      rowMarkups: {},
+      pinnedIds: [],
+      defaultMarkup: 5,
+      showNicknames: true,
+      reportFieldsByCampaign: {},
+      creativeFieldsByCampaign: {},
+    });
+    useFinanceStore.getState().setCreativeFields("cmp_A", ["ctr", "saves"]);
+    useFinanceStore.getState().setCreativeFields("cmp_B", ["shares"]);
+    expect(useFinanceStore.getState().creativeFieldsByCampaign).toEqual({
+      cmp_A: ["ctr", "saves"],
+      cmp_B: ["shares"],
+    });
+    await new Promise((r) => setTimeout(r, 550));
+    expect(api.settings.setShared).toHaveBeenLastCalledWith("report_creative_fields", {
+      cmp_A: ["ctr", "saves"],
+      cmp_B: ["shares"],
+    });
+    useFinanceStore.getState().setCreativeFields("cmp_A", null);
+    expect(useFinanceStore.getState().creativeFieldsByCampaign).toEqual({ cmp_B: ["shares"] });
   });
 });
