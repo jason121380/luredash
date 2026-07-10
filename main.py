@@ -1149,6 +1149,51 @@ async def lifespan(app: FastAPI):
                 await conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_billing_events_user ON billing_events (fb_user_id, created_at DESC)"
                 )
+                # `report_snapshots`: frozen 行銷活動報告 for the public
+                # /r/ share link. Generating a snapshot fetches ALL the
+                # report's FB data ONCE (campaign + adsets + per-adset ads
+                # + per-adset breakdowns) and stores it as one JSONB
+                # payload, so every share-link open serves the frozen copy
+                # instead of hammering FB. Each generation is a NEW
+                # immutable row (its own id + created_at) — old links keep
+                # their data. `payload` holds the full render tree with
+                # thumbnail URLs rewritten to /api/report-snapshots/{id}/
+                # asset/{hash} (see report_snapshot_assets).
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS report_snapshots (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        campaign_id TEXT NOT NULL,
+                        account_id TEXT,
+                        variant TEXT NOT NULL DEFAULT 'standard',
+                        label TEXT,
+                        date_label TEXT,
+                        created_by TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        payload JSONB NOT NULL DEFAULT '{}'::jsonb
+                    )
+                    """
+                )
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_report_snapshots_campaign ON report_snapshots (campaign_id, created_at DESC)"
+                )
+                # `report_snapshot_assets`: the creative thumbnails for a
+                # snapshot, stored as bytes on OUR server so the frozen
+                # report's images never break when the FB signed CDN URL
+                # expires (days). Keyed by a hash of the original URL so a
+                # creative reused across adsets is stored once. Cascade-
+                # deleted with the parent snapshot.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS report_snapshot_assets (
+                        snapshot_id UUID NOT NULL REFERENCES report_snapshots(id) ON DELETE CASCADE,
+                        hash TEXT NOT NULL,
+                        content_type TEXT NOT NULL DEFAULT 'image/jpeg',
+                        bytes BYTEA NOT NULL,
+                        PRIMARY KEY (snapshot_id, hash)
+                    )
+                    """
+                )
                 # user_settings is keyed (fb_user_id, key) — the PK
                 # already covers fb_user_id-leading queries, but bare
                 # WHERE fb_user_id=$1 fan-outs benefit from being able
@@ -1455,6 +1500,12 @@ def _is_public_api_request(request: Request) -> bool:
     if path.startswith("/api/cost-center"):
         return True
     if path == "/api/proxy-asset" and method == "GET":
+        return True
+    # Frozen report snapshots for the public /r/ share link: the single
+    # snapshot payload + its stored thumbnail assets are readable without
+    # login (like the live share endpoints below). The bare
+    # `/api/report-snapshots` list + POST/DELETE stay authed.
+    if method == "GET" and re.match(r"^/api/report-snapshots/[^/]+(/asset/[^/]+)?$", path):
         return True
     # Public share reports (/r/...) load these read-only FB proxy endpoints
     # with the server's persisted runtime token and no browser login.
@@ -6188,6 +6239,306 @@ async def get_creative_hires_thumbnail(creative_id: str, size: int = 600):
         return {"thumbnail_url": None, "error": str(exc.detail)}
     url = data.get("thumbnail_url") if isinstance(data, dict) else None
     return {"thumbnail_url": url if isinstance(url, str) and url else None, "error": None}
+
+
+# ── 報告快照 (frozen share-link reports) ──────────────────────────────
+#
+# 分享連結不再每次跟 FB 拿:操作者按「生成快照」時,後端一次抓完整份
+# 報告(活動 + 廣告組合 + 每組廣告 + 每組受眾洞察 breakdowns),連縮圖
+# 也下載存進 DB,整包凍結成一列 report_snapshots。之後 /r/s/{id} 直接
+# 讀凍結副本,零 FB 呼叫。每次生成都是新的一列(各有 id),舊連結保留
+# 舊資料。
+
+_SNAPSHOT_BREAKDOWN_DIMS = ("publisher_platform", "gender", "age", "region")
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+async def _download_snapshot_asset(url: Optional[str]) -> Optional[tuple]:
+    """Fetch a FB/IG CDN image → (bytes, content_type), or None on any
+    failure (a broken thumbnail must never abort the whole snapshot)."""
+    if not url or not isinstance(url, str):
+        return None
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(url).hostname or "").lower()
+        if not any(host == s.lstrip(".") or host.endswith(s) for s in _PROXY_ALLOWED_HOST_SUFFIXES):
+            return None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get(url, follow_redirects=True)
+        if r.status_code != 200 or not r.content:
+            return None
+        ctype = r.headers.get("content-type", "image/jpeg")
+        if not ctype.startswith("image/"):
+            ctype = "image/jpeg"
+        return r.content, ctype
+    except Exception as exc:
+        print(f"[snapshot] asset fetch failed: {exc!r}", flush=True)
+        return None
+
+
+async def _freeze_ad_thumbnail(conn, sid: str, ad) -> None:
+    """Download the ad's display image, store it under the snapshot, and
+    rewrite `creative.image_url` / `thumbnail_url` to the stored asset URL
+    so the frozen card renders our copy (never the live FB CDN URL)."""
+    if not isinstance(ad, dict):
+        return
+    creative = ad.get("creative")
+    if not isinstance(creative, dict):
+        return
+    src = creative.get("image_url") or creative.get("thumbnail_url")
+    # Video creatives have no image_url; pull the 600px hires thumbnail so
+    # the frozen card isn't blurry (mirrors the live card's needsHires).
+    if not creative.get("image_url") and creative.get("id"):
+        try:
+            hires = await get_creative_hires_thumbnail(str(creative["id"]), 600)
+            if isinstance(hires, dict) and hires.get("thumbnail_url"):
+                src = hires["thumbnail_url"]
+        except Exception:
+            pass
+    fetched = await _download_snapshot_asset(src) if src else None
+    if not fetched:
+        return
+    content, ctype = fetched
+    h = hashlib.sha1(str(src).encode("utf-8")).hexdigest()[:24]
+    await conn.execute(
+        """
+        INSERT INTO report_snapshot_assets (snapshot_id, hash, content_type, bytes)
+        VALUES ($1::uuid, $2, $3, $4)
+        ON CONFLICT (snapshot_id, hash) DO NOTHING
+        """,
+        sid, h, ctype, content,
+    )
+    asset_url = f"/api/report-snapshots/{sid}/asset/{h}"
+    creative["image_url"] = asset_url
+    creative["thumbnail_url"] = asset_url
+
+
+async def _gather_report_snapshot(
+    conn, sid: str, campaign_id: str, date_preset: str, time_range: Optional[str], variant: str
+) -> dict:
+    """Fetch the full report tree from FB, freeze thumbnails, return the
+    payload dict. One-time cost per generation — the whole point."""
+    campaign_resp = await get_campaign(campaign_id, date_preset, time_range)
+    campaign = campaign_resp.get("data") if isinstance(campaign_resp, dict) else None
+    if not isinstance(campaign, dict):
+        raise HTTPException(status_code=502, detail="無法載入行銷活動資料")
+
+    adsets_resp = await get_adsets(campaign_id, date_preset, time_range)
+    adsets = adsets_resp.get("data", []) if isinstance(adsets_resp, dict) else []
+    if not isinstance(adsets, list):
+        adsets = []
+
+    def _spend_of(entity) -> float:
+        try:
+            ins = (entity.get("insights") or {}).get("data") or []
+            return float(ins[0].get("spend") or 0) if ins else 0.0
+        except Exception:
+            return 0.0
+
+    ads_by_adset: dict = {}
+    breakdowns_by_adset: dict = {}
+    for adset in adsets:
+        if not isinstance(adset, dict):
+            continue
+        aid = str(adset.get("id") or "")
+        if not aid:
+            continue
+        try:
+            ads_resp = await get_ads(aid, date_preset, time_range)
+            ads = ads_resp.get("data", []) if isinstance(ads_resp, dict) else []
+        except Exception as exc:
+            print(f"[snapshot] ads fetch failed for {aid}: {exc!r}", flush=True)
+            ads = []
+        if not isinstance(ads, list):
+            ads = []
+        for ad in ads:
+            await _freeze_ad_thumbnail(conn, sid, ad)
+        ads_by_adset[aid] = ads
+
+        # Breakdowns only for the standard report (perf has no strip), and
+        # only for adsets that spent (zero-spend strip is empty anyway —
+        # seed empty so expanding it never fires a live FB call).
+        if variant == "standard":
+            if _spend_of(adset) > 0:
+                dims: dict = {}
+                for dim in _SNAPSHOT_BREAKDOWN_DIMS:
+                    try:
+                        bd = await get_insights_breakdown("adset", aid, dim, date_preset, time_range)
+                        dims[dim] = bd.get("data", []) if isinstance(bd, dict) else []
+                    except Exception as exc:
+                        print(f"[snapshot] breakdown {dim} failed for {aid}: {exc!r}", flush=True)
+                        dims[dim] = []
+                breakdowns_by_adset[aid] = dims
+            else:
+                breakdowns_by_adset[aid] = {dim: [] for dim in _SNAPSHOT_BREAKDOWN_DIMS}
+
+    date_from = None
+    date_to = None
+    if time_range:
+        try:
+            tr = json.loads(time_range)
+            date_from = tr.get("since")
+            date_to = tr.get("until")
+        except Exception:
+            pass
+
+    return {
+        "version": 1,
+        "campaign": campaign,
+        "adsets": adsets,
+        "adsByAdset": ads_by_adset,
+        "breakdownsByAdset": breakdowns_by_adset,
+        "meta": {
+            "variant": variant,
+            "date_preset": date_preset,
+            "time_range": time_range,
+            "from": date_from,
+            "to": date_to,
+        },
+    }
+
+
+@app.post("/api/report-snapshots")
+async def create_report_snapshot(request: Request, fb_user_id: Optional[str] = Query(None)):
+    if _db_pool is None:
+        raise HTTPException(status_code=503, detail="資料庫尚未連線")
+    body = await request.json()
+    campaign_id = str(body.get("campaign_id") or "").strip()
+    if not campaign_id:
+        raise HTTPException(status_code=400, detail="缺少 campaign_id")
+    account_id = (str(body.get("account_id") or "").strip() or None)
+    variant = "perf" if body.get("variant") == "perf" else "standard"
+    date_preset = body.get("date_preset") or "last_30d"
+    time_range = body.get("time_range") or None
+    date_label = body.get("date_label") or ""
+    uid = (fb_user_id or _current_fb_user_id.get() or "").strip() or None
+
+    async with _db_pool.acquire() as conn:
+        # Shell row first so the assets FK is satisfiable while we stream
+        # thumbnails in, then UPDATE the payload once gathering finishes.
+        row = await conn.fetchrow(
+            """
+            INSERT INTO report_snapshots (campaign_id, account_id, variant, created_by, date_label)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
+            """,
+            campaign_id, account_id, variant, uid, date_label,
+        )
+        sid = str(row["id"])
+        try:
+            payload = await _gather_report_snapshot(
+                conn, sid, campaign_id, date_preset, time_range, variant
+            )
+        except Exception:
+            # Roll back the shell row so a failed generation leaves no
+            # empty record in the history list.
+            await conn.execute("DELETE FROM report_snapshots WHERE id = $1::uuid", sid)
+            raise
+        payload["meta"].update(
+            {
+                "hide_money": bool(body.get("hide_money")),
+                "use_spend_plus": bool(body.get("use_spend_plus")),
+                "markup_percent": body.get("markup_percent"),
+                "selected_fields": body.get("selected_fields"),
+                "creative_fields": body.get("creative_fields"),
+                "date_label": date_label,
+            }
+        )
+        camp = payload.get("campaign") or {}
+        label = (camp.get("nickname") or camp.get("name")) if isinstance(camp, dict) else None
+        await conn.execute(
+            "UPDATE report_snapshots SET payload = $2::jsonb, label = $3 WHERE id = $1::uuid",
+            sid, json.dumps(payload), label,
+        )
+    return {"id": sid, "variant": variant}
+
+
+@app.get("/api/report-snapshots")
+async def list_report_snapshots(
+    campaign_id: str = Query(...), fb_user_id: Optional[str] = Query(None)
+):
+    if _db_pool is None:
+        raise HTTPException(status_code=503, detail="資料庫尚未連線")
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, variant, label, date_label, created_at
+            FROM report_snapshots
+            WHERE campaign_id = $1
+            ORDER BY created_at DESC
+            LIMIT 100
+            """,
+            campaign_id,
+        )
+    return {
+        "data": [
+            {
+                "id": str(r["id"]),
+                "variant": r["variant"],
+                "label": r["label"],
+                "date_label": r["date_label"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/report-snapshots/{snapshot_id}")
+async def get_report_snapshot(snapshot_id: str):
+    if _db_pool is None:
+        raise HTTPException(status_code=503, detail="資料庫尚未連線")
+    if not _UUID_RE.match(snapshot_id):
+        raise HTTPException(status_code=404, detail="找不到報告快照")
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT variant, label, date_label, created_at, payload FROM report_snapshots WHERE id = $1::uuid",
+            snapshot_id,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="找不到報告快照")
+    payload = row["payload"]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    return {
+        "data": payload,
+        "variant": row["variant"],
+        "label": row["label"],
+        "date_label": row["date_label"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+@app.get("/api/report-snapshots/{snapshot_id}/asset/{asset_hash}")
+async def get_report_snapshot_asset(snapshot_id: str, asset_hash: str):
+    if _db_pool is None:
+        raise HTTPException(status_code=503, detail="資料庫尚未連線")
+    if not _UUID_RE.match(snapshot_id):
+        raise HTTPException(status_code=404, detail="asset not found")
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT content_type, bytes FROM report_snapshot_assets WHERE snapshot_id = $1::uuid AND hash = $2",
+            snapshot_id, asset_hash,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="asset not found")
+    return Response(
+        content=row["bytes"],
+        media_type=row["content_type"] or "image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@app.delete("/api/report-snapshots/{snapshot_id}")
+async def delete_report_snapshot(snapshot_id: str, fb_user_id: Optional[str] = Query(None)):
+    if _db_pool is None:
+        raise HTTPException(status_code=503, detail="資料庫尚未連線")
+    if not _UUID_RE.match(snapshot_id):
+        return {"ok": True}
+    async with _db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM report_snapshots WHERE id = $1::uuid", snapshot_id)
+    return {"ok": True}
 
 
 @app.get("/api/pages/{page_id}/info")

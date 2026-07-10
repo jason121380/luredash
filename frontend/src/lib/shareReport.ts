@@ -53,6 +53,14 @@ export interface ShareReportParams {
   shot?: boolean;
 }
 
+/** Absolute share URL for a frozen report snapshot. Self-contained —
+ *  every render option is baked into the stored payload, so the link is
+ *  just the snapshot id. Opening it serves frozen data (zero FB calls). */
+export function buildSnapshotShareUrl(snapshotId: string): string {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  return `${origin}/r/s/${encodeURIComponent(snapshotId)}`;
+}
+
 /** Build an absolute share URL the user can paste anywhere. */
 export function buildShareUrl(params: ShareReportParams): string {
   const {
