@@ -77,8 +77,10 @@ export function SnapshotHistoryModal({
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-[950] bg-black/40 md:animate-fade-in" />
         <Dialog.Content className="fixed inset-0 z-[951] flex flex-col bg-bg focus:outline-none md:animate-fade-in">
-          {/* Header — back arrow top-left. */}
-          <div className="flex items-center gap-2.5 border-border border-b bg-white px-3 py-2.5 md:px-4 md:py-3">
+          {/* Header — back arrow top-left. On mobile the white header
+              extends up under the iOS status bar / notch (safe-area top
+              inset) so the 返回 button is reachable, not hidden. */}
+          <div className="flex items-center gap-2.5 border-border border-b bg-white px-3 pb-2.5 pt-[calc(env(safe-area-inset-top)+0.625rem)] md:px-4 md:py-3">
             <button
               type="button"
               aria-label="返回"
@@ -136,7 +138,7 @@ export function SnapshotHistoryModal({
           </div>
 
           {/* Body */}
-          <div className="flex-1 overflow-y-auto px-3 py-4 md:px-4">
+          <div className="flex-1 overflow-y-auto px-3 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] md:px-4">
             <div className="mx-auto w-full max-w-[720px]">
               {q.isLoading ? (
                 <div className="px-1 py-10 text-center text-[13px] text-gray-300">載入中...</div>
