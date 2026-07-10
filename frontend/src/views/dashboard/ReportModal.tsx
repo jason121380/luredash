@@ -263,6 +263,7 @@ export function ReportModal({
         onOpenChange={setHistoryOpen}
         campaignId={campaign.id}
         campaignLabel={campaignLabel}
+        variant={variant === "perf" ? "perf" : "standard"}
       />
     </>
   );
