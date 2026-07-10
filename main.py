@@ -6103,6 +6103,60 @@ async def get_insights_breakdown(
     return {"data": out, "level": level, "dim": dim}
 
 
+@app.get("/api/debug/entity-actions")
+async def debug_entity_actions(
+    level: str,
+    id: str,
+    date_preset: str = "last_90d",
+    time_range: Optional[str] = None,
+):
+    """Dump EVERY action_type Facebook attributes to an entity (ad /
+    adset / campaign). Diagnostic only — surfaced in 工程模式 → 其他 to
+    answer 'is metric X in the API?' questions (e.g. IG 追蹤次數): if an
+    IG-follow action_type ever comes back here, we can wire it as a
+    field; if it never appears, it confirms the API doesn't expose it.
+
+    Not a product endpoint. Uses a wide 90-day default window to
+    maximise the chance any low-volume conversion has attributed rows.
+    """
+    if level not in ("ad", "adset", "campaign"):
+        raise HTTPException(status_code=400, detail="Invalid level")
+    params: dict[str, Any] = {
+        "fields": "actions,action_values,cost_per_action_type,outbound_clicks,inline_link_clicks",
+    }
+    if time_range:
+        params["time_range"] = time_range
+    else:
+        params["date_preset"] = date_preset
+    rows = await fb_get_paginated(f"{id}/insights", params)
+    actions: list = []
+    cost_per: list = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        for a in r.get("actions") or []:
+            if isinstance(a, dict):
+                actions.append(a)
+        for a in r.get("cost_per_action_type") or []:
+            if isinstance(a, dict):
+                cost_per.append(a)
+    action_types = sorted(
+        {str(a.get("action_type")) for a in actions if a.get("action_type")}
+    )
+    # Flag anything that smells like an IG / follow conversion so the
+    # operator doesn't have to eyeball the whole list.
+    follow_like = [t for t in action_types if any(k in t.lower() for k in ("follow", "instagram", "ig_"))]
+    return {
+        "level": level,
+        "id": id,
+        "action_types": action_types,
+        "follow_like": follow_like,
+        "actions": actions,
+        "cost_per_action_type": cost_per,
+        "rows": len(rows),
+    }
+
+
 @app.get("/api/videos/{video_id}/source")
 async def get_video_source(video_id: str):
     """Fetch the playable source URL + poster for a FB video asset.
