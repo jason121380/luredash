@@ -211,15 +211,18 @@ function RuntimeDiagnosticsPanel() {
   );
 }
 
+const PROBE_DATE = { preset: "last_90d", from: null, to: null } as const;
+
 /**
- * action_type 探針 — 貼一個廣告 / 廣告組合 / 活動 ID,列出 FB 對它歸因
- * 的所有 action_type。用來確認某指標(例如 IG 追蹤次數)到底在不在
- * Marketing API 裡:若 IG-follow 類型有出現就能接成欄位,沒出現就是
- * API 真的不給。90 天視窗以提高低量轉換有資料的機會。
+ * action_type 探針 — 選廣告帳號 + 行銷活動,列出 FB 對該活動歸因的所有
+ * action_type。用來確認某指標(例如 IG 追蹤次數)到底在不在 Marketing
+ * API 裡:若 IG-follow 類型有出現就能接成欄位,沒出現就是 API 真的不給。
+ * 活動層級聚合底下所有廣告的歸因,90 天視窗以提高低量轉換有資料的機會。
  */
 function ActionTypeProbePanel() {
-  const [level, setLevel] = useState<"ad" | "adset" | "campaign">("ad");
-  const [id, setId] = useState("");
+  const accountsQuery = useAccounts();
+  const [accountId, setAccountId] = useState("");
+  const [campaignId, setCampaignId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{
@@ -228,14 +231,23 @@ function ActionTypeProbePanel() {
     rows: number;
   } | null>(null);
 
+  const campaignsQuery = useQuery({
+    queryKey: ["debug-probe-campaigns", accountId],
+    queryFn: () => api.accounts.campaigns(accountId, PROBE_DATE).then((r) => r.data),
+    enabled: !!accountId,
+    staleTime: 5 * 60_000,
+  });
+
+  const accounts = accountsQuery.data ?? [];
+  const campaigns = campaignsQuery.data ?? [];
+
   const run = async () => {
-    const trimmed = id.trim();
-    if (!trimmed || loading) return;
+    if (!campaignId || loading) return;
     setLoading(true);
     setError(null);
     setResult(null);
     try {
-      const r = await api.debug.entityActions(level, trimmed);
+      const r = await api.debug.entityActions("campaign", campaignId);
       setResult({ action_types: r.action_types, follow_like: r.follow_like, rows: r.rows });
     } catch (e) {
       setError(friendlyApiError(e));
@@ -248,34 +260,58 @@ function ActionTypeProbePanel() {
     <div className="rounded-xl border border-border bg-white p-3.5">
       <div className="text-[13px] font-bold text-ink">action_type 探針(IG 追蹤診斷)</div>
       <p className="mt-0.5 text-[11px] text-gray-400">
-        貼一個廣告 / 廣告組合 / 活動 ID,列出 FB 歸因的所有 action_type,確認 IG 追蹤等指標是否在 API
-        內。
+        選廣告帳號 + 行銷活動,列出 FB 對該活動歸因的所有 action_type(近 90 天),確認 IG 追蹤等指標是否在
+        API 內。
       </p>
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
         <select
-          value={level}
-          onChange={(e) => setLevel(e.target.value as "ad" | "adset" | "campaign")}
-          className="h-[30px] rounded-md border border-border bg-white px-2 text-[12px]"
-        >
-          <option value="ad">廣告</option>
-          <option value="adset">廣告組合</option>
-          <option value="campaign">活動</option>
-        </select>
-        <input
-          type="text"
-          value={id}
-          onChange={(e) => setId(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") run();
+          value={accountId}
+          onChange={(e) => {
+            setAccountId(e.target.value);
+            setCampaignId("");
+            setResult(null);
           }}
-          placeholder="輸入 ID(如 120xxxxxxxxxxxx)"
-          className="h-[30px] min-w-[200px] flex-1 rounded-md border border-border bg-white px-2 text-[12px]"
-        />
-        <Button variant="primary" size="sm" onClick={run} disabled={loading || !id.trim()}>
+          className="h-[30px] min-w-[160px] rounded-md border border-border bg-white px-2 text-[12px]"
+        >
+          <option value="">選擇廣告帳號…</option>
+          {accounts.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.name}
+            </option>
+          ))}
+        </select>
+        <select
+          value={campaignId}
+          onChange={(e) => {
+            setCampaignId(e.target.value);
+            setResult(null);
+          }}
+          disabled={!accountId || campaignsQuery.isLoading}
+          className="h-[30px] min-w-[200px] flex-1 rounded-md border border-border bg-white px-2 text-[12px] disabled:opacity-50"
+        >
+          <option value="">
+            {!accountId
+              ? "先選帳號"
+              : campaignsQuery.isLoading
+                ? "載入活動中…"
+                : "選擇行銷活動…"}
+          </option>
+          {campaigns.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        <Button variant="primary" size="sm" onClick={run} disabled={loading || !campaignId}>
           {loading ? "探測中..." : "探測"}
         </Button>
       </div>
 
+      {campaignsQuery.isError && (
+        <div className="mt-2 text-[12px] text-red">
+          活動載入失敗:{friendlyApiError(campaignsQuery.error)}
+        </div>
+      )}
       {error && <div className="mt-2 text-[12px] text-red">錯誤:{error}</div>}
 
       {result && (
