@@ -1,6 +1,5 @@
 import { type ReportSnapshotListItem, api } from "@/api/client";
 import { Button } from "@/components/Button";
-import { Modal } from "@/components/Modal";
 import { toast } from "@/components/Toast";
 import { cn } from "@/lib/cn";
 import { buildSnapshotShareUrl } from "@/lib/shareReport";
@@ -8,37 +7,33 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 /**
- * 生成紀錄 — the report snapshots generated for one campaign. Same modal
- * chrome as the report modal (shared `<Modal>`: centered card on desktop,
- * bottom sheet on mobile, X to close) but sized large so it reads as a
- * full page. Split into 以廣告組合報告 / 以廣告報告 tabs; each row has its
- * own permanent share link (frozen data, zero FB calls).
+ * 生成紀錄 panel — rendered INSIDE the report modal (not its own dialog)
+ * when the user taps 生成紀錄, with a 返回 arrow in the modal header to go
+ * back to the report. Lists the snapshots generated for one campaign,
+ * split into 以廣告組合報告 / 以廣告報告 tabs; each row has its own
+ * permanent share link (frozen data, zero FB calls).
  */
-export function SnapshotHistoryModal({
-  open,
-  onOpenChange,
+export function SnapshotHistoryPanel({
   campaignId,
-  campaignLabel,
   variant,
+  active,
 }: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
   campaignId: string;
-  campaignLabel: string;
-  /** The report version the user opened 生成紀錄 from — the tab defaults
-   *  here so they land on the matching records. */
+  /** The report version the user came from — the tab defaults here. */
   variant: "standard" | "perf";
+  /** Whether the panel is currently shown (gates the list fetch). */
+  active: boolean;
 }) {
   const qc = useQueryClient();
   const [tab, setTab] = useState<"standard" | "perf">(variant);
   useEffect(() => {
-    if (open) setTab(variant);
-  }, [open, variant]);
+    if (active) setTab(variant);
+  }, [active, variant]);
 
   const q = useQuery({
     queryKey: ["report-snapshots", campaignId],
     queryFn: () => api.reportSnapshots.list(campaignId, null),
-    enabled: open,
+    enabled: active,
     staleTime: 30_000,
   });
   const del = useMutation({
@@ -69,14 +64,7 @@ export function SnapshotHistoryModal({
     window.open(buildSnapshotShareUrl(id), "_blank", "noopener,noreferrer");
 
   return (
-    <Modal
-      open={open}
-      onOpenChange={onOpenChange}
-      title="生成紀錄"
-      subtitle={campaignLabel}
-      width={720}
-      className="max-h-[92dvh] md:h-[calc(100dvh-48px)] md:max-h-[calc(100dvh-48px)]"
-    >
+    <div>
       {/* Tab bar — 以廣告組合報告 / 以廣告報告. */}
       <div className="mb-3 flex gap-1 border-border border-b">
         {(["standard", "perf"] as const).map((v) => (
@@ -122,7 +110,7 @@ export function SnapshotHistoryModal({
           ))}
         </div>
       )}
-    </Modal>
+    </div>
   );
 }
 
