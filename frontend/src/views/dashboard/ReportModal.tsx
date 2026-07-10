@@ -51,6 +51,9 @@ export function ReportModal({
   // reorder), persisted to shared_settings via the finance store.
   const reportFieldsByCampaign = useFinanceStore((s) => s.reportFieldsByCampaign);
   const setReportFieldsStore = useFinanceStore((s) => s.setReportFields);
+  // 成效報告 per-creative card metrics — also per-campaign + team-wide.
+  const creativeFieldsByCampaign = useFinanceStore((s) => s.creativeFieldsByCampaign);
+  const setCreativeFieldsStore = useFinanceStore((s) => s.setCreativeFields);
 
   // Reopen on the chooser step each time (version is picked per open).
   useEffect(() => {
@@ -69,6 +72,11 @@ export function ReportModal({
   const useSpendPlus = effectiveFields.includes("spend_plus");
   const markupPercent = markupFor(campaign.id, rowMarkups, defaultMarkup);
 
+  // Per-creative card metrics — null (unedited) → the component's own
+  // DEFAULT_CREATIVE_FIELDS. Only threaded into the share URL for perf.
+  const savedCreativeFields = creativeFieldsByCampaign[campaign.id] ?? null;
+  const updateCreativeFields = (next: string[]) => setCreativeFieldsStore(campaign.id, next);
+
   const shareUrl = (opts?: { print?: boolean }) =>
     buildShareUrl({
       campaignId: campaign.id,
@@ -79,6 +87,7 @@ export function ReportModal({
       markupPercent,
       variant: variant === "perf" ? "perf" : "standard",
       selectedFields: effectiveFields,
+      creativeFields: variant === "perf" ? (savedCreativeFields ?? undefined) : undefined,
       print: opts?.print,
     });
 
@@ -146,6 +155,8 @@ export function ReportModal({
               useSpendPlus={useSpendPlus}
               markupPercent={markupPercent}
               selectedFields={effectiveFields}
+              creativeFields={savedCreativeFields}
+              onCreativeFieldsChange={updateCreativeFields}
             />
           ) : (
             <ReportContent

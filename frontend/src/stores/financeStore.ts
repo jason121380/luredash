@@ -32,6 +32,9 @@ export interface FinanceState {
    *  order (drag-to-reorder). A campaign with no entry → each report's
    *  built-in default layout. */
   reportFieldsByCampaign: Record<string, string[]>;
+  /** Same idea as `reportFieldsByCampaign` but for the 成效報告 素材卡
+   *  (per-creative metrics). Ordered; no entry → default card set. */
+  creativeFieldsByCampaign: Record<string, string[]>;
 
   /** One-way seed from server — set by SettingsProvider on first load.
    * Does NOT trigger a POST back. */
@@ -41,6 +44,7 @@ export interface FinanceState {
     defaultMarkup: number;
     showNicknames: boolean;
     reportFieldsByCampaign: Record<string, string[]>;
+    creativeFieldsByCampaign: Record<string, string[]>;
   }) => void;
 
   setRowMarkup: (campaignId: string, percent: number) => void;
@@ -50,6 +54,8 @@ export interface FinanceState {
   /** Set (or clear with null) the ordered KPI selection for one
    *  campaign. Persists the whole map team-wide. */
   setReportFields: (campaignId: string, v: string[] | null) => void;
+  /** Same for the 成效報告 素材卡 per-creative metric selection. */
+  setCreativeFields: (campaignId: string, v: string[] | null) => void;
 }
 
 // Typed-input writers (markup %) are debounced so we don't POST on
@@ -87,6 +93,12 @@ const postReportFields = debounce((m: Record<string, string[]>) => {
     .then(invalidateSharedSettings)
     .catch(() => {});
 }, 500);
+const postCreativeFields = debounce((m: Record<string, string[]>) => {
+  api.settings
+    .setShared("report_creative_fields", m)
+    .then(invalidateSharedSettings)
+    .catch(() => {});
+}, 500);
 
 // Belt-and-suspenders for the debounced typed-input writers: if the
 // user navigates away mid-debounce, flush the pending write so the
@@ -97,6 +109,7 @@ if (typeof window !== "undefined") {
     postRowMarkups.flush();
     postDefaultMarkup.flush();
     postReportFields.flush();
+    postCreativeFields.flush();
   });
 }
 
@@ -106,6 +119,7 @@ export const useFinanceStore = create<FinanceState>((set) => ({
   defaultMarkup: 5,
   showNicknames: true,
   reportFieldsByCampaign: {},
+  creativeFieldsByCampaign: {},
 
   hydrateFromServer: ({
     rowMarkups,
@@ -113,7 +127,16 @@ export const useFinanceStore = create<FinanceState>((set) => ({
     defaultMarkup,
     showNicknames,
     reportFieldsByCampaign,
-  }) => set({ rowMarkups, pinnedIds, defaultMarkup, showNicknames, reportFieldsByCampaign }),
+    creativeFieldsByCampaign,
+  }) =>
+    set({
+      rowMarkups,
+      pinnedIds,
+      defaultMarkup,
+      showNicknames,
+      reportFieldsByCampaign,
+      creativeFieldsByCampaign,
+    }),
 
   setRowMarkup: (campaignId, percent) =>
     set((state) => {
@@ -148,6 +171,14 @@ export const useFinanceStore = create<FinanceState>((set) => ({
       else next[campaignId] = v;
       postReportFields(next);
       return { reportFieldsByCampaign: next };
+    }),
+  setCreativeFields: (campaignId, v) =>
+    set((state) => {
+      const next = { ...state.creativeFieldsByCampaign };
+      if (v === null) delete next[campaignId];
+      else next[campaignId] = v;
+      postCreativeFields(next);
+      return { creativeFieldsByCampaign: next };
     }),
 }));
 

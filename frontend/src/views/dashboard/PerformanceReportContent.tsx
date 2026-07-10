@@ -2,17 +2,22 @@ import { api } from "@/api/client";
 import { useNicknames } from "@/api/hooks/useNicknames";
 import { Badge } from "@/components/Badge";
 import { CreativePreviewModal } from "@/components/CreativePreviewModal";
+import { ReportFieldsPicker } from "@/components/ReportFieldsPicker";
 import { type DateConfig, resolveRange } from "@/lib/datePicker";
-import { fM, fN, fP } from "@/lib/format";
+import { fF, fM, fN, fP } from "@/lib/format";
 import {
   getAvgWatchSeconds,
+  getCostPerLinkClick,
   getIns,
+  getLinkClicks,
+  getMsgCount,
   getPostReactions,
   getPostSaves,
   getShares,
 } from "@/lib/insights";
 import { translateObjective } from "@/lib/objective";
 import { isTrafficObjective } from "@/lib/recommendations";
+import { CREATIVE_FIELDS, DEFAULT_CREATIVE_FIELDS } from "@/lib/reportFields";
 import type { FbAdset, FbCampaign, FbCreativeEntity } from "@/types/fb";
 import { formatNickname } from "@/views/finance/financeData";
 import { useQueries, useQuery } from "@tanstack/react-query";
@@ -62,6 +67,12 @@ export interface PerformanceReportContentProps {
   /** When true (public share link), creative cards are view-only — no
    *  click-to-enlarge preview modal. */
   disablePreview?: boolean;
+  /** Which metrics each 素材卡 shows (ordered). null → the default card
+   *  set (DEFAULT_CREATIVE_FIELDS). */
+  creativeFields?: string[] | null;
+  /** When provided, an editable 素材成效 field picker renders under the
+   *  section heading (dashboard modal). Omit on the share page. */
+  onCreativeFieldsChange?: (next: string[]) => void;
 }
 
 export function PerformanceReportContent({
@@ -76,8 +87,11 @@ export function PerformanceReportContent({
   markupPercent = 0,
   selectedFields = null,
   disablePreview = false,
+  creativeFields = null,
+  onCreativeFieldsChange,
 }: PerformanceReportContentProps) {
   const ins = getIns(campaign);
+  const cardFields = creativeFields?.length ? creativeFields : DEFAULT_CREATIVE_FIELDS;
   // 店家 · 設計師 nickname: campaign.nickname (share page) → cached
   // useNicknames map (dashboard) → raw campaign name.
   const nicknames = useNicknames();
@@ -182,6 +196,20 @@ export function PerformanceReportContent({
             </span>
           )}
         </div>
+        {/* Per-creative metric picker — dashboard modal only (omitted on
+            the read-only share page). Controls which metrics each card
+            shows + their order. */}
+        {onCreativeFieldsChange && (
+          <div className="rounded-xl border border-border bg-bg/50 p-3">
+            <ReportFieldsPicker
+              value={[...cardFields]}
+              onChange={onCreativeFieldsChange}
+              reorderable
+              catalog={CREATIVE_FIELDS}
+              defaults={DEFAULT_CREATIVE_FIELDS}
+            />
+          </div>
+        )}
         {adsLoading ? (
           <div className="rounded-xl border border-border bg-white px-3 py-4 text-[13px] text-gray-300">
             載入中...
@@ -204,6 +232,7 @@ export function PerformanceReportContent({
                 campaignName={campaign.name}
                 money={money}
                 disablePreview={disablePreview}
+                fields={cardFields}
               />
             ))}
           </div>
@@ -219,18 +248,19 @@ function CreativeCard({
   campaignName,
   money,
   disablePreview,
+  fields,
 }: {
   rank: number;
   ad: FbCreativeEntity;
   campaignName: string;
   money: (v: number | string | null | undefined) => string;
   disablePreview: boolean;
+  fields: string[];
 }) {
-  const ai = getIns(ad);
-  const reactions = getPostReactions(ad);
-  const saves = getPostSaves(ad);
-  const shares = getShares(ad);
-  const watchSec = getAvgWatchSeconds(ad);
+  const rows = fields.map((code) => creativeCell(ad, code, money)).filter(Boolean) as {
+    label: string;
+    value: string;
+  }[];
   // Image priority for a sharp card:
   //   image_url (full-res still, image creatives) →
   //   600px server thumbnail (video creatives have no image_url; the
@@ -278,12 +308,14 @@ function CreativeCard({
         {rank}
       </span>
       {img ? (
+        // object-contain on a black bg so a square (or any non-3:4)
+        // creative shows in full — letterbox bars are fine per feedback.
         <img
           src={img}
           alt=""
           loading="lazy"
           decoding="async"
-          className="aspect-[3/4] w-full object-cover"
+          className="aspect-[3/4] w-full bg-black object-contain"
         />
       ) : (
         <div className="flex aspect-[3/4] w-full items-center justify-center bg-bg text-[11px] text-gray-300">
@@ -295,13 +327,9 @@ function CreativeCard({
           {ad.name}
         </div>
         <div className="flex flex-col gap-0.5 text-[11px] text-gray-500">
-          <Row label="點擊率" value={fP(ai.ctr)} />
-          <Row label="點擊成本" value={money(ai.cpc)} />
-          <Row label="曝光" value={fN(ai.impressions)} />
-          {watchSec > 0 && <Row label="平均播放時間" value={formatWatch(watchSec)} />}
-          <Row label="按讚" value={fN(reactions)} />
-          <Row label="收藏" value={fN(saves)} />
-          <Row label="分享" value={fN(shares)} />
+          {rows.map((r) => (
+            <Row key={r.label} label={r.label} value={r.value} />
+          ))}
         </div>
       </div>
       {previewOpen && (
@@ -322,6 +350,61 @@ function Row({ label, value }: { label: string; value: string }) {
       <span className="font-semibold tabular-nums text-ink">{value}</span>
     </div>
   );
+}
+
+/**
+ * Resolve one 素材卡 metric code → {label, value}. Codes mirror
+ * CREATIVE_FIELDS. Returns null when the metric doesn't apply to this ad
+ * (avg_watch on a non-video creative) so the caller's `.filter(Boolean)`
+ * drops the row entirely rather than showing "0:00" / "—".
+ */
+function creativeCell(
+  ad: FbCreativeEntity,
+  code: string,
+  money: (v: number | string | null | undefined) => string,
+): { label: string; value: string } | null {
+  const ins = getIns(ad);
+  switch (code) {
+    case "ctr":
+      return { label: "點擊率", value: fP(ins.ctr) };
+    case "cpc":
+      return { label: "點擊成本", value: money(ins.cpc) };
+    case "impressions":
+      return { label: "曝光", value: fN(ins.impressions) };
+    case "reach":
+      return { label: "觸及", value: fN(ins.reach) };
+    case "clicks":
+      return { label: "點擊", value: fN(ins.clicks) };
+    case "cpm":
+      return { label: "CPM", value: money(ins.cpm) };
+    case "frequency":
+      return { label: "頻次", value: fF(ins.frequency) };
+    case "spend":
+      return { label: "花費", value: money(ins.spend) };
+    case "avg_watch": {
+      const sec = getAvgWatchSeconds(ad);
+      return sec > 0 ? { label: "平均播放時間", value: formatWatch(sec) } : null;
+    }
+    case "reactions":
+      return { label: "按讚", value: fN(getPostReactions(ad)) };
+    case "saves":
+      return { label: "收藏", value: fN(getPostSaves(ad)) };
+    case "shares":
+      return { label: "分享", value: fN(getShares(ad)) };
+    case "link_clicks":
+      return { label: "連結點擊", value: fN(getLinkClicks(ad)) };
+    case "cost_per_link_click":
+      return { label: "連結點擊成本", value: money(getCostPerLinkClick(ad)) };
+    case "msgs":
+      return { label: "私訊數", value: fN(getMsgCount(ad)) };
+    case "msg_cost": {
+      const msgs = getMsgCount(ad);
+      const spend = num(ins.spend);
+      return { label: "私訊成本", value: msgs > 0 ? money(spend / msgs) : "—" };
+    }
+    default:
+      return null;
+  }
 }
 
 /** Seconds → "m:ss" (e.g. 15 → "0:15"), matching the manual report. */

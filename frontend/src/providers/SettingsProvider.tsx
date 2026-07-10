@@ -75,15 +75,19 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     // Dashboard report KPI selection, per campaign (team-wide):
     // { campaignId: ["spend", "ctr", …] }. Ordered arrays. Legacy flat-
     // array values (or anything non-object) → empty map.
-    const rawReportFields = s.report_selected_fields;
-    const reportFieldsByCampaign: Record<string, string[]> = {};
-    if (rawReportFields && typeof rawReportFields === "object" && !Array.isArray(rawReportFields)) {
-      for (const [cid, codes] of Object.entries(rawReportFields as Record<string, unknown>)) {
-        if (Array.isArray(codes)) {
-          reportFieldsByCampaign[cid] = codes.filter((v): v is string => typeof v === "string");
+    const parseFieldMap = (raw: unknown): Record<string, string[]> => {
+      const out: Record<string, string[]> = {};
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        for (const [cid, codes] of Object.entries(raw as Record<string, unknown>)) {
+          if (Array.isArray(codes)) {
+            out[cid] = codes.filter((v): v is string => typeof v === "string");
+          }
         }
       }
-    }
+      return out;
+    };
+    const reportFieldsByCampaign = parseFieldMap(s.report_selected_fields);
+    const creativeFieldsByCampaign = parseFieldMap(s.report_creative_fields);
 
     useFinanceStore.getState().hydrateFromServer({
       rowMarkups,
@@ -91,6 +95,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       defaultMarkup,
       showNicknames,
       reportFieldsByCampaign,
+      creativeFieldsByCampaign,
     });
 
     const paymentAccounts: PaymentAccount[] = Array.isArray(s.payment_accounts)

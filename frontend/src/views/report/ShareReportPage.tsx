@@ -31,6 +31,7 @@ export function ShareReportPage() {
     markupPercent,
     showRecommendations,
     selectedFields,
+    creativeFields,
     reportVariant,
     autoPrint,
   } = useMemo(() => parseUrl(), []);
@@ -109,6 +110,7 @@ export function ShareReportPage() {
               useSpendPlus={useSpendPlus}
               markupPercent={markupPercent}
               selectedFields={selectedFields}
+              creativeFields={creativeFields}
               disablePreview
             />
           ) : (
@@ -152,6 +154,9 @@ function parseUrl(): {
    *  (legacy share-link / dashboard-modal links keep their full
    *  12-cell layout). */
   selectedFields: string[] | null;
+  /** Comma-separated 素材卡 metric codes from `?cfields=`. null = the
+   *  card's built-in default set. Only used by the perf variant. */
+  creativeFields: string[] | null;
   /** `?report=perf` → render the 成效報告 (Top 5 by CTR). Anything
    *  else (incl. absent) → the standard report. */
   reportVariant: "standard" | "perf";
@@ -170,6 +175,7 @@ function parseUrl(): {
       markupPercent: 0,
       showRecommendations: true,
       selectedFields: null,
+      creativeFields: null,
       reportVariant: "standard",
       autoPrint: false,
     };
@@ -203,6 +209,13 @@ function parseUrl(): {
         .map((s) => s.trim())
         .filter(Boolean)
     : null;
+  const rawCFields = params.get("cfields");
+  const creativeFields = rawCFields
+    ? rawCFields
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : null;
   const reportVariant = params.get("report") === "perf" ? "perf" : "standard";
   const autoPrint = params.get("print") === "1";
   return {
@@ -216,6 +229,7 @@ function parseUrl(): {
     markupPercent,
     showRecommendations,
     selectedFields,
+    creativeFields,
     reportVariant,
     autoPrint,
   };
