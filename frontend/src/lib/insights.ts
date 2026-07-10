@@ -1,4 +1,4 @@
-import type { FbBaseEntity, FbInsights } from "@/types/fb";
+import type { FbAction, FbBaseEntity, FbInsights } from "@/types/fb";
 
 /**
  * Insights / action helpers — ported from the original template.
@@ -74,15 +74,35 @@ export function getPostSaves(item: FbBaseEntity): number {
   return 0;
 }
 
+/** First positive value in an FB video-action array (they're all keyed
+ *  by action_type "video_view"), or the first entry, or 0. Shared by the
+ *  avg-watch / p100 / thruplay / play helpers. */
+function videoActionValue(arr: FbAction[] | undefined): number {
+  if (!arr || arr.length === 0) return 0;
+  const hit = arr.find((a) => Number(a.value) > 0) ?? arr[0];
+  return Number(hit?.value) || 0;
+}
+
 /** Average seconds the video was watched. 0 for non-video creatives
  *  (FB omits `video_avg_time_watched_actions` for them). */
 export function getAvgWatchSeconds(item: FbBaseEntity): number {
-  const arr = getIns(item).video_avg_time_watched_actions;
-  if (!arr || arr.length === 0) return 0;
-  // FB usually keys this by action_type "video_view"; take the first
-  // positive value regardless of the exact key.
-  const hit = arr.find((a) => Number(a.value) > 0) ?? arr[0];
-  return Number(hit?.value) || 0;
+  return videoActionValue(getIns(item).video_avg_time_watched_actions);
+}
+
+/** 完整播放(100%)次數。0 for non-video creatives. */
+export function getVideoP100(item: FbBaseEntity): number {
+  return videoActionValue(getIns(item).video_p100_watched_actions);
+}
+
+/** ThruPlay(≥15 秒或看完)次數。0 for non-video creatives. */
+export function getThruPlays(item: FbBaseEntity): number {
+  return videoActionValue(getIns(item).video_thruplay_watched_actions);
+}
+
+/** 影片播放次數。0 for non-video creatives — also the "is this a video?"
+ *  gate for the 觀看率 metrics (no plays → hide those rows). */
+export function getVideoPlays(item: FbBaseEntity): number {
+  return videoActionValue(getIns(item).video_play_actions);
 }
 
 /** Convenience: numeric spend from an entity's first insights row. */

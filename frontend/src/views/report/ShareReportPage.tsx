@@ -1,11 +1,12 @@
 import { useReportCampaign } from "@/api/hooks/useReportCampaign";
 import { EmptyState } from "@/components/EmptyState";
 import { LoadingState } from "@/components/LoadingState";
+import { downloadElementAsJpeg, waitForStableDom } from "@/lib/captureImage";
 import type { DateConfig, DatePreset } from "@/lib/datePicker";
 import { toLabel } from "@/lib/datePicker";
 import { PerformanceReportContent } from "@/views/dashboard/PerformanceReportContent";
 import { ReportContent } from "@/views/dashboard/ReportContent";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 /**
  * Public share-report page. Mounted by App.tsx BEFORE the auth gate
@@ -34,7 +35,11 @@ export function ShareReportPage() {
     creativeFields,
     reportVariant,
     autoPrint,
+    autoShot,
   } = useMemo(() => parseUrl(), []);
+
+  // Element captured by the 下載 JPG flow (header + report card).
+  const captureRef = useRef<HTMLDivElement>(null);
 
   // When the LINE push sent us explicit `from` / `to` query params
   // (the new behaviour as of 2026-05-05) we render the exact custom
@@ -67,6 +72,31 @@ export function ShareReportPage() {
     return () => window.clearTimeout(t);
   }, [autoPrint, campaign, campaignQuery.isLoading]);
 
+  // 下載 JPG flow: when opened with `?shot=1`, rasterise the report to a
+  // high-DPI JPEG and download it. `waitForStableDom` holds until the
+  // perf report's per-adset ad queries + hires-thumbnail fetches stop
+  // adding creative cards; `downloadElementAsJpeg` then waits on fonts +
+  // <img> decode before the shot. Thumbnails render through the same-
+  // origin proxy (captureMode) so the canvas isn't tainted.
+  useEffect(() => {
+    if (!autoShot || !campaign || campaignQuery.isLoading) return;
+    let cancelled = false;
+    (async () => {
+      const el = captureRef.current;
+      if (!el) return;
+      await waitForStableDom(el);
+      if (cancelled) return;
+      try {
+        await downloadElementAsJpeg(el, `report_${campaignId ?? "campaign"}`);
+      } catch (err) {
+        console.error("[share] JPG capture failed", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [autoShot, campaign, campaignQuery.isLoading, campaignId]);
+
   // `globals.css` locks `html, body` to `overflow: hidden` so the
   // authenticated Shell can manage its own scroll containers. The
   // share page has no Shell wrapping, so we install our own
@@ -76,7 +106,10 @@ export function ShareReportPage() {
     // print overrides: `fixed`+`overflow` would clip to one viewport
     // page — force static/visible so the whole report flows onto pages.
     <div className="fixed inset-0 overflow-y-auto bg-bg py-6 md:py-10 print:static print:overflow-visible print:bg-white print:py-0">
-      <div className="mx-auto flex w-full max-w-[960px] flex-col gap-4 px-3 md:px-6">
+      <div
+        ref={captureRef}
+        className="mx-auto flex w-full max-w-[960px] flex-col gap-4 px-3 md:px-6"
+      >
         <header className="flex items-center gap-3">
           <div className="flex-1">
             <div className="text-[12px] font-semibold uppercase tracking-[0.6px] text-orange">
@@ -112,6 +145,7 @@ export function ShareReportPage() {
               selectedFields={selectedFields}
               creativeFields={creativeFields}
               disablePreview
+              captureMode={autoShot}
             />
           ) : (
             <ReportContent
@@ -127,6 +161,7 @@ export function ShareReportPage() {
               showRecommendations={showRecommendations}
               selectedFields={selectedFields}
               disablePreview
+              captureMode={autoShot}
             />
           )}
         </div>
@@ -160,8 +195,10 @@ function parseUrl(): {
   /** `?report=perf` → render the 成效報告 (Top 5 by CTR). Anything
    *  else (incl. absent) → the standard report. */
   reportVariant: "standard" | "perf";
-  /** `?print=1` → auto-open the print dialog once loaded (下載 PDF). */
+  /** `?print=1` → auto-open the print dialog once loaded (legacy 下載 PDF). */
   autoPrint: boolean;
+  /** `?shot=1` → auto-capture the report to a JPEG and download it (下載 JPG). */
+  autoShot: boolean;
 } {
   if (typeof window === "undefined") {
     return {
@@ -178,6 +215,7 @@ function parseUrl(): {
       creativeFields: null,
       reportVariant: "standard",
       autoPrint: false,
+      autoShot: false,
     };
   }
   const path = window.location.pathname;
@@ -218,6 +256,7 @@ function parseUrl(): {
     : null;
   const reportVariant = params.get("report") === "perf" ? "perf" : "standard";
   const autoPrint = params.get("print") === "1";
+  const autoShot = params.get("shot") === "1";
   return {
     campaignId,
     accountId,
@@ -232,6 +271,7 @@ function parseUrl(): {
     creativeFields,
     reportVariant,
     autoPrint,
+    autoShot,
   };
 }
 

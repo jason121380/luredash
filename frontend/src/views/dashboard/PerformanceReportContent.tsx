@@ -14,8 +14,12 @@ import {
   getPostReactions,
   getPostSaves,
   getShares,
+  getThruPlays,
+  getVideoP100,
+  getVideoPlays,
 } from "@/lib/insights";
 import { translateObjective } from "@/lib/objective";
+import { proxyImage } from "@/lib/proxyImage";
 import { isTrafficObjective } from "@/lib/recommendations";
 import { CREATIVE_FIELDS, DEFAULT_CREATIVE_FIELDS } from "@/lib/reportFields";
 import type { FbAdset, FbCampaign, FbCreativeEntity } from "@/types/fb";
@@ -73,6 +77,10 @@ export interface PerformanceReportContentProps {
   /** When provided, an editable 素材成效 field picker renders under the
    *  section heading (dashboard modal). Omit on the share page. */
   onCreativeFieldsChange?: (next: string[]) => void;
+  /** Capture mode (下載 JPG): route thumbnails through the same-origin
+   *  proxy + eager-load so html-to-image can rasterise them without
+   *  tainting the canvas. */
+  captureMode?: boolean;
 }
 
 export function PerformanceReportContent({
@@ -89,6 +97,7 @@ export function PerformanceReportContent({
   disablePreview = false,
   creativeFields = null,
   onCreativeFieldsChange,
+  captureMode = false,
 }: PerformanceReportContentProps) {
   const ins = getIns(campaign);
   const cardFields = creativeFields?.length ? creativeFields : DEFAULT_CREATIVE_FIELDS;
@@ -233,6 +242,7 @@ export function PerformanceReportContent({
                 money={money}
                 disablePreview={disablePreview}
                 fields={cardFields}
+                captureMode={captureMode}
               />
             ))}
           </div>
@@ -249,6 +259,7 @@ function CreativeCard({
   money,
   disablePreview,
   fields,
+  captureMode,
 }: {
   rank: number;
   ad: FbCreativeEntity;
@@ -256,6 +267,7 @@ function CreativeCard({
   money: (v: number | string | null | undefined) => string;
   disablePreview: boolean;
   fields: string[];
+  captureMode: boolean;
 }) {
   const rows = fields.map((code) => creativeCell(ad, code, money)).filter(Boolean) as {
     label: string;
@@ -279,8 +291,10 @@ function CreativeCard({
     enabled: needsHires,
     staleTime: 30 * 60_000,
   });
-  const img =
+  const rawImg =
     ad.creative?.image_url || hiresQuery.data?.thumbnail_url || ad.creative?.thumbnail_url;
+  // 下載 JPG:透過同源代理載入,html-to-image 才不會因跨域被 taint。
+  const img = captureMode ? proxyImage(rawImg) : rawImg;
   const [previewOpen, setPreviewOpen] = useState(false);
   const canPreview = Boolean(ad.creative?.thumbnail_url) && !disablePreview;
 
@@ -313,7 +327,7 @@ function CreativeCard({
         <img
           src={img}
           alt=""
-          loading="lazy"
+          loading={captureMode ? "eager" : "lazy"}
           decoding="async"
           className="aspect-[3/4] w-full bg-black object-contain"
         />
@@ -384,6 +398,24 @@ function creativeCell(
     case "avg_watch": {
       const sec = getAvgWatchSeconds(ad);
       return sec > 0 ? { label: "平均播放時間", value: formatWatch(sec) } : null;
+    }
+    // 觀看率:影片素材才有(無影片播放 → null,直接不顯示該列)。
+    case "video_completion_rate": {
+      const plays = getVideoPlays(ad);
+      if (plays === 0) return null;
+      const imp = num(ins.impressions);
+      return { label: "完整觀看率", value: fP(imp > 0 ? (getVideoP100(ad) / imp) * 100 : 0) };
+    }
+    case "video_play_completion_rate": {
+      const plays = getVideoPlays(ad);
+      if (plays === 0) return null;
+      return { label: "完整播放率", value: fP((getVideoP100(ad) / plays) * 100) };
+    }
+    case "thruplay_rate": {
+      const plays = getVideoPlays(ad);
+      if (plays === 0) return null;
+      const imp = num(ins.impressions);
+      return { label: "ThruPlay率", value: fP(imp > 0 ? (getThruPlays(ad) / imp) * 100 : 0) };
     }
     case "reactions":
       return { label: "按讚", value: fN(getPostReactions(ad)) };

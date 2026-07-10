@@ -1500,8 +1500,12 @@ async def _security_headers(request: Request, call_next):
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com data:; "
             "script-src 'self' https://connect.facebook.net; "
+            # fonts.* here (not just in font-src) so html-to-image's 下載
+            # JPG capture can fetch + inline the Noto Sans TC web font;
+            # otherwise CJK text falls back to a system font in the JPEG.
             "connect-src 'self' https://graph.facebook.com https://*.facebook.com "
-            "https://generativelanguage.googleapis.com; "
+            "https://generativelanguage.googleapis.com "
+            "https://fonts.googleapis.com https://fonts.gstatic.com; "
             "frame-src 'none'; "
             "frame-ancestors 'none'; "
             "base-uri 'self'",
@@ -5901,8 +5905,13 @@ async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Opti
         "spend,impressions,clicks,ctr,cpc,cpm,actions,"
         "inline_link_clicks,cost_per_inline_link_click,"
         "cost_per_action_type,purchase_roas,website_purchase_roas,"
-        # 成效報告用:平均播放時間(影片素材才有;非影片回空陣列)。
-        "video_avg_time_watched_actions",
+        # 成效報告用:平均播放時間 + 觀看率(影片素材才有;非影片回空陣列)。
+        # p100 = 完整播放次數、thruplay = ThruPlay 次數、play = 影片播放次數,
+        # 用來在前端算「完整觀看率 / 完整播放率 / ThruPlay 率」。
+        "video_avg_time_watched_actions,"
+        "video_p100_watched_actions,"
+        "video_thruplay_watched_actions,"
+        "video_play_actions",
         date_preset,
         time_range,
     )

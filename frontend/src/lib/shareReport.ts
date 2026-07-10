@@ -43,9 +43,14 @@ export interface ShareReportParams {
    *  Only meaningful for the perf variant. */
   creativeFields?: string[] | null;
   /** When true, append `?print=1` — the share page auto-opens the
-   *  browser print dialog once loaded (下載 PDF flow). Native print
-   *  renders the cross-origin FB thumbnails a canvas capture can't. */
+   *  browser print dialog once loaded (legacy 下載 PDF flow). Native
+   *  print renders the cross-origin FB thumbnails a canvas capture
+   *  can't; kept for any already-shared print links. */
   print?: boolean;
+  /** When true, append `?shot=1` — the share page auto-captures itself
+   *  to a high-DPI JPEG and downloads it (下載 JPG flow). Thumbnails are
+   *  routed through the same-origin proxy so the canvas isn't tainted. */
+  shot?: boolean;
 }
 
 /** Build an absolute share URL the user can paste anywhere. */
@@ -61,6 +66,7 @@ export function buildShareUrl(params: ShareReportParams): string {
     selectedFields,
     creativeFields,
     print,
+    shot,
   } = params;
   const search = new URLSearchParams();
   search.set("acct", accountId);
@@ -72,6 +78,7 @@ export function buildShareUrl(params: ShareReportParams): string {
     search.set("cfields", creativeFields.join(","));
   }
   if (print) search.set("print", "1");
+  if (shot) search.set("shot", "1");
   if (useSpendPlus) {
     search.set("plus", "1");
     if (markupPercent !== undefined && markupPercent > 0) {

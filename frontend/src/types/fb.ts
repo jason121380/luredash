@@ -32,6 +32,12 @@ export interface FbInsights {
   /** Avg seconds the video was watched. Present only for video
    *  creatives; the value lives in the first entry's `value`. */
   video_avg_time_watched_actions?: FbAction[];
+  /** 完整播放(100%)次數 — video creatives only. */
+  video_p100_watched_actions?: FbAction[];
+  /** ThruPlay(≥15 秒或看完)次數 — video creatives only. */
+  video_thruplay_watched_actions?: FbAction[];
+  /** 影片播放次數 — video creatives only. Denominator for 完整播放率. */
+  video_play_actions?: FbAction[];
 }
 
 export interface FbInsightsEnvelope {
