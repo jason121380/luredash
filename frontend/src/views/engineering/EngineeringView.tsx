@@ -1,4 +1,4 @@
-import { api, apiAuthHeaders } from "@/api/client";
+import { api, apiAuthHeaders, friendlyApiError } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { useShowBucuInHeader } from "@/components/BucuHeaderChip";
@@ -204,7 +204,115 @@ function RuntimeDiagnosticsPanel() {
         <BrowserPanel />
         <StoragePanel />
       </div>
+      <div className="mt-4">
+        <ActionTypeProbePanel />
+      </div>
     </section>
+  );
+}
+
+/**
+ * action_type 探針 — 貼一個廣告 / 廣告組合 / 活動 ID,列出 FB 對它歸因
+ * 的所有 action_type。用來確認某指標(例如 IG 追蹤次數)到底在不在
+ * Marketing API 裡:若 IG-follow 類型有出現就能接成欄位,沒出現就是
+ * API 真的不給。90 天視窗以提高低量轉換有資料的機會。
+ */
+function ActionTypeProbePanel() {
+  const [level, setLevel] = useState<"ad" | "adset" | "campaign">("ad");
+  const [id, setId] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{
+    action_types: string[];
+    follow_like: string[];
+    rows: number;
+  } | null>(null);
+
+  const run = async () => {
+    const trimmed = id.trim();
+    if (!trimmed || loading) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const r = await api.debug.entityActions(level, trimmed);
+      setResult({ action_types: r.action_types, follow_like: r.follow_like, rows: r.rows });
+    } catch (e) {
+      setError(friendlyApiError(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-border bg-white p-3.5">
+      <div className="text-[13px] font-bold text-ink">action_type 探針(IG 追蹤診斷)</div>
+      <p className="mt-0.5 text-[11px] text-gray-400">
+        貼一個廣告 / 廣告組合 / 活動 ID,列出 FB 歸因的所有 action_type,確認 IG 追蹤等指標是否在 API
+        內。
+      </p>
+      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+        <select
+          value={level}
+          onChange={(e) => setLevel(e.target.value as "ad" | "adset" | "campaign")}
+          className="h-[30px] rounded-md border border-border bg-white px-2 text-[12px]"
+        >
+          <option value="ad">廣告</option>
+          <option value="adset">廣告組合</option>
+          <option value="campaign">活動</option>
+        </select>
+        <input
+          type="text"
+          value={id}
+          onChange={(e) => setId(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") run();
+          }}
+          placeholder="輸入 ID(如 120xxxxxxxxxxxx)"
+          className="h-[30px] min-w-[200px] flex-1 rounded-md border border-border bg-white px-2 text-[12px]"
+        />
+        <Button variant="primary" size="sm" onClick={run} disabled={loading || !id.trim()}>
+          {loading ? "探測中..." : "探測"}
+        </Button>
+      </div>
+
+      {error && <div className="mt-2 text-[12px] text-red">錯誤:{error}</div>}
+
+      {result && (
+        <div className="mt-3 flex flex-col gap-2">
+          {result.follow_like.length > 0 ? (
+            <div className="rounded-lg border border-orange bg-orange-bg px-3 py-2 text-[12px] text-orange">
+              找到疑似 IG / 追蹤指標:{result.follow_like.join(", ")} — 可接成欄位。
+            </div>
+          ) : (
+            <div className="rounded-lg border border-border bg-bg px-3 py-2 text-[12px] text-gray-500">
+              沒有 IG / follow 類的 action_type(此區間內)。共 {result.action_types.length} 種、
+              {result.rows} 列 insights。
+            </div>
+          )}
+          {result.action_types.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {result.action_types.map((t) => {
+                const flagged = result.follow_like.includes(t);
+                return (
+                  <span
+                    key={t}
+                    className={cn(
+                      "rounded-full border px-2 py-[2px] text-[11px]",
+                      flagged
+                        ? "border-orange bg-orange-bg font-semibold text-orange"
+                        : "border-border bg-white text-gray-500",
+                    )}
+                  >
+                    {t}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

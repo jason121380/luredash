@@ -908,6 +908,24 @@ export const api = {
       }),
   },
 
+  debug: {
+    /** Dump every action_type FB attributes to an entity — diagnostic
+     *  for "is metric X in the API?" (e.g. IG 追蹤). 工程模式 only. */
+    entityActions: (level: "ad" | "adset" | "campaign", id: string, datePreset = "last_90d") =>
+      request<{
+        level: string;
+        id: string;
+        action_types: string[];
+        follow_like: string[];
+        actions: Array<{ action_type: string; value: string }>;
+        cost_per_action_type: Array<{ action_type: string; value: string }>;
+        rows: number;
+      }>("GET", "/api/debug/entity-actions", {
+        query: { level, id, date_preset: datePreset },
+        source: "debug",
+      }),
+  },
+
   /** 報告快照 — freeze a campaign report to the DB so the public /r/
    *  share link serves frozen data (zero FB calls) instead of hitting
    *  Facebook on every open. Each `create` is a new immutable snapshot. */
