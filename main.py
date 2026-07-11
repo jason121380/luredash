@@ -6000,13 +6000,20 @@ async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Opti
     # id so the frontend can hit /api/creatives/{id}/hires-thumbnail
     # as a 600px fallback when /api/posts/{post_id}/media fails
     # (typically when the token lacks pages_read_engagement).
+    # asset_feed_spec is where Advantage+ / dynamic-creative video ads
+    # keep their video (video_id lives in asset_feed_spec.videos[], NOT
+    # object_story_spec.video_data) — without it those ads can't play and
+    # fall back to a still image in the report preview.
+    afs = "asset_feed_spec{videos{video_id,thumbnail_url},images{url}}"
     attempts = [
         # Tier 1: everything — image_url for sharp still preview,
         # expanded object_story_spec so we can classify inline vs
-        # front-stage, plus the two permalink fields.
-        f"id,name,status,creative{{id,thumbnail_url,image_url,{oss_expanded},effective_object_story_id,instagram_permalink_url,title,body}},{ins}",
-        # Tier 2: drop object_story_spec (some accounts reject it).
-        f"id,name,status,creative{{id,thumbnail_url,image_url,effective_object_story_id,instagram_permalink_url,title,body}},{ins}",
+        # front-stage, asset_feed_spec for dynamic-creative videos, plus
+        # the two permalink fields.
+        f"id,name,status,creative{{id,thumbnail_url,image_url,{oss_expanded},{afs},effective_object_story_id,instagram_permalink_url,title,body}},{ins}",
+        # Tier 2: drop object_story_spec (some accounts reject it) but keep
+        # asset_feed_spec so dynamic-creative videos still resolve.
+        f"id,name,status,creative{{id,thumbnail_url,image_url,{afs},effective_object_story_id,instagram_permalink_url,title,body}},{ins}",
         # Tier 3: drop image_url.
         f"id,name,status,creative{{id,thumbnail_url,effective_object_story_id,instagram_permalink_url,title,body}},{ins}",
         f"id,name,status,{ins}",

@@ -141,6 +141,14 @@ export interface FbCreative {
   /** Nested story spec — when the ad is a video, `video_data.video_id`
    * is the handle used to fetch the playable source. */
   object_story_spec?: FbObjectStorySpec;
+  /** Advantage+ / dynamic creative spec. Modern video ads keep their
+   * video here (`asset_feed_spec.videos[].video_id`) instead of in
+   * object_story_spec.video_data — needed so those ads play instead of
+   * showing a still image. */
+  asset_feed_spec?: {
+    videos?: Array<{ video_id?: string; thumbnail_url?: string }>;
+    images?: Array<{ url?: string }>;
+  };
   /** FB post id in the form `{pageId}_{postId}`. When the creative
    * is built from an existing FB post, resolving this via
    * `fbPostLinkFromStoryId` gives us a direct permalink so users can

@@ -187,7 +187,13 @@ export function CreativePreviewModal({
 }: CreativePreviewModalProps) {
   const isOpen = creative !== null;
   const minimal = mediaOnly === true;
-  const videoId = creative?.creative?.object_story_spec?.video_data?.video_id ?? null;
+  // Video handle: back-stage inline video (object_story_spec.video_data)
+  // OR Advantage+/dynamic creative (asset_feed_spec.videos[]). Modern ads
+  // use the latter, so without it they'd fall back to a still image.
+  const videoId =
+    creative?.creative?.object_story_spec?.video_data?.video_id ??
+    creative?.creative?.asset_feed_spec?.videos?.find((v) => v.video_id)?.video_id ??
+    null;
   const videoQuery = useVideoSource(videoId, isOpen);
 
   // Track <img> load failures in the media block. For FB front-stage
