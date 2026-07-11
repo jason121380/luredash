@@ -5,7 +5,7 @@ import { Modal } from "@/components/Modal";
 import { ReportFieldsPicker } from "@/components/ReportFieldsPicker";
 import { toast } from "@/components/Toast";
 import type { DateConfig } from "@/lib/datePicker";
-import { toLabel } from "@/lib/datePicker";
+import { resolveRange, toLabel } from "@/lib/datePicker";
 import { DEFAULT_REPORT_FIELDS } from "@/lib/reportFields";
 import { buildSnapshotShareUrl } from "@/lib/shareReport";
 import { useFinanceStore } from "@/stores/financeStore";
@@ -140,12 +140,22 @@ export function ReportModal({
         date.preset === "custom" && date.from && date.to
           ? { time_range: JSON.stringify({ since: date.from, until: date.to }) }
           : { date_preset: date.preset };
+      // Bake the concrete range into the label (e.g. 「本月(7/1 - 7/11)」)
+      // so 生成紀錄 shows real dates, not just the preset name.
+      const { start, end } = resolveRange(date);
+      const mmdd = (iso: string) => {
+        const p = iso.split("-");
+        return `${Number.parseInt(p[1] ?? "0", 10)}/${Number.parseInt(p[2] ?? "0", 10)}`;
+      };
+      const rangeStr = start === end ? mmdd(start) : `${mmdd(start)} - ${mmdd(end)}`;
+      const dateLabel =
+        date.preset === "custom" ? rangeStr : `${toLabel(date)}(${rangeStr})`;
       const res = await api.reportSnapshots.create(null, {
         campaign_id: campaign.id,
         account_id: campaign._accountId ?? undefined,
         variant: variant === "perf" ? "perf" : "standard",
         ...dateApi,
-        date_label: toLabel(date),
+        date_label: dateLabel,
         hide_money: false,
         use_spend_plus: useSpendPlus,
         markup_percent: markupPercent,
