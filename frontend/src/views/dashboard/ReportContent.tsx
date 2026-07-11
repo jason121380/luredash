@@ -831,6 +831,7 @@ function AdCard({
         <CreativePreviewModal
           creative={ad}
           campaignName={campaignName}
+          mediaOnly
           onClose={() => setPreviewOpen(false)}
         />
       )}
