@@ -58,6 +58,10 @@ export interface CreativePreviewModalProps {
    *  saved file is identifiable when several ads share an account.
    *  Falls back to the creative's own name when omitted. */
   campaignName?: string;
+  /** Media-only mode (報告 creative cards): show ONLY the media (video
+   *  autoplays / image), with no page header, no download button, and
+   *  no body text — just the content in a bare modal. */
+  mediaOnly?: boolean;
   onClose: () => void;
 }
 
@@ -65,7 +69,10 @@ export interface CreativePreviewModalProps {
  *  creative name often contains `/`, `?`, etc. that the OS would
  *  reject, so we strip them and clamp the length. */
 function buildDownloadName(creativeName: string, url: string, isVideo: boolean): string {
-  const safe = (creativeName || "creative").replace(/[\\/:*?"<>|\n\r\t]/g, "_").slice(0, 80).trim();
+  const safe = (creativeName || "creative")
+    .replace(/[\\/:*?"<>|\n\r\t]/g, "_")
+    .slice(0, 80)
+    .trim();
   const fallback = isVideo ? "mp4" : "jpg";
   let ext = fallback;
   try {
@@ -125,7 +132,8 @@ async function downloadAsset(url: string, filename: string): Promise<void> {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const blob = await resp.blob();
     const ext = filename.split(".").pop() ?? "";
-    const type = blob.type && blob.type !== "application/octet-stream" ? blob.type : mimeForExt(ext);
+    const type =
+      blob.type && blob.type !== "application/octet-stream" ? blob.type : mimeForExt(ext);
     const file = new File([blob], filename, { type });
 
     // Web Share API path — covers iOS Safari and modern Android
@@ -171,8 +179,14 @@ async function downloadAsset(url: string, filename: string): Promise<void> {
   }
 }
 
-export function CreativePreviewModal({ creative, campaignName, onClose }: CreativePreviewModalProps) {
+export function CreativePreviewModal({
+  creative,
+  campaignName,
+  mediaOnly,
+  onClose,
+}: CreativePreviewModalProps) {
   const isOpen = creative !== null;
+  const minimal = mediaOnly === true;
   const videoId = creative?.creative?.object_story_spec?.video_data?.video_id ?? null;
   const videoQuery = useVideoSource(videoId, isOpen);
 
@@ -334,52 +348,56 @@ export function CreativePreviewModal({ creative, campaignName, onClose }: Creati
         if (!next) onClose();
       }}
       title={
-        <div className="flex min-w-0 items-center gap-2.5">
-          {headerAvatar ? (
-            <img
-              src={headerAvatar}
-              alt=""
-              loading="lazy"
-              decoding="async"
-              className="h-10 w-10 shrink-0 rounded-full border border-border object-cover"
-            />
-          ) : igPostUrl ? (
-            // Instagram fallback avatar — generic IG camera glyph
-            // on a subtle gradient so IG-sourced creatives still get
-            // a recognisable header.
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#FEDA77] via-[#F58529] to-[#DD2A7B] text-white">
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <rect x="2" y="2" width="20" height="20" rx="5" />
-                <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
-                <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
-              </svg>
+        minimal ? undefined : (
+          <div className="flex min-w-0 items-center gap-2.5">
+            {headerAvatar ? (
+              <img
+                src={headerAvatar}
+                alt=""
+                loading="lazy"
+                decoding="async"
+                className="h-10 w-10 shrink-0 rounded-full border border-border object-cover"
+              />
+            ) : igPostUrl ? (
+              // Instagram fallback avatar — generic IG camera glyph
+              // on a subtle gradient so IG-sourced creatives still get
+              // a recognisable header.
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#FEDA77] via-[#F58529] to-[#DD2A7B] text-white">
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="2" y="2" width="20" height="20" rx="5" />
+                  <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+                  <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
+                </svg>
+              </div>
+            ) : (
+              <div className="h-10 w-10 shrink-0 rounded-full bg-bg" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[14px] font-semibold leading-tight text-ink">
+                {headerName}
+              </div>
+              <div className="text-[11px] font-normal text-gray-300">{headerSubtitle}</div>
             </div>
-          ) : (
-            <div className="h-10 w-10 shrink-0 rounded-full bg-bg" />
-          )}
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[14px] font-semibold leading-tight text-ink">
-              {headerName}
-            </div>
-            <div className="text-[11px] font-normal text-gray-300">{headerSubtitle}</div>
           </div>
-        </div>
+        )
       }
-      titleAction={headerPostButton}
+      titleAction={minimal ? undefined : headerPostButton}
       width={520}
     >
-      {creative && (
-        <div className="flex flex-col gap-3">
+      {creative &&
+        (minimal ? (
+          // 報告 creative card: bare media only — no header, download, or
+          // body. Video autoplays; image just shows.
           <MediaBlock
             creativeName={creative.name}
             videoId={videoId}
@@ -399,21 +417,42 @@ export function CreativePreviewModal({ creative, campaignName, onClose }: Creati
             onImgError={() => setImgError(true)}
             postUrl={postUrl}
           />
+        ) : (
+          <div className="flex flex-col gap-3">
+            <MediaBlock
+              creativeName={creative.name}
+              videoId={videoId}
+              videoQueryLoading={videoQuery.isLoading || videoQuery.isPending}
+              videoSource={videoQuery.data?.source ?? null}
+              videoPicture={videoQuery.data?.picture ?? null}
+              videoPoster={videoPoster ?? null}
+              isFrontPost={isFrontPost}
+              postMediaLoading={postMediaQuery.isLoading || postMediaQuery.isPending}
+              hiresLoading={hiresQuery.isLoading || hiresQuery.isFetching}
+              needsHires={needsHires}
+              postVideoSource={postVideoSource}
+              previewImage={previewImage ?? null}
+              hiResFailed={hiResFailed}
+              thumb={thumb ?? null}
+              imgError={imgError}
+              onImgError={() => setImgError(true)}
+              postUrl={postUrl}
+            />
 
-          <DownloadAssetButton
-            creativeName={campaignName?.trim() || creative.name}
-            videoSource={videoQuery.data?.source ?? null}
-            postVideoSource={postVideoSource}
-            previewImage={previewImage ?? null}
-          />
+            <DownloadAssetButton
+              creativeName={campaignName?.trim() || creative.name}
+              videoSource={videoQuery.data?.source ?? null}
+              postVideoSource={postVideoSource}
+              previewImage={previewImage ?? null}
+            />
 
-          {creativeBody && (
-            <p className="w-full whitespace-pre-wrap text-[13px] leading-relaxed text-ink">
-              {creativeBody}
-            </p>
-          )}
-        </div>
-      )}
+            {creativeBody && (
+              <p className="w-full whitespace-pre-wrap text-[13px] leading-relaxed text-ink">
+                {creativeBody}
+              </p>
+            )}
+          </div>
+        ))}
     </Modal>
   );
 }
