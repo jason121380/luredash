@@ -115,6 +115,9 @@ export function DashboardView() {
   // Local UI state
   const [searchTerm, setSearchTerm] = useState("");
   const [compareMode, setCompareMode] = useState(false);
+  // 素材比較 filters (only apply in comparison view).
+  const [compareActiveOnly, setCompareActiveOnly] = useState(false);
+  const [comparePostFilter, setComparePostFilter] = useState<"all" | "front" | "back">("all");
   const [budgetTarget, setBudgetTarget] = useState<BudgetModalTarget | null>(null);
 
   // Stable handler for BudgetModal — passed down to every
@@ -263,6 +266,31 @@ export function DashboardView() {
                 />
                 第三層素材比較
               </label>
+              {compareMode && (
+                <>
+                  <label className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-[12px] text-gray-500 md:text-[13px]">
+                    <input
+                      type="checkbox"
+                      className="custom-cb"
+                      checked={compareActiveOnly}
+                      onChange={(e) => setCompareActiveOnly(e.currentTarget.checked)}
+                    />
+                    只呈現進行中
+                  </label>
+                  <select
+                    value={comparePostFilter}
+                    onChange={(e) =>
+                      setComparePostFilter(e.currentTarget.value as "all" | "front" | "back")
+                    }
+                    className="h-[30px] rounded-pill border-[1.5px] border-border bg-bg px-2.5 text-[12px] outline-none focus:border-orange focus:bg-white md:text-[13px]"
+                    title="依貼文類型篩選素材"
+                  >
+                    <option value="all">全部</option>
+                    <option value="front">前台貼文</option>
+                    <option value="back">後台貼文</option>
+                  </select>
+                </>
+              )}
               <label className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-[12px] text-gray-500 md:hidden">
                 <input
                   type="checkbox"
@@ -295,7 +323,13 @@ export function DashboardView() {
                 />
               ) : compareMode ? (
                 <Suspense fallback={<LoadingState title="載入比較檢視..." />}>
-                  <ComparisonTable multiAcct={multiAcct} date={date} searchTerm={searchTerm} />
+                  <ComparisonTable
+                    multiAcct={multiAcct}
+                    date={date}
+                    searchTerm={searchTerm}
+                    activeOnly={compareActiveOnly}
+                    postFilter={comparePostFilter}
+                  />
                 </Suspense>
               ) : (
                 <TreeTable

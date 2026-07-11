@@ -3,6 +3,7 @@ import { adsetsQueryKey } from "@/api/hooks/useAdsets";
 import { creativesQueryKey } from "@/api/hooks/useCreatives";
 import { cn } from "@/lib/cn";
 import type { DateConfig } from "@/lib/datePicker";
+import { isFrontPostCreative } from "@/lib/fbLinks";
 import { fM, fN } from "@/lib/format";
 import { getIns, getMsgCount } from "@/lib/insights";
 import { useUiStore } from "@/stores/uiStore";
@@ -33,19 +34,27 @@ export interface ComparisonTableProps {
   multiAcct: boolean;
   date: DateConfig;
   searchTerm: string;
+  /** Only show 進行中 (ACTIVE) creatives. */
+  activeOnly?: boolean;
+  /** Filter by post type: front-stage (前台貼文) / back-stage (後台貼文)
+   *  / all. */
+  postFilter?: "all" | "front" | "back";
 }
 
-export function ComparisonTable({ multiAcct, date, searchTerm }: ComparisonTableProps) {
+export function ComparisonTable({
+  multiAcct,
+  date,
+  searchTerm,
+  activeOnly = false,
+  postFilter = "all",
+}: ComparisonTableProps) {
   const expandedCamps = useUiStore((s) => s.expandedCamps);
   const expandedAdsets = useUiStore((s) => s.expandedAdsets);
   const treeSort = useUiStore((s) => s.treeSort);
   const setTreeSort = useUiStore((s) => s.setTreeSort);
 
   const extraTreeCols = useUiStore((s) => s.extraTreeCols);
-  const cols = useMemo(
-    () => buildTreeCols(multiAcct, extraTreeCols),
-    [multiAcct, extraTreeCols],
-  );
+  const cols = useMemo(() => buildTreeCols(multiAcct, extraTreeCols), [multiAcct, extraTreeCols]);
 
   // Subscribe to the adsets queries for every currently-expanded
   // campaign. Purely read-only from this view's perspective — the
@@ -59,10 +68,12 @@ export function ComparisonTable({ multiAcct, date, searchTerm }: ComparisonTable
         const res = await api.campaigns.adsets(campId, date);
         return res.data ?? [];
       },
-      // Read-only subscription to the cache. The tree row already fetches
-      // adsets when expanded; comparison mode must not fan out fresh FB
-      // calls for every expanded campaign.
-      enabled: false,
+      // Fetch when the cache is cold. Bounded to EXPANDED campaigns (the
+      // tree already fetched most of these, so this is normally a cache
+      // hit within staleTime). Was `enabled: false` (read-only), but that
+      // showed an empty view whenever the tree hadn't populated the cache
+      // yet — e.g. entering 素材比較 before expanding, or after gc.
+      enabled: !!campId,
       staleTime: 5 * 60_000,
     })),
   });
@@ -104,10 +115,11 @@ export function ComparisonTable({ multiAcct, date, searchTerm }: ComparisonTable
         const res = await api.adsets.creatives(adsetId, date);
         return res.data ?? [];
       },
-      // Read-only subscription to cached creative queries. If the user
-      // has not opened an adset yet, show the hint instead of auto-fetching
-      // every visible creative and burning FB quota.
-      enabled: false,
+      // Fetch when cold. Bounded to VISIBLE (expanded) adsets, so this
+      // stays a small, user-driven set — the tree usually populated these
+      // already (cache hit). Previously `enabled: false`, which left the
+      // comparison empty whenever the cache wasn't warm.
+      enabled: !!adsetId,
       staleTime: 5 * 60_000,
     })),
   });
@@ -122,9 +134,17 @@ export function ComparisonTable({ multiAcct, date, searchTerm }: ComparisonTable
 
   const filtered = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
-    if (!term) return allCreatives;
-    return allCreatives.filter((c) => c.name.toLowerCase().includes(term));
-  }, [allCreatives, searchTerm]);
+    let list = allCreatives;
+    if (term) list = list.filter((c) => c.name.toLowerCase().includes(term));
+    if (activeOnly) list = list.filter((c) => c.status === "ACTIVE");
+    if (postFilter !== "all") {
+      list = list.filter((c) => {
+        const front = c.creative ? isFrontPostCreative(c.creative) : false;
+        return postFilter === "front" ? front : !front;
+      });
+    }
+    return list;
+  }, [allCreatives, searchTerm, activeOnly, postFilter]);
 
   // Default sort = CTR descending. User can override by clicking a
   // column header, which sets treeSort in the uiStore. The same
