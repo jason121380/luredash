@@ -153,6 +153,8 @@ export function ReportModal({
         creative_fields: variant === "perf" ? (savedCreativeFields ?? undefined) : undefined,
         payload: buildClientPayload(),
       });
+      // Refresh 生成紀錄 so the new snapshot shows immediately (no reload).
+      queryClient.invalidateQueries({ queryKey: ["report-snapshots", campaign.id] });
       const url = buildSnapshotShareUrl(res.id);
       try {
         await navigator.clipboard.writeText(url);

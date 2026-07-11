@@ -162,7 +162,7 @@ function LiveShareReportPage() {
               markupPercent={markupPercent}
               selectedFields={selectedFields}
               creativeFields={creativeFields}
-              disablePreview
+              previewMediaOnly
               captureMode={autoShot}
             />
           ) : (
@@ -178,7 +178,7 @@ function LiveShareReportPage() {
               markupPercent={markupPercent}
               showRecommendations={showRecommendations}
               selectedFields={selectedFields}
-              disablePreview
+              previewMediaOnly
               captureMode={autoShot}
             />
           )}

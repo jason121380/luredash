@@ -125,7 +125,7 @@ function FrozenReport({ payload }: { payload: ReportSnapshotPayload }) {
           markupPercent={markupPercent}
           selectedFields={meta.selected_fields ?? null}
           creativeFields={meta.creative_fields ?? null}
-          disablePreview
+          previewMediaOnly
         />
       ) : (
         <ReportContent
@@ -140,7 +140,7 @@ function FrozenReport({ payload }: { payload: ReportSnapshotPayload }) {
           markupPercent={markupPercent}
           selectedFields={meta.selected_fields ?? null}
           showRecommendations
-          disablePreview
+          previewMediaOnly
         />
       )}
     </QueryClientProvider>

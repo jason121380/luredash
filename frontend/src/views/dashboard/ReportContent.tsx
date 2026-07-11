@@ -36,6 +36,11 @@ const PreviewDisabledContext = createContext(false);
  *  PreviewDisabledContext. */
 const CaptureModeContext = createContext(false);
 
+/** When true (public share link), clicking an ad card opens a media-only
+ *  preview (video autoplays / image), no page header / download / body.
+ *  The in-app report keeps the full preview. Read by `AdCard`. */
+const PreviewMediaOnlyContext = createContext(false);
+
 /**
  * Insight-oriented campaign report. Designed to answer the operator's
  * three questions at a glance:
@@ -213,9 +218,11 @@ export interface ReportContentProps {
    *  undefined → fall back to the legacy 12-cell layout (preserves
    *  the dashboard report-modal share flow). */
   selectedFields?: string[] | null;
-  /** When true (public share link), ad thumbnails are view-only — no
-   *  click-to-enlarge preview modal. */
+  /** When true, ad cards are not clickable (no preview modal). */
   disablePreview?: boolean;
+  /** When true (public share link), clicking an ad opens a media-only
+   *  preview (video autoplays / image) — no header / download / body. */
+  previewMediaOnly?: boolean;
   /** Capture mode (下載 JPG): thumbnails via same-origin proxy + eager
    *  so html-to-image can rasterise without tainting the canvas. */
   captureMode?: boolean;
@@ -234,6 +241,7 @@ export function ReportContent({
   showRecommendations = true,
   selectedFields = null,
   disablePreview = false,
+  previewMediaOnly = false,
   captureMode = false,
 }: ReportContentProps) {
   const ins = getIns(campaign);
@@ -275,105 +283,107 @@ export function ReportContent({
 
   return (
     <PreviewDisabledContext.Provider value={disablePreview}>
-      <CaptureModeContext.Provider value={captureMode}>
-        <div className="flex flex-col gap-5">
-          {/* Header — concrete date range top-left, big + orange so the
+      <PreviewMediaOnlyContext.Provider value={previewMediaOnly}>
+        <CaptureModeContext.Provider value={captureMode}>
+          <div className="flex flex-col gap-5">
+            {/* Header — concrete date range top-left, big + orange so the
           reader anchors on the period before reading numbers. */}
-          <div className="flex flex-col gap-2">
-            <div className="text-[12px] font-semibold uppercase tracking-wide text-gray-500">
-              資料區間 {dateLabel ? `(${dateLabel})` : ""}
+            <div className="flex flex-col gap-2">
+              <div className="text-[12px] font-semibold uppercase tracking-wide text-gray-500">
+                資料區間 {dateLabel ? `(${dateLabel})` : ""}
+              </div>
+              <div className="text-[24px] font-bold text-orange md:text-[28px]">
+                {concreteRangeLabel(date)}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge status={campaign.status} />
+                {campaign.objective && (
+                  <span className="rounded-full border border-border px-2.5 py-[3px] text-[12px] text-gray-500">
+                    {translateObjective(campaign.objective)}
+                  </span>
+                )}
+              </div>
+              <div className="text-[17px] font-bold text-ink md:text-[18px]">{displayName}</div>
             </div>
-            <div className="text-[24px] font-bold text-orange md:text-[28px]">
-              {concreteRangeLabel(date)}
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge status={campaign.status} />
-              {campaign.objective && (
-                <span className="rounded-full border border-border px-2.5 py-[3px] text-[12px] text-gray-500">
-                  {translateObjective(campaign.objective)}
-                </span>
-              )}
-            </div>
-            <div className="text-[17px] font-bold text-ink md:text-[18px]">{displayName}</div>
-          </div>
 
-          {/* Campaign-wide KPIs — single-row table. */}
-          <KpiTable
-            cells={
-              selectedFields?.length
-                ? pickCells(
-                    buildKpiCells(campaign, { hideMoney, spendLabel, applyMarkup, trafficMode }),
-                    selectedFields,
-                  )
-                : [
-                    { label: spendLabel, value: spendMoney(ins.spend) },
-                    { label: "曝光", value: fN(ins.impressions) },
-                    { label: "點擊", value: fN(ins.clicks) },
-                    { label: "CTR", value: fP(ins.ctr) },
-                    { label: "CPC", value: money(ins.cpc) },
-                    { label: "CPM", value: money(ins.cpm) },
-                    { label: "頻次", value: fF(ins.frequency) },
-                    { label: "觸及", value: fN(ins.reach) },
-                    ...(!trafficMode
-                      ? [
-                          { label: "私訊數", value: msgs > 0 ? fN(msgs) : "—" },
-                          { label: "私訊成本", value: msgs > 0 ? money(msgCost) : "—" },
-                        ]
-                      : []),
-                    {
-                      label: "預算",
-                      value: hideMoney
-                        ? "—"
-                        : campaign.daily_budget
-                          ? `日 $${fM(campaign.daily_budget)}`
-                          : campaign.lifetime_budget
-                            ? `總 $${fM(campaign.lifetime_budget)}`
-                            : "組合層級",
-                    },
-                  ]
-            }
-          />
+            {/* Campaign-wide KPIs — single-row table. */}
+            <KpiTable
+              cells={
+                selectedFields?.length
+                  ? pickCells(
+                      buildKpiCells(campaign, { hideMoney, spendLabel, applyMarkup, trafficMode }),
+                      selectedFields,
+                    )
+                  : [
+                      { label: spendLabel, value: spendMoney(ins.spend) },
+                      { label: "曝光", value: fN(ins.impressions) },
+                      { label: "點擊", value: fN(ins.clicks) },
+                      { label: "CTR", value: fP(ins.ctr) },
+                      { label: "CPC", value: money(ins.cpc) },
+                      { label: "CPM", value: money(ins.cpm) },
+                      { label: "頻次", value: fF(ins.frequency) },
+                      { label: "觸及", value: fN(ins.reach) },
+                      ...(!trafficMode
+                        ? [
+                            { label: "私訊數", value: msgs > 0 ? fN(msgs) : "—" },
+                            { label: "私訊成本", value: msgs > 0 ? money(msgCost) : "—" },
+                          ]
+                        : []),
+                      {
+                        label: "預算",
+                        value: hideMoney
+                          ? "—"
+                          : campaign.daily_budget
+                            ? `日 $${fM(campaign.daily_budget)}`
+                            : campaign.lifetime_budget
+                              ? `總 $${fM(campaign.lifetime_budget)}`
+                              : "組合層級",
+                      },
+                    ]
+              }
+            />
 
-          {/* Recommendations narrative */}
-          {showRecommendations && recommendations.length > 0 && (
-            <div className="rounded-xl border border-orange/30 bg-orange-bg/40 px-4 py-3.5">
-              <div className="mb-2 text-[13px] font-bold text-orange">優化建議</div>
-              <ul className="flex flex-col gap-1.5">
-                {recommendations.map((r, i) => (
-                  <li
-                    // biome-ignore lint/suspicious/noArrayIndexKey: stable bullet list
-                    key={i}
-                    className="flex items-start gap-2 text-[14px] text-ink"
-                  >
-                    <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-orange" />
-                    <span>{r}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+            {/* Recommendations narrative */}
+            {showRecommendations && recommendations.length > 0 && (
+              <div className="rounded-xl border border-orange/30 bg-orange-bg/40 px-4 py-3.5">
+                <div className="mb-2 text-[13px] font-bold text-orange">優化建議</div>
+                <ul className="flex flex-col gap-1.5">
+                  {recommendations.map((r, i) => (
+                    <li
+                      // biome-ignore lint/suspicious/noArrayIndexKey: stable bullet list
+                      key={i}
+                      className="flex items-start gap-2 text-[14px] text-ink"
+                    >
+                      <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-orange" />
+                      <span>{r}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
-          {/* Adsets — top 3 by spend auto-expand to keep the first paint
+            {/* Adsets — top 3 by spend auto-expand to keep the first paint
           insight-rich; the rest collapse to a header-only row that
           can be expanded on demand. Hides FB-call burst by default
           since each expanded adset fires a breakdown strip + ads
           list (~5 calls per adset). */}
-          <AdsetSection
-            adsets={adsets}
-            adsetsLoading={adsetsLoading}
-            adsetsError={adsetsError}
-            date={date}
-            hideMoney={hideMoney}
-            money={money}
-            spendMoney={spendMoney}
-            spendLabel={spendLabel}
-            trafficMode={trafficMode}
-            campaignName={campaign.name}
-            applyMarkup={applyMarkup}
-            selectedFields={selectedFields}
-          />
-        </div>
-      </CaptureModeContext.Provider>
+            <AdsetSection
+              adsets={adsets}
+              adsetsLoading={adsetsLoading}
+              adsetsError={adsetsError}
+              date={date}
+              hideMoney={hideMoney}
+              money={money}
+              spendMoney={spendMoney}
+              spendLabel={spendLabel}
+              trafficMode={trafficMode}
+              campaignName={campaign.name}
+              applyMarkup={applyMarkup}
+              selectedFields={selectedFields}
+            />
+          </div>
+        </CaptureModeContext.Provider>
+      </PreviewMediaOnlyContext.Provider>
     </PreviewDisabledContext.Provider>
   );
 }
@@ -739,6 +749,7 @@ function AdCard({
   const spend = num(ai.spend);
   const msgCost = m > 0 ? spend / m : null;
   const previewDisabled = useContext(PreviewDisabledContext);
+  const previewMediaOnly = useContext(PreviewMediaOnlyContext);
   const captureMode = useContext(CaptureModeContext);
   // Sharp thumbnail: image_url (image creatives) → 600px server
   // thumbnail (videos have no image_url; the ~64px field-expanded
@@ -831,7 +842,7 @@ function AdCard({
         <CreativePreviewModal
           creative={ad}
           campaignName={campaignName}
-          mediaOnly
+          mediaOnly={previewMediaOnly}
           onClose={() => setPreviewOpen(false)}
         />
       )}

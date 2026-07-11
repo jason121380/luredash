@@ -68,9 +68,13 @@ export interface PerformanceReportContentProps {
    *  花費 / 曝光 / 觸及 / CPC / CTR set. Per-creative card metrics are
    *  unaffected (they're the report's fixed core). */
   selectedFields?: string[] | null;
-  /** When true (public share link), creative cards are view-only — no
-   *  click-to-enlarge preview modal. */
+  /** When true, creative cards are not clickable (no preview modal). */
   disablePreview?: boolean;
+  /** When true (public share link), clicking a creative opens a
+   *  media-only preview (video autoplays / image), with no page header /
+   *  download / body — just the content. The in-app report keeps the
+   *  full preview. */
+  previewMediaOnly?: boolean;
   /** Which metrics each 素材卡 shows (ordered). null → the default card
    *  set (DEFAULT_CREATIVE_FIELDS). */
   creativeFields?: string[] | null;
@@ -95,6 +99,7 @@ export function PerformanceReportContent({
   markupPercent = 0,
   selectedFields = null,
   disablePreview = false,
+  previewMediaOnly = false,
   creativeFields = null,
   onCreativeFieldsChange,
   captureMode = false,
@@ -241,6 +246,7 @@ export function PerformanceReportContent({
                 campaignName={campaign.name}
                 money={money}
                 disablePreview={disablePreview}
+                previewMediaOnly={previewMediaOnly}
                 fields={cardFields}
                 captureMode={captureMode}
               />
@@ -258,6 +264,7 @@ function CreativeCard({
   campaignName,
   money,
   disablePreview,
+  previewMediaOnly,
   fields,
   captureMode,
 }: {
@@ -266,6 +273,7 @@ function CreativeCard({
   campaignName: string;
   money: (v: number | string | null | undefined) => string;
   disablePreview: boolean;
+  previewMediaOnly: boolean;
   fields: string[];
   captureMode: boolean;
 }) {
@@ -350,7 +358,7 @@ function CreativeCard({
         <CreativePreviewModal
           creative={ad}
           campaignName={campaignName}
-          mediaOnly
+          mediaOnly={previewMediaOnly}
           onClose={() => setPreviewOpen(false)}
         />
       )}
