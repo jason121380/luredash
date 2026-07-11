@@ -258,6 +258,10 @@ export function DashboardView() {
                   onChange={(e) => {
                     const on = e.currentTarget.checked;
                     setCompareMode(on);
+                    // Clear the search box on toggle — the search scope
+                    // switches between 活動 and 素材, so a leftover term
+                    // is misleading either way.
+                    setSearchTerm("");
                     // Reset sort when entering comparison mode so the
                     // default CTR-desc kicks in (ComparisonTable's
                     // effectiveSort fallback).
