@@ -34,7 +34,10 @@ export function SnapshotHistoryPanel({
     queryKey: ["report-snapshots", campaignId],
     queryFn: () => api.reportSnapshots.list(campaignId, null),
     enabled: active,
-    staleTime: 30_000,
+    // Always refetch when 生成紀錄 opens so a just-generated report shows
+    // up immediately — no dependency on invalidate timing / manual reload.
+    staleTime: 0,
+    refetchOnMount: "always",
   });
   const del = useMutation({
     mutationFn: (id: string) => api.reportSnapshots.remove(id, null),
