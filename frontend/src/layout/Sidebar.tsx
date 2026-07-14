@@ -1,4 +1,4 @@
-import { useIsAdmin } from "@/api/hooks/useAdmin";
+import { useIsAdmin, usePagePerms } from "@/api/hooks/useAdmin";
 import { useSubscription } from "@/api/hooks/useSubscription";
 import metadashLogoUrl from "@/assets/metadash-logo.svg";
 import { useFbAuth } from "@/auth/FbAuthProvider";
@@ -7,6 +7,7 @@ import { IdentityModal } from "@/components/IdentityModal";
 import { TierBadge } from "@/components/TierBadge";
 import { withReloadOnChunkError } from "@/lib/chunkReload";
 import { cn } from "@/lib/cn";
+import { canSeePage } from "@/lib/pagePerms";
 import { prefetchView } from "@/router";
 import { UserListModal } from "@/views/admin/UserListModal";
 import { Suspense, lazy, useState } from "react";
@@ -324,6 +325,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
   const [identityOpen, setIdentityOpen] = useState(false);
   const [userListOpen, setUserListOpen] = useState(false);
   const isAdmin = useIsAdmin();
+  const pagePerms = usePagePerms();
 
   return (
     <aside
@@ -357,21 +359,27 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
           on the parent <aside> instead causes flex-1 + mt-auto to
           mis-measure and leave a dead-air gap below the avatar. */}
       <nav className="min-h-0 flex-1 overflow-y-auto px-2 py-1.5">
-        {NAV_GROUPS.map((group, idx) => (
-          <div key={group.label}>
-            <div
-              className={cn(
-                "px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-[0.8px] text-gray-300",
-                idx > 0 && "mt-1",
-              )}
-            >
-              {group.label}
+        {NAV_GROUPS.map((group, idx) => {
+          // Per-user page gating: hide items (and empty groups) the user
+          // isn't allowed to see. Admins see everything.
+          const items = group.items.filter((item) => canSeePage(item.to, pagePerms, isAdmin));
+          if (items.length === 0) return null;
+          return (
+            <div key={group.label}>
+              <div
+                className={cn(
+                  "px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-[0.8px] text-gray-300",
+                  idx > 0 && "mt-1",
+                )}
+              >
+                {group.label}
+              </div>
+              {items.map((item) => (
+                <SidebarLink key={item.to} item={item} />
+              ))}
             </div>
-            {group.items.map((item) => (
-              <SidebarLink key={item.to} item={item} />
-            ))}
-          </div>
-        ))}
+          );
+        })}
 
         {/* 管理員 — only visible to admins (server-authoritative). Holds
             工程模式 + 用戶列表. */}

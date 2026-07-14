@@ -1,6 +1,8 @@
 import { type AdminUser, api, friendlyApiError } from "@/api/client";
+import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
 import { toast } from "@/components/Toast";
+import { ALL_PAGE_KEYS, GATED_PAGES } from "@/lib/pagePerms";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
@@ -49,6 +51,17 @@ export function UserListModal({
     },
     onError: (e) => toast(`更新失敗:${friendlyApiError(e)}`, "error", 4000),
   });
+  const setPages = useMutation({
+    mutationFn: ({ id, pages }: { id: string; pages: string[] | null }) =>
+      api.admin.setUserPages(id, pages),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin", "users"] });
+      qc.invalidateQueries({ queryKey: ["admin", "whoami"] });
+      toast("已更新頁面權限", "success", 2000);
+    },
+    onError: (e) => toast(`更新失敗:${friendlyApiError(e)}`, "error", 4000),
+  });
+  const [pagesUser, setPagesUser] = useState<AdminUser | null>(null);
 
   const rows = q.data?.data ?? [];
   const defaults = new Set(q.data?.default_admin_ids ?? []);
@@ -80,6 +93,7 @@ export function UserListModal({
                 <th className="px-3 py-2">fb_user_id</th>
                 <th className="px-3 py-2">方案</th>
                 <th className="px-3 py-2">權限</th>
+                <th className="px-3 py-2">頁面權限</th>
               </tr>
             </thead>
             <tbody>
@@ -91,12 +105,90 @@ export function UserListModal({
                   busy={setRole.isPending}
                   onRole={(role) => setRole.mutate({ id: u.fb_user_id, role })}
                   onNickname={(nickname) => setNickname.mutate({ id: u.fb_user_id, nickname })}
+                  onEditPages={() => setPagesUser(u)}
                 />
               ))}
             </tbody>
           </table>
         </div>
       )}
+      {pagesUser && (
+        <PagePermsModal
+          user={pagesUser}
+          saving={setPages.isPending}
+          onClose={() => setPagesUser(null)}
+          onSave={(pages) => {
+            setPages.mutate({ id: pagesUser.fb_user_id, pages });
+            setPagesUser(null);
+          }}
+        />
+      )}
+    </Modal>
+  );
+}
+
+/** Per-user 頁面權限 editor — checkboxes for each sidebar page. All
+ *  checked → saves null (= all pages, incl. future ones). */
+function PagePermsModal({
+  user,
+  saving,
+  onClose,
+  onSave,
+}: {
+  user: AdminUser;
+  saving: boolean;
+  onClose: () => void;
+  onSave: (pages: string[] | null) => void;
+}) {
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(user.page_perms ?? ALL_PAGE_KEYS),
+  );
+  const toggle = (key: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const save = () => {
+    const arr = ALL_PAGE_KEYS.filter((k) => selected.has(k));
+    onSave(arr.length === ALL_PAGE_KEYS.length ? null : arr);
+  };
+  return (
+    <Modal
+      open
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+      title="頁面權限"
+      subtitle={user.nickname || user.name || user.fb_user_id}
+      width={340}
+    >
+      <div className="flex flex-col gap-0.5">
+        {GATED_PAGES.map((p) => (
+          <label
+            key={p.key}
+            className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1.5 text-[13px] text-ink hover:bg-bg"
+          >
+            <input
+              type="checkbox"
+              className="custom-cb"
+              checked={selected.has(p.key)}
+              onChange={() => toggle(p.key)}
+            />
+            {p.label}
+          </label>
+        ))}
+      </div>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={() => setSelected(new Set(ALL_PAGE_KEYS))}>
+          全選
+        </Button>
+        <Button variant="primary" size="sm" onClick={save} disabled={saving}>
+          儲存
+        </Button>
+      </div>
     </Modal>
   );
 }
@@ -107,13 +199,16 @@ function UserRow({
   busy,
   onRole,
   onNickname,
+  onEditPages,
 }: {
   user: AdminUser;
   isDefaultAdmin: boolean;
   busy: boolean;
   onRole: (role: "admin" | "user") => void;
   onNickname: (nickname: string) => void;
+  onEditPages: () => void;
 }) {
+  const allowedCount = user.page_perms == null ? ALL_PAGE_KEYS.length : user.page_perms.length;
   return (
     <tr className="border-border border-b last:border-0">
       <td className="px-3 py-2">
@@ -155,6 +250,15 @@ function UserRow({
             <option value="admin">管理員</option>
           </select>
         )}
+      </td>
+      <td className="px-3 py-2">
+        <button
+          type="button"
+          onClick={onEditPages}
+          className="h-[28px] rounded-md border border-border bg-white px-2.5 text-[12px] text-gray-500 transition hover:border-orange hover:text-orange"
+        >
+          {user.page_perms == null ? "全部" : `${allowedCount}/${ALL_PAGE_KEYS.length}`}
+        </button>
       </td>
     </tr>
   );
