@@ -8118,172 +8118,8 @@ def _is_traffic_objective(raw: Optional[str]) -> bool:
     return raw is not None and raw in _TRAFFIC_OBJECTIVES
 
 
-# Field-family classifications used to gate recommendation blocks.
-# Mirrors the codes in `frontend/src/lib/reportFields.ts`. When the
-# user has explicitly selected a set of report_fields for a LINE push,
-# we ONLY run rule blocks whose family intersects that selection — so
-# an e-commerce-focused report doesn't get bombarded with messaging
-# advice that's irrelevant to the recipient.
-_MSG_FIELDS = {"msgs", "msg_cost"}
-_PURCHASE_FIELDS = {"purchases", "cost_per_purchase", "roas"}
-_ATC_FIELDS = {"add_to_cart", "cost_per_add_to_cart"}
-_TRAFFIC_FIELDS = {"link_clicks", "cost_per_link_click"}
-
-
-def _evaluate_alert_recommendations(
-    *,
-    spend: float,
-    msgs: int,
-    msg_cost: float,
-    cpc: float,
-    frequency: float,
-    objective: Optional[str] = None,
-    purchases: int = 0,
-    cost_per_purchase: float = 0.0,
-    roas: float = 0.0,
-    add_to_cart: int = 0,
-    cost_per_add_to_cart: float = 0.0,
-    link_clicks: int = 0,
-    cost_per_link_click: float = 0.0,
-    selected_fields: Optional[List[str]] = None,
-) -> List[str]:
-    """產生 LINE flex 報告的優化建議。建議內容依使用者勾選的 report_fields
-    動態調整 — 訊息類報告就給訊息建議,電商類就給購買/ATC 建議,流量類
-    就給連結點擊建議。沒選 → 視同 legacy 私訊主軸的全套規則。
-
-    私訊成本分段(只在 msgs / msg_cost 被選 OR 沒指定時觸發):
-        < $100  非常好(以私訊為主軸,忽略 CPC)
-        100~200 平均值,維持現狀
-        200~300 偏高,待觀察
-        > $300  太高(連同 CPC 對比評論,忽略頻次)
-
-    購買 / ROAS 分段(purchases / cost_per_purchase / roas 被選):
-        ROAS > 4 + 購買 > 0     表現亮眼,擴大預算測試承載
-        ROAS 2~4               平均水準,維持現狀
-        ROAS 1~2               偏低,檢視出價或加價策略
-        ROAS < 1 + 購買 > 0     虧損中,立即優化
-        購買 == 0 + 加購 > 5    結帳/運費勸退,需檢查
-        購買 == 0 + spend>$1k  Pixel 未觸發或受眾不對
-
-    加購分段(add_to_cart / cost_per_add_to_cart 被選):
-        加購 == 0 + spend > $500  目前無加購訊號,檢查 Pixel/落地頁
-        加購成本 > $200            加購成本偏高,優化前端漏斗
-
-    連結點擊分段(link_clicks / cost_per_link_click 被選):
-        cost_per_link_click > $6    太高,需調整素材
-        cost_per_link_click 4~6     可以優化
-        cost_per_link_click 3~4     偏高,待觀察
-
-    CPC + 頻次:msg/purchase 區塊都未觸發時才評論,避免重複建議。
-    流量類目標 (objective in _TRAFFIC_OBJECTIVES) 跳過私訊邏輯,因為
-    這些 campaign 不是私訊優化的,msgCost 是雜訊。
-    """
-    out: List[str] = []
-    traffic_mode = _is_traffic_objective(objective)
-    selected = set(selected_fields or [])
-
-    # Decide which rule families to run. When user hasn't picked any
-    # fields (legacy default config) OR explicitly picked msg fields,
-    # the msg block is on. When user picked NO msg fields but DID
-    # pick e-commerce/traffic fields, suppress msg to keep the report
-    # tightly focused on what they asked for.
-    msg_picked = bool(selected & _MSG_FIELDS)
-    purchase_picked = bool(selected & _PURCHASE_FIELDS)
-    atc_picked = bool(selected & _ATC_FIELDS)
-    traffic_picked = bool(selected & _TRAFFIC_FIELDS)
-    has_explicit_non_msg = purchase_picked or atc_picked or traffic_picked
-    show_msg = (not selected) or msg_picked or (not has_explicit_non_msg)
-
-    has_msg = show_msg and (not traffic_mode) and msgs > 0
-    skip_frequency = False
-
-    if has_msg:
-        if msg_cost < 100:
-            out.append(f"私訊成本 ${msg_cost:.0f} 非常好,持續以私訊轉換為主軸")
-        elif msg_cost <= 200:
-            out.append(f"私訊成本 ${msg_cost:.0f} 為平均值,維持現狀即可")
-        elif msg_cost <= 300:
-            out.append(f"私訊成本 ${msg_cost:.0f} 偏高,待觀察")
-        else:
-            skip_frequency = True
-            if cpc <= 4:
-                out.append(
-                    f"私訊成本 ${msg_cost:.0f} 太高、但 CPC ${cpc:.2f} 表現不錯,"
-                    "建議檢視私訊回覆流程或落地頁轉換"
-                )
-            else:
-                out.append(
-                    f"私訊成本 ${msg_cost:.0f} 太高、CPC ${cpc:.2f} 也偏高,"
-                    "建議從受眾與素材整體優化"
-                )
-
-    # Purchase / ROAS block.
-    if purchase_picked:
-        if purchases > 0:
-            if roas > 4:
-                out.append(f"ROAS {roas:.2f} 表現亮眼,可考慮擴大預算測試承載量")
-            elif roas >= 2:
-                out.append(f"ROAS {roas:.2f} 為平均水準,維持現狀觀察")
-            elif roas >= 1:
-                out.append(f"ROAS {roas:.2f} 偏低,檢視出價策略或產品加價空間")
-            elif roas > 0:
-                out.append(f"ROAS {roas:.2f} 低於 1 處於虧損,需立即優化或暫停")
-            elif cost_per_purchase > 0:
-                out.append(
-                    f"購買成本 ${cost_per_purchase:.0f},無 ROAS 資料,"
-                    "建議確認購買價值是否有上傳"
-                )
-        else:
-            # 沒有購買 → 視 ATC / spend 給線索
-            if add_to_cart >= 5:
-                out.append(
-                    f"有 {add_to_cart} 次加購但 0 購買,結帳流程或運費可能勸退顧客"
-                )
-            elif spend > 1000:
-                out.append("尚未產生購買,先檢查 Pixel 觸發或受眾是否吻合")
-
-    # ATC block — independent of purchase block, so e.g. user who
-    # only picked ATC fields still gets ATC-specific advice.
-    if atc_picked and not purchase_picked:
-        if add_to_cart == 0 and spend > 500:
-            out.append("目前無加購訊號,建議檢查 Pixel 設定與落地頁吸引力")
-        elif cost_per_add_to_cart > 200 and add_to_cart > 0:
-            out.append(
-                f"加購成本 ${cost_per_add_to_cart:.0f} 偏高,優化前端轉換漏斗"
-            )
-
-    # Traffic block — only run when no msg/purchase block fired
-    # (otherwise the link-click advice is noise alongside actual
-    # conversion advice).
-    if traffic_picked and not has_msg and not purchase_picked:
-        if cost_per_link_click > 6:
-            out.append(f"連結點擊成本 ${cost_per_link_click:.0f} 太高,需調整素材或受眾")
-        elif cost_per_link_click > 4:
-            out.append(f"連結點擊成本 ${cost_per_link_click:.0f} 可以優化")
-        elif cost_per_link_click > 3:
-            out.append(f"連結點擊成本 ${cost_per_link_click:.0f} 偏高,待觀察")
-
-    # CPC fallback — only when no msg block fired AND no e-commerce
-    # block hit (avoid stacking generic CPC advice on top of more
-    # specific recommendations).
-    if not has_msg and not purchase_picked and not traffic_picked:
-        if cpc > 6:
-            out.append(f"CPC ${cpc:.2f} 太高,需要調整")
-        elif cpc > 5:
-            out.append(f"CPC ${cpc:.2f} 可以優化")
-        elif cpc > 4:
-            out.append(f"CPC ${cpc:.2f} 偏高,待觀察")
-
-    if not skip_frequency:
-        if frequency > 5 and spend > 1000:
-            out.append(f"頻次 {frequency:.1f} 過高,建議擴大受眾避免廣告疲勞")
-        elif frequency > 4 and spend > 500:
-            out.append(f"頻次 {frequency:.1f} 偏高,需留意素材疲勞")
-
-    if not out and spend > 0:
-        out.append("整體表現穩定,持續觀察素材成效")
-    return out
-
+# (優化建議 rule engine `_evaluate_alert_recommendations` removed 2026-07-14 —
+# reports and LINE pushes now carry raw numbers only.)
 
 # Map a push-time date_range to a public-share-page DatePreset. Some
 # values aren't supported by the share page (last_14d, month_to_yesterday)
@@ -8312,7 +8148,6 @@ def _share_url_for_config(
     date_range: str,
     date_from: Any = None,
     date_to: Any = None,
-    include_recommendations: bool = True,
     use_spend_plus: bool = False,
     markup_pct: float = 0.0,
     selected_fields: Optional[List[str]] = None,
@@ -8344,13 +8179,6 @@ def _share_url_for_config(
         # preset behaviour so old links keep working.
         preset = _SHARE_DATE_PRESET.get(date_range, "this_month")
         params = {"acct": account_id, "date": preset}
-    # Mirror the push config's include_recommendations toggle to the
-    # share page so the「優化建議」block hides on the public report
-    # whenever the operator opted out of advice in the LINE flex.
-    # Only emit `advice=0` (explicit hide) — default true on the share
-    # page means legacy links keep showing recommendations.
-    if not include_recommendations:
-        params["advice"] = "0"
     # Mirror the spend / spend_plus selection. The push config picks
     # one (mutex pair in the report-fields multi-select); when
     # spend_plus is chosen we forward both the flag and the markup so
@@ -8520,9 +8348,8 @@ def _kpis_from_insights(
     """Convert one FB insights row into (kpis, raw_inputs).
 
     `kpis` is the ordered list of (label, formatted_value) tuples for
-    the Flex body; `raw_inputs` is a dict the caller passes to
-    `_evaluate_alert_recommendations` so the 優化建議 block stays in
-    sync with the KPI numbers shown above it.
+    the Flex body; `raw_inputs` carries the extracted scalars (spend /
+    msgs / cpc / ...) for callers that need the raw numbers.
 
     Used for BOTH the campaign-level single-bubble path AND the
     per-adset carousel path. The only thing that changes between the
@@ -8733,43 +8560,13 @@ async def _build_flex_for_config(cfg: dict, snapshot_timeout: float = 60.0) -> d
 
     markup_pct = await _markup_for_campaign(campaign_id)
     selected = list(cfg.get("report_fields") or [])
-    kpis, raw_inputs = _kpis_from_insights(
+    kpis, _raw_inputs = _kpis_from_insights(
         ins, traffic_mode=traffic_mode, selected=selected, markup_pct=markup_pct
     )
-    # Keep these scalars locally for the recommendation + share-page paths below.
-    spend_f = raw_inputs["spend"]
-    cpc_f = raw_inputs["cpc"]
-    freq_f = raw_inputs["frequency"]
-    msgs = raw_inputs["msgs"]
-    msg_cost_f = raw_inputs["msg_cost"]
-    purchases_n = raw_inputs["purchases"]
-    cost_per_purchase_f = raw_inputs["cost_per_purchase"]
-    roas_f = raw_inputs["roas"]
-    atc_n = raw_inputs["add_to_cart"]
-    cost_per_atc_f = raw_inputs["cost_per_add_to_cart"]
-    link_clicks_n = raw_inputs["link_clicks"]
-    cost_per_link_click_f = raw_inputs["cost_per_link_click"]
-
-    recommendations = (
-        _evaluate_alert_recommendations(
-            spend=spend_f,
-            msgs=msgs,
-            msg_cost=msg_cost_f,
-            cpc=cpc_f,
-            frequency=freq_f,
-            objective=objective,
-            purchases=purchases_n,
-            cost_per_purchase=cost_per_purchase_f,
-            roas=roas_f,
-            add_to_cart=atc_n,
-            cost_per_add_to_cart=cost_per_atc_f,
-            link_clicks=link_clicks_n,
-            cost_per_link_click=cost_per_link_click_f,
-            selected_fields=list(cfg.get("report_fields") or []),
-        )
-        if cfg.get("include_recommendations")
-        else None
-    )
+    # 優化建議 removed (2026-07-14) — flex cards carry raw numbers only.
+    # `include_recommendations` stays in the DB/API for row compatibility
+    # but is no longer honoured anywhere.
+    recommendations = None
 
     # Title: campaign nickname (store · designer) if set, else FB name.
     nickname = await _campaign_nickname_display(campaign_id)
@@ -8790,11 +8587,9 @@ async def _build_flex_for_config(cfg: dict, snapshot_timeout: float = 60.0) -> d
     # Pass date_from / date_to so the share page lands on the same
     # reporting window as the push (custom / month_to_yesterday /
     # last_14d would otherwise be downgraded by _SHARE_DATE_PRESET).
-    # `include_recommendations` is mirrored so the share page hides
-    # the「優化建議」block whenever the LINE flex did. spend_plus
-    # mirrors the spend / spend_plus mutex pair from report_fields so
-    # the share page's「花費」cell shows the same marked-up amount
-    # that appeared on the LINE flex (`花費*`).
+    # spend_plus mirrors the spend / spend_plus mutex pair from
+    # report_fields so the share page's「花費」cell shows the same
+    # marked-up amount that appeared on the LINE flex (`花費*`).
     selected_codes = list(cfg.get("report_fields") or [])
     use_spend_plus = "spend_plus" in selected_codes
     # Mirror the flex builder's default-fallback so an unconfigured
@@ -8860,7 +8655,6 @@ async def _build_flex_for_config(cfg: dict, snapshot_timeout: float = 60.0) -> d
                 date_range,
                 date_from,
                 date_to,
-                include_recommendations=bool(cfg.get("include_recommendations")),
                 use_spend_plus=use_spend_plus,
                 markup_pct=markup_pct,
                 selected_fields=share_fields,
@@ -8926,29 +8720,10 @@ async def _build_flex_for_config(cfg: dict, snapshot_timeout: float = 60.0) -> d
         member_name = member_data.get("name") or mid
         member_ins_list = (member_data.get("insights") or {}).get("data") or []
         member_ins = member_ins_list[0] if member_ins_list else {}
-        member_kpis, member_raw = _kpis_from_insights(
+        member_kpis, _member_raw = _kpis_from_insights(
             member_ins, traffic_mode=traffic_mode, selected=selected, markup_pct=markup_pct
         )
-        member_recs = (
-            _evaluate_alert_recommendations(
-                spend=member_raw["spend"],
-                msgs=member_raw["msgs"],
-                msg_cost=member_raw["msg_cost"],
-                cpc=member_raw["cpc"],
-                frequency=member_raw["frequency"],
-                objective=objective,
-                purchases=member_raw["purchases"],
-                cost_per_purchase=member_raw["cost_per_purchase"],
-                roas=member_raw["roas"],
-                add_to_cart=member_raw["add_to_cart"],
-                cost_per_add_to_cart=member_raw["cost_per_add_to_cart"],
-                link_clicks=member_raw["link_clicks"],
-                cost_per_link_click=member_raw["cost_per_link_click"],
-                selected_fields=selected,
-            )
-            if cfg.get("include_recommendations")
-            else None
-        )
+        member_recs = None  # 優化建議 removed (2026-07-14)
         # Each bubble shows ITS OWN entity's status — a paused ad must
         # render「已暫停」even when the parent campaign is still ACTIVE
         # (using the campaign chip here was the bug where a paused ad

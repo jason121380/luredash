@@ -48,7 +48,6 @@ function LiveShareReportPage() {
     customTo,
     useSpendPlus,
     markupPercent,
-    showRecommendations,
     selectedFields,
     creativeFields,
     reportVariant,
@@ -176,7 +175,6 @@ function LiveShareReportPage() {
               date={date}
               useSpendPlus={useSpendPlus}
               markupPercent={markupPercent}
-              showRecommendations={showRecommendations}
               selectedFields={selectedFields}
               previewMediaOnly
               captureMode={autoShot}
@@ -199,10 +197,6 @@ function parseUrl(): {
   customTo: string | null;
   useSpendPlus: boolean;
   markupPercent: number;
-  /** ?advice=0 explicitly hides the「優化建議」 block. Default true
-   *  so legacy share links and dashboard-modal links keep the
-   *  recommendations visible. */
-  showRecommendations: boolean;
   /** Comma-separated KPI codes from `?fields=`. null = no filter
    *  (legacy share-link / dashboard-modal links keep their full
    *  12-cell layout). */
@@ -228,7 +222,6 @@ function parseUrl(): {
       customTo: null,
       useSpendPlus: false,
       markupPercent: 0,
-      showRecommendations: true,
       selectedFields: null,
       creativeFields: null,
       reportVariant: "standard",
@@ -256,8 +249,6 @@ function parseUrl(): {
   const useSpendPlus = params.get("plus") === "1";
   const rawMkp = Number.parseFloat(params.get("mkp") ?? "");
   const markupPercent = Number.isFinite(rawMkp) && rawMkp > 0 ? rawMkp : 0;
-  // Default true — only an explicit `?advice=0` hides recommendations.
-  const showRecommendations = params.get("advice") !== "0";
   const rawFields = params.get("fields");
   const selectedFields = rawFields
     ? rawFields
@@ -284,7 +275,6 @@ function parseUrl(): {
     customTo,
     useSpendPlus,
     markupPercent,
-    showRecommendations,
     selectedFields,
     creativeFields,
     reportVariant,

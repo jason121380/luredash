@@ -139,7 +139,6 @@ function FrozenReport({ payload }: { payload: ReportSnapshotPayload }) {
           useSpendPlus={Boolean(meta.use_spend_plus)}
           markupPercent={markupPercent}
           selectedFields={meta.selected_fields ?? null}
-          showRecommendations
           previewMediaOnly
         />
       )}

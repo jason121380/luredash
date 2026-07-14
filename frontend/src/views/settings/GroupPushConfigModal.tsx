@@ -86,8 +86,6 @@ interface PerFreqState {
   includeReportButton: boolean;
   /** Which report version the button links to. */
   reportVariant: "standard" | "perf";
-  /** Render「優化建議」bullet list in the flex body. */
-  includeRecommendations: boolean;
   /** ISO YYYY-MM-DD; only meaningful when dateRange === "custom". */
   customFrom: string;
   customTo: string;
@@ -133,7 +131,6 @@ const blankFreq = (): PerFreqState => ({
   reportFields: ["spend_plus", "msgs", "msg_cost"],
   includeReportButton: false,
   reportVariant: "standard",
-  includeRecommendations: false,
   customFrom: "",
   customTo: "",
 });
@@ -172,7 +169,6 @@ function freqFromConfig(c: LinePushConfig): PerFreqState {
     reportFields: c.report_fields?.length ? c.report_fields : [...DEFAULT_REPORT_FIELDS],
     includeReportButton: !!c.include_report_button,
     reportVariant: c.report_variant === "perf" ? "perf" : "standard",
-    includeRecommendations: !!c.include_recommendations,
     customFrom: c.date_from ?? "",
     customTo: c.date_to ?? "",
   };
@@ -342,7 +338,7 @@ export function GroupPushConfigModal({
           report_fields: s.reportFields,
           include_report_button: s.includeReportButton,
           report_variant: s.reportVariant,
-          include_recommendations: s.includeRecommendations,
+          include_recommendations: false,
           campaign_name: state.campaignName,
           adset_ids: effectiveAdsetIds,
           ad_ids: effectiveAdIds,
@@ -711,18 +707,6 @@ export function GroupPushConfigModal({
             </label>
           )}
         </div>
-
-        {/* Recommendations toggle. Default off — many recipients are
-            external (業主) and only want raw numbers. */}
-        <label className="flex items-center gap-2 text-[13px] text-ink">
-          <input
-            type="checkbox"
-            className="custom-cb"
-            checked={active.includeRecommendations}
-            onChange={(e) => updateActive({ includeRecommendations: e.currentTarget.checked })}
-          />
-          是否啟用優化建議
-        </label>
 
         {/* Enabled — per-tab. Drives both create-on-save and
             delete-on-save (a tab that was previously enabled but is
