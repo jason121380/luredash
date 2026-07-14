@@ -209,6 +209,9 @@ function UserRow({
   onEditPages: () => void;
 }) {
   const allowedCount = user.page_perms == null ? ALL_PAGE_KEYS.length : user.page_perms.length;
+  // Admins always bypass page gating (canSeePage), so editing their page
+  // perms has no effect — disable the button for them.
+  const isAdmin = isDefaultAdmin || user.role === "admin";
   return (
     <tr className="border-border border-b last:border-0">
       <td className="px-3 py-2">
@@ -252,13 +255,17 @@ function UserRow({
         )}
       </td>
       <td className="px-3 py-2">
-        <button
-          type="button"
-          onClick={onEditPages}
-          className="h-[28px] rounded-md border border-border bg-white px-2.5 text-[12px] text-gray-500 transition hover:border-orange hover:text-orange"
-        >
-          {user.page_perms == null ? "全部" : `${allowedCount}/${ALL_PAGE_KEYS.length}`}
-        </button>
+        {isAdmin ? (
+          <span className="text-[12px] text-gray-300">全部(管理員)</span>
+        ) : (
+          <button
+            type="button"
+            onClick={onEditPages}
+            className="h-[28px] rounded-md border border-border bg-white px-2.5 text-[12px] text-gray-500 transition hover:border-orange hover:text-orange"
+          >
+            {user.page_perms == null ? "全部" : `${allowedCount}/${ALL_PAGE_KEYS.length}`}
+          </button>
+        )}
       </td>
     </tr>
   );
