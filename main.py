@@ -5995,6 +5995,76 @@ async def _fetch_single_entity_insights(
     return {}
 
 
+async def _fetch_child_insights_bulk(
+    parent_id: str,
+    level: str,
+    date_preset: str,
+    time_range: Optional[str],
+) -> dict[str, dict]:
+    """Fetch aggregated insights for ALL children of one parent in a
+    single FB call via `{parent_id}/insights?level={adset|ad}` — the
+    same canonical bulk pattern as `_fetch_campaign_insights_bulk`
+    (which does level=campaign on the account node), one level down.
+
+    Returns `{child_id: insights_row}` keyed by adset_id / ad_id.
+    Callers stitch the rows onto metadata under
+    `c["insights"]["data"][0]` — the shape `getIns(c)` expects.
+
+    This replaces nested field-expansion (`{parent}/adsets?fields=
+    ...insights.date_preset(X){...}`), which shares the node-expansion
+    failure mode: FB returns EMPTY nested insights for some entities
+    (awareness objectives / certain delivery structures) even when
+    they spent. Errors are NON-fatal (empty map) except rate limits,
+    mirroring the account-level bulk helper."""
+    id_field = "adset_id" if level == "adset" else "ad_id"
+    # Ad level carries the video metrics the 成效報告 creative cards
+    # need (平均播放時間 / 完整觀看率 / ThruPlay 率); non-video ads
+    # simply return empty arrays for them.
+    video_fields = (
+        ",video_avg_time_watched_actions,video_p100_watched_actions,"
+        "video_thruplay_watched_actions,video_play_actions"
+        if level == "ad"
+        else ""
+    )
+    full_fields = (
+        f"{id_field},spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
+        "inline_link_clicks,cost_per_inline_link_click,"
+        f"cost_per_action_type,purchase_roas,website_purchase_roas{video_fields}"
+    )
+    mid_fields = (
+        f"{id_field},spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
+        f"inline_link_clicks{video_fields}"
+    )
+    min_fields = f"{id_field},spend,impressions,clicks,ctr,cpc,cpm,actions"
+
+    base_params: dict = {"level": level, "limit": "500"}
+    if time_range:
+        base_params["time_range"] = time_range
+    else:
+        base_params["date_preset"] = date_preset
+
+    rows: list = []
+    for fields in (full_fields, mid_fields, min_fields):
+        try:
+            rows = await fb_get_paginated(
+                f"{parent_id}/insights", {**base_params, "fields": fields}
+            )
+            break
+        except HTTPException as e:
+            if _is_rate_limit_exception(e):
+                raise
+            continue
+    else:
+        return {}
+
+    out: dict[str, dict] = {}
+    for r in rows:
+        cid = r.get(id_field)
+        if cid:
+            out[cid] = {k: v for k, v in r.items() if k != id_field}
+    return out
+
+
 async def _fetch_campaigns_for_account(
     account_id: str,
     date_preset: str,
@@ -6197,36 +6267,41 @@ async def get_campaign(
     Avoids ``/api/accounts/{id}/campaigns`` (the full account list)
     when the caller only needs ONE campaign. Heavy accounts (e.g. 吸引力
     LURE with 100+ campaigns) previously paid the full account scan
-    just to surface one row. This endpoint hits FB's per-campaign edge
-    directly: ``GET fb://{campaign_id}?fields=...,insights{...}`` →
-    one cheap call that FB only aggregates over a single campaign.
+    just to surface one row.
 
-    Falls back to no-insights fetch if the date-ranged insights nest
-    fails (e.g. campaign archived in a way that breaks the aggregation
-    on this account).
-    """
-    ins = _insights_clause(
-        "spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
-        "inline_link_clicks,cost_per_inline_link_click,"
-        "cost_per_action_type,purchase_roas,website_purchase_roas",
-        date_preset,
-        time_range,
-    )
+    Metadata and insights are fetched SEPARATELY, in parallel: the
+    numbers come from the campaign's `/insights` EDGE
+    (`_fetch_single_entity_insights`) — the same canonical path the
+    dashboard's bulk fetch uses — NOT from field-expanding `insights`
+    on the campaign node, which returns an EMPTY row for some
+    campaigns (awareness objectives / certain delivery structures)
+    even when they clearly spent. A failed insights fetch is
+    non-fatal (campaign returned without numbers)."""
     base_fields = (
         "id,name,status,objective,daily_budget,lifetime_budget,"
         "created_time,updated_time,account_id"
     )
-    try:
-        data = await fb_get(campaign_id, {"fields": f"{base_fields},{ins}"})
-    except HTTPException as e:
-        if _is_rate_limit_exception(e):
-            raise
-        print(
-            f"[campaign] {campaign_id} insights fetch failed: "
-            f"{e.status_code} {e.detail} — retrying without insights",
-            flush=True,
-        )
-        data = await fb_get(campaign_id, {"fields": base_fields})
+
+    async def _ins_row() -> dict:
+        try:
+            return await _fetch_single_entity_insights(
+                campaign_id, date_preset, time_range
+            )
+        except HTTPException as e:
+            if _is_rate_limit_exception(e):
+                raise
+            print(
+                f"[campaign] {campaign_id} insights fetch failed: "
+                f"{e.status_code} {e.detail} — returning without insights",
+                flush=True,
+            )
+            return {}
+
+    data, ins_row = await asyncio.gather(
+        fb_get(campaign_id, {"fields": base_fields}), _ins_row()
+    )
+    if isinstance(data, dict) and ins_row:
+        data["insights"] = {"data": [ins_row]}
     # Attach the team-wide nickname (店家 · 設計師) so the report / share
     # page can show it instead of the raw campaign name. Scoped to this
     # one campaign — we never expose the whole nickname list publicly.
@@ -6259,32 +6334,62 @@ async def get_adsets(
     time_range: Optional[str] = None,
     budget_only: bool = Query(False),
 ):
-    if budget_only:
+    if budget_only is True:
+        # `is True` (not truthiness): when this function is called
+        # directly from Python (snapshot gather), budget_only is the
+        # fastapi Query(False) DEFAULT OBJECT, which is truthy — the
+        # snapshot path was silently getting budget-only adsets with
+        # no insights, freezing every adset as $0. Direct callers
+        # should use _fetch_adsets_with_insights instead.
         return await fb_get(f"{campaign_id}/adsets", {
             "fields": "id,name,status,daily_budget,lifetime_budget",
             "limit": "500"
         })
+    return await _fetch_adsets_with_insights(campaign_id, date_preset, time_range)
 
-    ins = _insights_clause(
-        "spend,impressions,clicks,ctr,cpc,cpm,frequency,actions,"
-        "inline_link_clicks,cost_per_inline_link_click,"
-        "cost_per_action_type,purchase_roas,website_purchase_roas",
-        date_preset,
-        time_range,
-    )
-    try:
-        data = await fb_get(f"{campaign_id}/adsets", {
-            "fields": f"id,name,status,daily_budget,lifetime_budget,{ins}",
-            "limit": "500"
-        })
-    except HTTPException as e:
-        if _is_rate_limit_exception(e):
-            raise
-        # Fallback without insights if date query fails
-        data = await fb_get(f"{campaign_id}/adsets", {
-            "fields": "id,name,status,daily_budget,lifetime_budget",
-            "limit": "500"
-        })
+
+async def _fetch_adsets_with_insights(
+    campaign_id: str,
+    date_preset: str = "last_30d",
+    time_range: Optional[str] = None,
+) -> dict:
+    """Adsets metadata + insights for one campaign.
+
+    Metadata and insights are fetched SEPARATELY, in parallel: numbers
+    come from the campaign's `/insights?level=adset` bulk EDGE
+    (`_fetch_child_insights_bulk`) — one FB call for all adsets — and
+    are stitched under `adset["insights"]["data"][0]`. This replaces
+    the nested field-expansion (`/adsets?fields=...insights...`),
+    which returned EMPTY nested insights for some campaigns even when
+    they spent (same failure family as the campaign-node expansion).
+    A failed insights call is non-fatal — adsets still return, just
+    without numbers."""
+    meta_task = fb_get(f"{campaign_id}/adsets", {
+        "fields": "id,name,status,daily_budget,lifetime_budget",
+        "limit": "500"
+    })
+
+    async def _ins_map() -> dict:
+        try:
+            return await _fetch_child_insights_bulk(
+                campaign_id, "adset", date_preset, time_range
+            )
+        except HTTPException as e:
+            if _is_rate_limit_exception(e):
+                raise
+            return {}
+
+    data, ins_by_id = await asyncio.gather(meta_task, _ins_map())
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        stitched = []
+        for a in data["data"]:
+            a_copy = dict(a) if isinstance(a, dict) else a
+            if isinstance(a_copy, dict):
+                aid = a_copy.get("id")
+                if aid and aid in ins_by_id:
+                    a_copy["insights"] = {"data": [ins_by_id[aid]]}
+            stitched.append(a_copy)
+        data["data"] = stitched
     return data
 
 
@@ -6319,20 +6424,24 @@ async def update_adset_budget(adset_id: str, daily_budget: int = Query(None)):
 
 @app.get("/api/adsets/{adset_id}/ads")
 async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Optional[str] = None):
-    ins = _insights_clause(
-        "spend,impressions,clicks,ctr,cpc,cpm,actions,"
-        "inline_link_clicks,cost_per_inline_link_click,"
-        "cost_per_action_type,purchase_roas,website_purchase_roas,"
-        # 成效報告用:平均播放時間 + 觀看率(影片素材才有;非影片回空陣列)。
-        # p100 = 完整播放次數、thruplay = ThruPlay 次數、play = 影片播放次數,
-        # 用來在前端算「完整觀看率 / 完整播放率 / ThruPlay 率」。
-        "video_avg_time_watched_actions,"
-        "video_p100_watched_actions,"
-        "video_thruplay_watched_actions,"
-        "video_play_actions",
-        date_preset,
-        time_range,
-    )
+    # Metadata (creative fields) and insights are fetched SEPARATELY:
+    # numbers come from the adset's `/insights?level=ad` bulk EDGE
+    # (`_fetch_child_insights_bulk`, one FB call for all ads, includes
+    # the video metrics 成效報告 needs) and are stitched under
+    # `ad["insights"]["data"][0]`. Nested field-expansion returned
+    # EMPTY insights for some entities even when they spent — same
+    # failure family as the campaign-node expansion.
+    async def _ins_map() -> dict:
+        try:
+            return await _fetch_child_insights_bulk(
+                adset_id, "ad", date_preset, time_range
+            )
+        except HTTPException as e:
+            if _is_rate_limit_exception(e):
+                raise
+            return {}
+
+    ins_task = asyncio.ensure_future(_ins_map())
     last_error: Optional[HTTPException] = None
     # Progressive fallback so a partial failure (e.g. account lacks
     # creative permission) still returns something usable.
@@ -6377,15 +6486,15 @@ async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Opti
         # expanded object_story_spec so we can classify inline vs
         # front-stage, asset_feed_spec for dynamic-creative videos, plus
         # the two permalink fields.
-        f"id,name,status,creative{{id,thumbnail_url,image_url,{oss_expanded},{afs},effective_object_story_id,instagram_permalink_url,title,body}},{ins}",
+        f"id,name,status,creative{{id,thumbnail_url,image_url,{oss_expanded},{afs},effective_object_story_id,instagram_permalink_url,title,body}}",
         # Tier 2: drop object_story_spec (some accounts reject it) but keep
         # asset_feed_spec so dynamic-creative videos still resolve.
-        f"id,name,status,creative{{id,thumbnail_url,image_url,{afs},effective_object_story_id,instagram_permalink_url,title,body}},{ins}",
+        f"id,name,status,creative{{id,thumbnail_url,image_url,{afs},effective_object_story_id,instagram_permalink_url,title,body}}",
         # Tier 3: drop image_url.
-        f"id,name,status,creative{{id,thumbnail_url,effective_object_story_id,instagram_permalink_url,title,body}},{ins}",
-        f"id,name,status,{ins}",
+        f"id,name,status,creative{{id,thumbnail_url,effective_object_story_id,instagram_permalink_url,title,body}}",
         "id,name,status",
     ]
+    data: Optional[dict] = None
     for fields in attempts:
         try:
             params = {"fields": fields, "limit": "500"}
@@ -6397,17 +6506,34 @@ async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Opti
                 # bytes.
                 params["thumbnail_width"] = "120"
                 params["thumbnail_height"] = "120"
-            return await fb_get(f"{adset_id}/ads", params)
+            data = await fb_get(f"{adset_id}/ads", params)
+            break
         except HTTPException as e:
             last_error = e
             if _is_rate_limit_exception(e):
+                ins_task.cancel()
                 raise
             continue
-    # All attempts failed — surface the most recent error so the frontend can
-    # display the actual reason instead of a silent 500.
-    if last_error is not None:
-        raise last_error
-    raise HTTPException(status_code=502, detail="Failed to load ads from Facebook API")
+    if data is None:
+        # All attempts failed — surface the most recent error so the
+        # frontend can display the actual reason instead of a silent 500.
+        ins_task.cancel()
+        if last_error is not None:
+            raise last_error
+        raise HTTPException(status_code=502, detail="Failed to load ads from Facebook API")
+
+    ins_by_id = await ins_task
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        stitched = []
+        for ad in data["data"]:
+            ad_copy = dict(ad) if isinstance(ad, dict) else ad
+            if isinstance(ad_copy, dict):
+                aid = ad_copy.get("id")
+                if aid and aid in ins_by_id:
+                    ad_copy["insights"] = {"data": [ins_by_id[aid]]}
+            stitched.append(ad_copy)
+        data["data"] = stitched
+    return data
 
 
 # ── Insights breakdowns (for the share / dashboard report) ────
@@ -6811,7 +6937,11 @@ async def _gather_report_snapshot(
         campaign = campaign_resp.get("data") if isinstance(campaign_resp, dict) else None
         if not isinstance(campaign, dict):
             raise HTTPException(status_code=502, detail="無法載入行銷活動資料")
-        adsets_resp = await get_adsets(campaign_id, date_preset, time_range)
+        # NOT get_adsets(): calling the route function directly passes the
+        # fastapi Query(False) default OBJECT as budget_only, which is
+        # truthy — the snapshot froze budget-only adsets with no insights
+        # (every adset $0,「此區間無花費的廣告組合」).
+        adsets_resp = await _fetch_adsets_with_insights(campaign_id, date_preset, time_range)
         adsets = adsets_resp.get("data", []) if isinstance(adsets_resp, dict) else []
         if not isinstance(adsets, list):
             adsets = []
@@ -8292,7 +8422,11 @@ async def _snapshot_url_for_push(
             payload = await _gather_report_snapshot(
                 conn, sid, campaign_id, date_preset, time_range, variant, None
             )
-        except Exception:
+        except BaseException:
+            # BaseException (not Exception): the caller wraps this in
+            # asyncio.wait_for, whose timeout CANCELS us mid-gather —
+            # CancelledError must also clean up the shell row, or an
+            # empty ghost entry shows up in 生成紀錄.
             await conn.execute("DELETE FROM report_snapshots WHERE id = $1::uuid", sid)
             raise
         payload["meta"].update(
@@ -8530,8 +8664,15 @@ def _entity_status_chip(entity: dict) -> "tuple[str, str]":
     return status_label, status_color
 
 
-async def _build_flex_for_config(cfg: dict) -> dict:
+async def _build_flex_for_config(cfg: dict, snapshot_timeout: float = 60.0) -> dict:
     """Produce the LINE Flex Message for one push config row.
+
+    ``snapshot_timeout``: sub-budget (seconds) for the frozen-snapshot
+    generation behind the report button. On timeout the button falls
+    back to the live share link instead of failing the whole push. The
+    測試 endpoint passes a tight budget so its 25s gateway window has
+    room for the flex build + LINE push; the scheduler keeps the
+    generous default (no gateway cap there).
 
     Hits FB's per-campaign Graph endpoint directly (`GET /{campaign_id}`)
     instead of `_fetch_campaigns_for_account` which would page through
@@ -8669,23 +8810,43 @@ async def _build_flex_for_config(cfg: dict) -> dict:
     # Report button now links to a FROZEN snapshot (/r/s/:id) generated
     # once at push time — recipients read a zero-FB copy instead of every
     # tap re-hitting Facebook (which piled toward the code-17 rate limit).
-    # If snapshot generation fails (FB error mid-gather), fall back to the
-    # live /r/:campaignId link so the button still works.
+    # If snapshot generation fails OR exceeds its sub-budget (FB throttle
+    # can hang the gather; without a cap it ate the 測試 endpoint's whole
+    # 25s window → 504 with NO push at all), fall back to the live
+    # /r/:campaignId link so the button still works.
     report_variant = str(cfg.get("report_variant") or "standard")
     report_url: Optional[str] = None
     if cfg.get("include_report_button"):
         share_label = concrete_range or _date_range_label(date_range, date_from, date_to)
+        # Concretize the reporting window to ISO from/to for the FROZEN
+        # copy: a snapshot stored with a rolling preset (last_30d) would
+        # have its displayed 資料區間 re-computed at every view (drifting
+        # to e.g. 6/15-7/14 while the frozen data covers 6/14-7/13). The
+        # explicit time_range is the same FB window, but the share page
+        # then renders the fixed dates the data actually covers.
+        snap_time_range = time_range
+        if snap_time_range is None:
+            bounds = _date_range_iso_bounds(date_range, date_from, date_to)
+            if bounds is not None:
+                s, u = bounds
+                snap_time_range = _json.dumps(
+                    {"since": s.isoformat(), "until": u.isoformat()},
+                    separators=(",", ":"),
+                )
         try:
-            report_url = await _snapshot_url_for_push(
-                campaign_id,
-                account_id,
-                date_preset,
-                time_range,
-                report_variant,
-                share_label,
-                use_spend_plus,
-                markup_pct,
-                share_fields,
+            report_url = await asyncio.wait_for(
+                _snapshot_url_for_push(
+                    campaign_id,
+                    account_id,
+                    date_preset,
+                    snap_time_range,
+                    report_variant,
+                    share_label,
+                    use_spend_plus,
+                    markup_pct,
+                    share_fields,
+                ),
+                timeout=snapshot_timeout,
             )
         except Exception as exc:
             print(
@@ -10419,7 +10580,9 @@ async def test_push_config(config_id: str, fb_user_id: Optional[str] = None):
         # freezes a full snapshot (whole tree + thumbnails), so 25s gives
         # that some headroom while staying under the 30s gateway cap.
         try:
-            flex = await asyncio.wait_for(_build_flex_for_config(cfg), timeout=25.0)
+            flex = await asyncio.wait_for(
+                _build_flex_for_config(cfg, snapshot_timeout=12.0), timeout=25.0
+            )
         except asyncio.TimeoutError:
             raise HTTPException(
                 status_code=504,
