@@ -1631,6 +1631,26 @@ export const api = {
       }),
   },
 
+  admin: {
+    /** Any logged-in user: am I an admin? Drives the 管理員 nav group. */
+    whoami: () =>
+      request<{ is_admin: boolean; fb_user_id: string }>("GET", "/api/admin/whoami", {
+        source: "admin",
+      }),
+    /** List every user who has logged in (admin only). */
+    listUsers: () =>
+      request<{ data: AdminUser[]; default_admin_ids: string[] }>("GET", "/api/admin/users", {
+        source: "admin",
+      }),
+    /** Grant / revoke admin for another user (admin only). */
+    setUserRole: (fbUserId: string, role: "admin" | "user") =>
+      request<{ ok: boolean; role: string }>(
+        "POST",
+        `/api/admin/users/${encodeURIComponent(fbUserId)}/role`,
+        { body: { role }, source: "admin" },
+      ),
+  },
+
   billing: {
     /** Get the calling user's subscription state + tier limits. */
     me: (fbUserId: string) =>
@@ -1656,6 +1676,18 @@ export const api = {
       }),
   },
 };
+
+/** One row in the 管理員 → 用戶列表. */
+export interface AdminUser {
+  fb_user_id: string;
+  name: string | null;
+  picture_url: string | null;
+  tier: TierId;
+  status: string;
+  first_login_at: string | null;
+  last_login_at: string | null;
+  role: "admin" | "user";
+}
 
 export type LimitResource =
   | "ad_accounts"
