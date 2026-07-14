@@ -1087,6 +1087,11 @@ async def lifespan(app: FastAPI):
                 await conn.execute(
                     "ALTER TABLE fb_user_profiles ADD COLUMN IF NOT EXISTS nickname TEXT"
                 )
+                # page_perms: JSON array of allowed sidebar route keys, or
+                # NULL = all pages allowed (default). Admins bypass it.
+                await conn.execute(
+                    "ALTER TABLE fb_user_profiles ADD COLUMN IF NOT EXISTS page_perms JSONB"
+                )
                 # ── Billing / Subscription (Polar.sh) ─────────────
                 # `subscriptions`: one row per fb_user_id. Tracks Polar
                 # state + denormalized quota limits so per-request
@@ -3882,11 +3887,36 @@ async def get_me():
 # users) with their tier + role, and lets admins grant/revoke admin.
 
 
+async def _get_page_perms(uid: str) -> Optional[list]:
+    """The user's allowed sidebar route keys, or None = all allowed."""
+    if not uid or _db_pool is None:
+        return None
+    try:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT page_perms FROM fb_user_profiles WHERE fb_user_id = $1", uid
+            )
+        if row and row["page_perms"] is not None:
+            v = row["page_perms"]
+            if isinstance(v, str):
+                v = _json.loads(v)
+            if isinstance(v, list):
+                return [str(x) for x in v]
+    except Exception:
+        pass
+    return None
+
+
 @app.get("/api/admin/whoami")
 async def admin_whoami():
-    """Any logged-in user: am I an admin? Drives the 管理員 nav group."""
+    """Any logged-in user: am I an admin + which pages can I see? Drives
+    the 管理員 nav group AND per-user page gating in the sidebar."""
     uid = (_current_fb_user_id.get() or "").strip()
-    return {"is_admin": _is_admin(uid), "fb_user_id": uid}
+    return {
+        "is_admin": _is_admin(uid),
+        "fb_user_id": uid,
+        "page_perms": await _get_page_perms(uid),
+    }
 
 
 @app.get("/api/admin/users")
@@ -3899,7 +3929,7 @@ async def admin_list_users():
         return {"data": []}
     async with _db_pool.acquire() as conn:
         profiles = await conn.fetch(
-            "SELECT fb_user_id, name, picture_url, nickname, first_login_at, last_login_at FROM fb_user_profiles"
+            "SELECT fb_user_id, name, picture_url, nickname, page_perms, first_login_at, last_login_at FROM fb_user_profiles"
         )
         subs = await conn.fetch("SELECT fb_user_id, tier, status FROM subscriptions")
         # Latest verified /me per uid — backfills name/avatar for users
@@ -3917,10 +3947,17 @@ async def admin_list_users():
     by_id: dict = {}
     for r in profiles:
         uid = str(r["fb_user_id"])
+        pp = r["page_perms"]
+        if isinstance(pp, str):
+            try:
+                pp = _json.loads(pp)
+            except Exception:
+                pp = None
         by_id[uid] = {
             "name": r["name"],
             "picture_url": r["picture_url"],
             "nickname": r["nickname"],
+            "page_perms": pp if isinstance(pp, list) else None,
             "first_login_at": r["first_login_at"].isoformat() if r["first_login_at"] else None,
             "last_login_at": r["last_login_at"].isoformat() if r["last_login_at"] else None,
         }
@@ -3944,6 +3981,7 @@ async def admin_list_users():
                 "name": base.get("name") or vn,
                 "picture_url": base.get("picture_url") or vp,
                 "nickname": base.get("nickname"),
+                "page_perms": base.get("page_perms"),
                 "tier": tier or "free",
                 "status": status or "free",
                 "first_login_at": base.get("first_login_at"),
@@ -3987,6 +4025,34 @@ async def admin_set_user_nickname(target_fb_user_id: str, payload: AdminNickname
             nn,
         )
     return {"ok": True, "nickname": nn}
+
+
+class AdminPagesPayload(BaseModel):
+    # None = all pages allowed (clears the restriction).
+    pages: Optional[List[str]] = None
+
+
+@app.post("/api/admin/users/{target_fb_user_id}/pages")
+async def admin_set_user_pages(target_fb_user_id: str, payload: AdminPagesPayload):
+    """Set which sidebar pages a user can see (None = all). Admin only."""
+    _require_admin()
+    uid = str(target_fb_user_id).strip()
+    if not uid:
+        raise HTTPException(status_code=400, detail="缺少使用者 id")
+    if _db_pool is None:
+        raise HTTPException(status_code=503, detail="資料庫尚未連線")
+    val = None if payload.pages is None else [str(p) for p in payload.pages]
+    async with _db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO fb_user_profiles (fb_user_id, page_perms)
+            VALUES ($1, $2::jsonb)
+            ON CONFLICT (fb_user_id) DO UPDATE SET page_perms = EXCLUDED.page_perms
+            """,
+            uid,
+            _json.dumps(val) if val is not None else None,
+        )
+    return {"ok": True, "pages": val}
 
 
 class AdminRolePayload(BaseModel):

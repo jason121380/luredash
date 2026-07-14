@@ -1632,11 +1632,14 @@ export const api = {
   },
 
   admin: {
-    /** Any logged-in user: am I an admin? Drives the 管理員 nav group. */
+    /** Any logged-in user: am I an admin + which pages can I see?
+     *  `page_perms` null = all pages allowed. */
     whoami: () =>
-      request<{ is_admin: boolean; fb_user_id: string }>("GET", "/api/admin/whoami", {
-        source: "admin",
-      }),
+      request<{ is_admin: boolean; fb_user_id: string; page_perms: string[] | null }>(
+        "GET",
+        "/api/admin/whoami",
+        { source: "admin" },
+      ),
     /** List every user who has logged in (admin only). */
     listUsers: () =>
       request<{ data: AdminUser[]; default_admin_ids: string[] }>("GET", "/api/admin/users", {
@@ -1655,6 +1658,13 @@ export const api = {
         "POST",
         `/api/admin/users/${encodeURIComponent(fbUserId)}/nickname`,
         { body: { nickname }, source: "admin" },
+      ),
+    /** Set which pages a user can see (null = all). Admin only. */
+    setUserPages: (fbUserId: string, pages: string[] | null) =>
+      request<{ ok: boolean; pages: string[] | null }>(
+        "POST",
+        `/api/admin/users/${encodeURIComponent(fbUserId)}/pages`,
+        { body: { pages }, source: "admin" },
       ),
   },
 
@@ -1691,6 +1701,8 @@ export interface AdminUser {
   picture_url: string | null;
   /** Admin-editable label. */
   nickname: string | null;
+  /** Allowed sidebar route keys, or null = all pages. */
+  page_perms: string[] | null;
   tier: TierId;
   status: string;
   first_login_at: string | null;
