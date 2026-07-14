@@ -1,10 +1,11 @@
 import { useSubscription } from "@/api/hooks/useSubscription";
+import metadashLogoUrl from "@/assets/metadash-logo.svg";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { BucuHeaderChip } from "@/components/BucuHeaderChip";
+import { IdentityModal } from "@/components/IdentityModal";
 import { TierBadge } from "@/components/TierBadge";
-import metadashLogoUrl from "@/assets/metadash-logo.svg";
-import { cn } from "@/lib/cn";
 import { withReloadOnChunkError } from "@/lib/chunkReload";
+import { cn } from "@/lib/cn";
 import { prefetchView } from "@/router";
 import { Suspense, lazy, useState } from "react";
 import { NavLink } from "react-router-dom";
@@ -37,7 +38,17 @@ interface NavItem {
 
 // ── Icons(reused across groups so we don't duplicate SVG markup) ──
 const ICON_DASHBOARD = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <rect x="3" y="3" width="7" height="7" />
     <rect x="14" y="3" width="7" height="7" />
     <rect x="3" y="14" width="7" height="7" />
@@ -45,73 +56,193 @@ const ICON_DASHBOARD = (
   </svg>
 );
 const ICON_CHART = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
   </svg>
 );
 const ICON_SHIELD = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z" />
     <polyline points="9 12 11 14 15 10" />
   </svg>
 );
 const ICON_ALERT = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
     <line x1="12" y1="9" x2="12" y2="13" />
     <line x1="12" y1="17" x2="12.01" y2="17" />
   </svg>
 );
 const ICON_TARGET = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <circle cx="12" cy="12" r="9" />
     <circle cx="12" cy="12" r="5" />
     <circle cx="12" cy="12" r="1.5" />
   </svg>
 );
 const ICON_DOLLAR = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <line x1="12" y1="1" x2="12" y2="23" />
     <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
   </svg>
 );
 const ICON_STORE = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
     <polyline points="9 22 9 12 15 12 15 22" />
   </svg>
 );
 const ICON_HISTORY = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <path d="M3 3v18h18" />
     <path d="M7 14l4-4 4 4 5-6" />
   </svg>
 );
 const ICON_SETTINGS = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <circle cx="12" cy="12" r="3" />
     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
   </svg>
 );
 const ICON_LINE = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
   </svg>
 );
 const ICON_CARD = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <rect x="2" y="5" width="20" height="14" rx="2" />
     <line x1="2" y1="10" x2="22" y2="10" />
   </svg>
 );
 const ICON_TERMINAL = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <polyline points="4 17 10 11 4 5" />
     <line x1="12" y1="19" x2="20" y2="19" />
   </svg>
 );
 const ICON_LOGOUT = (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
     <polyline points="16 17 21 12 16 7" />
     <line x1="21" y1="12" x2="9" y2="12" />
@@ -170,6 +301,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
   const subQuery = useSubscription();
   const sub = subQuery.data;
   const [engineeringOpen, setEngineeringOpen] = useState(false);
+  const [identityOpen, setIdentityOpen] = useState(false);
 
   return (
     <aside
@@ -253,7 +385,13 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
               "bg-transparent",
             )}
           >
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-orange-bg text-[12px] font-bold text-orange">
+            <button
+              type="button"
+              onClick={() => setIdentityOpen(true)}
+              aria-label="登入身分"
+              title="登入身分"
+              className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-orange-bg text-[12px] font-bold text-orange transition hover:ring-2 hover:ring-orange/40 active:scale-95"
+            >
               {user?.pictureUrl ? (
                 <img
                   src={user.pictureUrl}
@@ -265,7 +403,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
               ) : (
                 (user?.name?.[0] ?? "?").toUpperCase()
               )}
-            </div>
+            </button>
             <div className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left">
               <span className="w-full truncate text-[13px] font-semibold text-ink">
                 {user?.name ?? ""}
@@ -301,6 +439,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
           <EngineeringModal open={engineeringOpen} onOpenChange={setEngineeringOpen} />
         </Suspense>
       )}
+      <IdentityModal open={identityOpen} onOpenChange={setIdentityOpen} />
     </aside>
   );
 }
@@ -328,9 +467,7 @@ function SidebarLink({ item }: { item: NavItem }) {
         )
       }
     >
-      <span className="flex w-[18px] shrink-0 items-center justify-center">
-        {item.icon}
-      </span>
+      <span className="flex w-[18px] shrink-0 items-center justify-center">{item.icon}</span>
       <span className="min-w-0 flex-1 truncate">{item.label}</span>
       {item.beta && <BetaTag />}
     </NavLink>
@@ -370,9 +507,7 @@ function SidebarActionButton({
         "hover:bg-orange-bg hover:text-orange active:scale-[0.98]",
       )}
     >
-      <span className="flex w-[18px] shrink-0 items-center justify-center">
-        {icon}
-      </span>
+      <span className="flex w-[18px] shrink-0 items-center justify-center">{icon}</span>
       {label}
     </button>
   );

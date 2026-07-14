@@ -1,6 +1,5 @@
 import { api, apiAuthHeaders, friendlyApiError } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
-import { useFbAuth } from "@/auth/FbAuthProvider";
 import { useShowBucuInHeader } from "@/components/BucuHeaderChip";
 import { Button } from "@/components/Button";
 import { Modal } from "@/components/Modal";
@@ -189,12 +188,9 @@ function RuntimeDiagnosticsPanel() {
     <section>
       <header className="mb-3">
         <h2 className="text-[15px] font-bold text-ink">其他</h2>
-        <p className="mt-0.5 text-xs text-gray-400">
-          其他診斷:身分、記憶體、前端快取與本機環境。
-        </p>
+        <p className="mt-0.5 text-xs text-gray-400">其他診斷:身分、記憶體、前端快取與本機環境。</p>
       </header>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <IdentityPanel />
         <MemoryPanel />
       </div>
       <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -261,8 +257,8 @@ function ActionTypeProbePanel() {
     <div className="rounded-xl border border-border bg-white p-3.5">
       <div className="text-[13px] font-bold text-ink">action_type 探針(IG 追蹤診斷)</div>
       <p className="mt-0.5 text-[11px] text-gray-400">
-        選廣告帳號 + 行銷活動,列出 FB 對該活動歸因的所有 action_type(近 90 天),確認 IG 追蹤等指標是否在
-        API 內。
+        選廣告帳號 + 行銷活動,列出 FB 對該活動歸因的所有 action_type(近 90 天),確認 IG
+        追蹤等指標是否在 API 內。
       </p>
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
         <select
@@ -291,11 +287,7 @@ function ActionTypeProbePanel() {
           className="h-[30px] min-w-[200px] flex-1 rounded-md border border-border bg-white px-2 text-[12px] disabled:opacity-50"
         >
           <option value="">
-            {!accountId
-              ? "先選帳號"
-              : campaignsQuery.isLoading
-                ? "載入活動中…"
-                : "選擇行銷活動…"}
+            {!accountId ? "先選帳號" : campaignsQuery.isLoading ? "載入活動中…" : "選擇行銷活動…"}
           </option>
           {campaigns.map((c) => (
             <option key={c.id} value={c.id}>
@@ -490,7 +482,11 @@ function HistoryWarmPanel() {
       subtitle="把所有帳號每個過往月份的資料先抓進資料庫,讓 費用中心 / 店家花費 / 歷史花費 第一次打開就秒出。可重抓覆蓋。每月 3 號後系統會自動重熱上個月一次。"
       frameless
       action={
-        <Button size="sm" onClick={() => void onBulk()} disabled={bulkRunning || monthsQuery.isLoading}>
+        <Button
+          size="sm"
+          onClick={() => void onBulk()}
+          disabled={bulkRunning || monthsQuery.isLoading}
+        >
           {bulkRunning ? "全部預熱中…" : "全部預熱(舊→新)"}
         </Button>
       }
@@ -545,7 +541,9 @@ function HistoryWarmPanel() {
                             <span
                               className={cn(
                                 "shrink-0 text-[11px]",
-                                rs.status === "done" ? "font-semibold text-emerald-600" : "text-gray-500",
+                                rs.status === "done"
+                                  ? "font-semibold text-emerald-600"
+                                  : "text-gray-500",
                               )}
                             >
                               {running ? "預熱中…" : rs.message}
@@ -697,7 +695,11 @@ function CostCenterBackfillPanel() {
       subtitle={`把 lurefin 匯出的帳號(${accounts.join("、") || "…"})逐月存進 DB,lurefin 拉過往月份就秒回。當月即時、不存。可重抓覆蓋。每月 3 號後系統會自動重熱上個月一次。`}
       frameless
       action={
-        <Button size="sm" onClick={() => void onBulk()} disabled={bulkRunning || monthsQuery.isLoading}>
+        <Button
+          size="sm"
+          onClick={() => void onBulk()}
+          disabled={bulkRunning || monthsQuery.isLoading}
+        >
           {bulkRunning ? "全部更新中…" : "全部更新(舊→新)"}
         </Button>
       }
@@ -747,7 +749,9 @@ function CostCenterBackfillPanel() {
                           <span
                             className={cn(
                               "shrink-0 text-[11px]",
-                              rs.status === "done" ? "font-semibold text-emerald-600" : "text-gray-500",
+                              rs.status === "done"
+                                ? "font-semibold text-emerald-600"
+                                : "text-gray-500",
                             )}
                           >
                             {running ? "撈取中…" : rs.message}
@@ -793,42 +797,6 @@ function CostCenterBackfillPanel() {
           </table>
         </div>
       )}
-    </Card>
-  );
-}
-
-// ── Identity (fb_user_id copy) ───────────────────────────────
-//
-// Surfaces the logged-in user's fb_user_id with a 1-tap copy
-// button. Used to hand admins the id they need for support
-// tickets and DB lookups — saves digging through DevTools /
-// network tabs to extract it from /api/auth/me responses.
-
-function IdentityPanel() {
-  const { user } = useFbAuth();
-  const id = user?.id ?? "";
-
-  const onCopy = async () => {
-    if (!id) return;
-    try {
-      await navigator.clipboard.writeText(id);
-      toast("已複製 fb_user_id");
-    } catch {
-      toast("複製失敗,請手動選取", "error");
-    }
-  };
-
-  return (
-    <Card title="登入身分" subtitle="目前登入的 Facebook 使用者 id">
-      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12px]">
-        <Row label="名稱" value={user?.name ?? "(未登入)"} />
-        <Row label="fb_user_id" value={id || "(未登入)"} mono />
-      </dl>
-      <div className="mt-3 flex gap-2">
-        <Button size="sm" onClick={onCopy} disabled={!id}>
-          複製 fb_user_id
-        </Button>
-      </div>
     </Card>
   );
 }
@@ -950,8 +918,7 @@ function MemoryPanel() {
   const pct = data?.percent ?? null;
   const source = data?.source ?? "unavailable";
 
-  const fmt = (v: number | null): string =>
-    v === null ? "—" : `${v.toLocaleString("zh-TW")} MB`;
+  const fmt = (v: number | null): string => (v === null ? "—" : `${v.toLocaleString("zh-TW")} MB`);
   const fmtPct = (v: number | null): string => (v === null ? "—" : `${v.toFixed(1)}%`);
   // Cap visual bar at 100% even if the backend somehow reports > 100.
   const barValue = pct === null ? 0 : Math.min(100, Math.max(0, pct));
@@ -1049,10 +1016,7 @@ function FbUsagePanel() {
     }
     const unmatched = bucIds.filter((id) => !knownIds.has(id));
     if (unmatched.length > 0) {
-      console.log(
-        "[fb-usage] BUC ids without matching account/BM:",
-        unmatched,
-      );
+      console.log("[fb-usage] BUC ids without matching account/BM:", unmatched);
     }
   }, [usageQuery.data, accountsQuery.data]);
 
@@ -1074,7 +1038,8 @@ function FbUsagePanel() {
     >
       {peak > 0 && (
         <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-700">
-          ⚠ 部分業務已達節流閾值,Facebook 預估約 <b>{peak}</b> 分鐘後可恢復呼叫(此為 FB 的估算值,非精確倒數)
+          ⚠ 部分業務已達節流閾值,Facebook 預估約 <b>{peak}</b> 分鐘後可恢復呼叫(此為 FB
+          的估算值,非精確倒數)
         </div>
       )}
       <label className="mb-3 flex cursor-pointer items-start gap-2 rounded-md border border-border bg-bg/40 p-2.5 text-[12px]">
@@ -1108,27 +1073,27 @@ function FbUsagePanel() {
           </div>
           {/* Desktop: full comparison table */}
           <div className="hidden overflow-x-auto rounded-lg border border-border md:block">
-          <table className="w-full text-[12px]">
-            <thead className="bg-bg text-left text-gray-500">
-              <tr>
-                <th className="px-3 py-2 font-semibold">帳戶</th>
-                <th className="px-3 py-2 font-semibold">呼叫次數</th>
-                <th className="px-3 py-2 font-semibold">CPU 用量</th>
-                <th className="px-3 py-2 font-semibold">處理時間</th>
-                <th className="px-3 py-2 font-semibold whitespace-nowrap">更新</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map(([bareId, u]) => (
-                <UsageRow
-                  key={bareId}
-                  bareId={bareId}
-                  name={nameByBareId.get(bareId) ?? ""}
-                  usage={u}
-                />
-              ))}
-            </tbody>
-          </table>
+            <table className="w-full text-[12px]">
+              <thead className="bg-bg text-left text-gray-500">
+                <tr>
+                  <th className="px-3 py-2 font-semibold">帳戶</th>
+                  <th className="px-3 py-2 font-semibold">呼叫次數</th>
+                  <th className="px-3 py-2 font-semibold">CPU 用量</th>
+                  <th className="px-3 py-2 font-semibold">處理時間</th>
+                  <th className="px-3 py-2 font-semibold whitespace-nowrap">更新</th>
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map(([bareId, u]) => (
+                  <UsageRow
+                    key={bareId}
+                    bareId={bareId}
+                    name={nameByBareId.get(bareId) ?? ""}
+                    usage={u}
+                  />
+                ))}
+              </tbody>
+            </table>
           </div>
         </>
       )}
@@ -1161,9 +1126,7 @@ function UsageMobileCard({
         ) : (
           <span className="font-mono text-[12px] text-ink">{bareId}</span>
         )}
-        {name ? (
-          <span className="font-mono text-[10px] text-gray-400">{bareId}</span>
-        ) : null}
+        {name ? <span className="font-mono text-[10px] text-gray-400">{bareId}</span> : null}
         {usage.type ? (
           <span className="rounded-full bg-orange-bg px-1.5 py-0.5 text-[10px] font-semibold text-orange">
             {usage.type}
@@ -1635,8 +1598,12 @@ function FbCallsPanel() {
                         <td className="px-2 py-1">{formatSourceBadge(s.source)}</td>
                         <td className="px-2 py-1 text-gray-600">{sourceReason(s.source)}</td>
                         <td className="px-2 py-1 text-right font-mono text-ink">{s.live}</td>
-                        <td className="px-2 py-1 text-right font-mono text-emerald-700">{s.cache_hits}</td>
-                        <td className="px-2 py-1 text-right font-mono text-amber-700">{s.blocked}</td>
+                        <td className="px-2 py-1 text-right font-mono text-emerald-700">
+                          {s.cache_hits}
+                        </td>
+                        <td className="px-2 py-1 text-right font-mono text-amber-700">
+                          {s.blocked}
+                        </td>
                         <td
                           className={cn(
                             "px-2 py-1 text-right font-mono",
@@ -1645,9 +1612,16 @@ function FbCallsPanel() {
                         >
                           {s.errors}
                         </td>
-                        <td className="px-2 py-1 text-right font-mono text-gray-500">{s.retried}</td>
-                        <td className="px-2 py-1 font-mono text-gray-600">{s.last_status || "—"}</td>
-                        <td className="max-w-[320px] truncate px-2 py-1 font-mono text-gray-500" title={s.last_path}>
+                        <td className="px-2 py-1 text-right font-mono text-gray-500">
+                          {s.retried}
+                        </td>
+                        <td className="px-2 py-1 font-mono text-gray-600">
+                          {s.last_status || "—"}
+                        </td>
+                        <td
+                          className="max-w-[320px] truncate px-2 py-1 font-mono text-gray-500"
+                          title={s.last_path}
+                        >
                           {s.last_path || "—"}
                         </td>
                       </tr>
@@ -1737,9 +1711,7 @@ function FbCallsPanel() {
                               {e.method}
                             </span>
                           )}
-                          {nm ? (
-                            <span className="text-ink">{nm}</span>
-                          ) : null}
+                          {nm ? <span className="text-ink">{nm}</span> : null}
                           <span
                             className={cn(
                               "font-mono break-all",
@@ -1768,88 +1740,85 @@ function FbCallsPanel() {
                 </div>
                 {/* Desktop (≥md): 寬表格 */}
                 <div className="hidden overflow-x-auto rounded-lg border border-border md:block">
-                <table className="w-full text-[11px]">
-                  <thead className="bg-bg text-left text-gray-500">
-                    <tr>
-                      <th
-                        className="px-2 py-1 font-semibold"
-                        title="FB 呼叫發生的本機時間"
-                      >
-                        時間
-                      </th>
-                      <th
-                        className="px-2 py-1 font-semibold"
-                        title="cache = 走快取沒打 FB · 200 = 成功 · 4xx/5xx = 出錯"
-                      >
-                        狀態
-                      </th>
-                      <th
-                        className="px-2 py-1 font-semibold"
-                        title="哪個程式碼路徑觸發了這次呼叫(背景任務 / user 動作 / 自動 cache 預熱 etc)"
-                      >
-                        來源
-                      </th>
-                      <th
-                        className="px-2 py-1 font-semibold"
-                        title="本次呼叫耗時(毫秒)。cache hit 為 0"
-                      >
-                        ms
-                      </th>
-                      <th
-                        className="px-2 py-1 font-semibold"
-                        title="打完當下,FB header 回報的所有業務 BUCU 最高值"
-                      >
-                        BUCU%
-                      </th>
-                      <th
-                        className="px-2 py-1 font-semibold"
-                        title="FB Graph API 端點。act_xxx 後面是廣告帳戶 ID"
-                      >
-                        路徑
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="font-mono">
-                    {recent.map((e, idx) => {
-                      const nm = nameFor(e.account_id);
-                      return (
-                        <tr key={`${e.ts}-${idx}`} className="border-t border-border">
-                          <td className="px-2 py-1 text-gray-500">{formatTs(e.ts)}</td>
-                          <td className="px-2 py-1">{formatStatusBadge(e)}</td>
-                          <td className="px-2 py-1">{formatSourceBadge(e.source)}</td>
-                          <td className="px-2 py-1 text-right text-gray-600">{e.ms}</td>
-                          <td className="px-2 py-1 text-right text-gray-600">{e.bucu_peak_pct}</td>
-                          <td className="truncate px-2 py-1 text-ink" title={e.path}>
-                            {e.method !== "GET" && (
-                              <span className="mr-1 rounded bg-orange-bg px-1 text-[9px] text-orange">
-                                {e.method}
+                  <table className="w-full text-[11px]">
+                    <thead className="bg-bg text-left text-gray-500">
+                      <tr>
+                        <th className="px-2 py-1 font-semibold" title="FB 呼叫發生的本機時間">
+                          時間
+                        </th>
+                        <th
+                          className="px-2 py-1 font-semibold"
+                          title="cache = 走快取沒打 FB · 200 = 成功 · 4xx/5xx = 出錯"
+                        >
+                          狀態
+                        </th>
+                        <th
+                          className="px-2 py-1 font-semibold"
+                          title="哪個程式碼路徑觸發了這次呼叫(背景任務 / user 動作 / 自動 cache 預熱 etc)"
+                        >
+                          來源
+                        </th>
+                        <th
+                          className="px-2 py-1 font-semibold"
+                          title="本次呼叫耗時(毫秒)。cache hit 為 0"
+                        >
+                          ms
+                        </th>
+                        <th
+                          className="px-2 py-1 font-semibold"
+                          title="打完當下,FB header 回報的所有業務 BUCU 最高值"
+                        >
+                          BUCU%
+                        </th>
+                        <th
+                          className="px-2 py-1 font-semibold"
+                          title="FB Graph API 端點。act_xxx 後面是廣告帳戶 ID"
+                        >
+                          路徑
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="font-mono">
+                      {recent.map((e, idx) => {
+                        const nm = nameFor(e.account_id);
+                        return (
+                          <tr key={`${e.ts}-${idx}`} className="border-t border-border">
+                            <td className="px-2 py-1 text-gray-500">{formatTs(e.ts)}</td>
+                            <td className="px-2 py-1">{formatStatusBadge(e)}</td>
+                            <td className="px-2 py-1">{formatSourceBadge(e.source)}</td>
+                            <td className="px-2 py-1 text-right text-gray-600">{e.ms}</td>
+                            <td className="px-2 py-1 text-right text-gray-600">
+                              {e.bucu_peak_pct}
+                            </td>
+                            <td className="truncate px-2 py-1 text-ink" title={e.path}>
+                              {e.method !== "GET" && (
+                                <span className="mr-1 rounded bg-orange-bg px-1 text-[9px] text-orange">
+                                  {e.method}
+                                </span>
+                              )}
+                              {nm ? <span className="mr-1 font-sans text-ink">{nm}</span> : null}
+                              <span className={nm ? "text-[10px] text-gray-400" : ""}>
+                                {e.path}
                               </span>
-                            )}
-                            {nm ? (
-                              <span className="mr-1 font-sans text-ink">{nm}</span>
-                            ) : null}
-                            <span className={nm ? "text-[10px] text-gray-400" : ""}>
-                              {e.path}
-                            </span>
-                            {e.error_code !== null && !e.cache_hit && (
-                              <span
-                                className="ml-1 rounded bg-amber-100 px-1 font-mono text-[9px] text-amber-700"
-                                title={`FB error code ${e.error_code}`}
-                              >
-                                fb={e.error_code}
-                              </span>
-                            )}
-                            {e.retried && (
-                              <span className="ml-1 rounded bg-amber-100 px-1 text-[9px] text-amber-700">
-                                retry
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                              {e.error_code !== null && !e.cache_hit && (
+                                <span
+                                  className="ml-1 rounded bg-amber-100 px-1 font-mono text-[9px] text-amber-700"
+                                  title={`FB error code ${e.error_code}`}
+                                >
+                                  fb={e.error_code}
+                                </span>
+                              )}
+                              {e.retried && (
+                                <span className="ml-1 rounded bg-amber-100 px-1 text-[9px] text-amber-700">
+                                  retry
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               </>
             )}
@@ -2019,7 +1988,9 @@ function Stat({
       <div className="whitespace-nowrap text-[10px] font-semibold leading-tight text-gray-400 md:uppercase md:tracking-[0.6px]">
         {label}
       </div>
-      <div className={cn("mt-1 font-mono text-[17px] font-bold leading-none md:text-lg", toneClass)}>
+      <div
+        className={cn("mt-1 font-mono text-[17px] font-bold leading-none md:text-lg", toneClass)}
+      >
         {value}
       </div>
     </div>
