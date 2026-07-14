@@ -332,7 +332,7 @@ function VersionChooser({
       <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
         <ChooserCard
           title="以廣告組合報告"
-          desc="完整 KPI 總覽 + 廣告組合 / 受眾洞察 / 素材表現 + 優化建議。"
+          desc="完整 KPI 總覽 + 廣告組合 / 受眾洞察 / 素材表現。"
           onClick={() => onPick("standard")}
         />
         <ChooserCard

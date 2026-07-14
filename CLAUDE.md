@@ -26,7 +26,7 @@ Connects to Facebook Marketing API v21.0 to manage 80+ ad accounts across multip
     - `shared_settings` (key, value JSONB) — team-wide: `finance_row_markups`, `finance_pinned_ids`, `finance_default_markup`, `finance_show_nicknames`, **`security_safe_campaigns`** (array of campaign ids the team has reviewed and marked safe — drives the 待查看 / 已標記安全 tabs in 安全監控). **Underscore-prefixed keys (`_fb_runtime_token`, `_history_warm_auto_state`, `_cost_center_warm_auto_state`) are server-internal** and are filtered out by `GET /api/settings/shared` — never expose to the frontend. `_history_warm_auto_state` tracks the monthly auto re-warm of last month's `account_month_snapshots`; `_cost_center_warm_auto_state` does the same for the lurefin export snapshot (`cost_center_snapshots`, those three accounts). Both run in `_scheduler_loop` on/after day `_SNAPSHOT_SETTLE_DAY` (3) of each month; before that day the previous month is in a settle window — `_overview_snapshot_month` / `/api/cost-center` refuse to lazy-fill it and both 工程模式 manual warms are blocked — because FB insights keep back-filling attribution for 1-2 days after month end. The gate is `_latest_snapshotable_month()`: last month only becomes snapshotable once today ≥ day 3 of this month; every snapshot write path (overview lazy-fill, cost-center read lazy-fill, `/api/cost-center/backfill`, both 工程模式 capture endpoints) checks it, and after settle the two auto ticks force-overwrite once so any dirty snapshot frozen before the fix (or before settle) is corrected — the read paths never re-fetch a month that already has a snapshot.
     - `line_groups` (group_id PK, **group_name** (real LINE display name from /v2/bot/group/{id}/summary), label (user nickname), joined_at, left_at, **channel_id**, **folder_id**) — auto-upserted by the `/api/line/webhook` route on LINE `join`/`leave` events. Lifespan startup also runs a one-shot backfill for legacy rows whose `group_name` is empty. `folder_id` (nullable = 未分類) points at `line_group_folders`.
     - `line_group_folders` (id PK, channel_id → line_channels ON DELETE CASCADE, name, sort_order) — user-defined folders for categorising groups **within one OA (channel)**. A group belongs to at most one folder; deleting a folder un-categorises its groups (`line_groups.folder_id` ON DELETE SET NULL, never deletes groups). CRUD via `/api/line-group-folders` (GET list w/ group_count, POST create, PATCH rename/reorder, DELETE) + `POST /api/line-groups/{id}/folder` to move a group (validates the target folder is on the group's own channel). Owner/admin-grant can manage; viewers read-only. Drives the LINE 群組管理 UI's OA tabs + left folder list.
-    - `campaign_line_push_configs` (campaign ↔ group pairings: frequency, weekdays/month_day, hour/minute, date_range, enabled, next_run_at, fail_count, **report_fields TEXT[]**, **include_report_button BOOLEAN DEFAULT FALSE**, **include_recommendations BOOLEAN DEFAULT FALSE**) — partial index on `(next_run_at) WHERE enabled` for the scheduler tick. The two `include_*` toggles default FALSE so existing rows opt-in rather than retroactively gaining a button / advice block.
+    - `campaign_line_push_configs` (campaign ↔ group pairings: frequency, weekdays/month_day, hour/minute, date_range, enabled, next_run_at, fail_count, **report_fields TEXT[]**, **include_report_button BOOLEAN DEFAULT FALSE**, **include_recommendations BOOLEAN DEFAULT FALSE** (dead as of 2026-07-14 — 優化建議 removed; column kept for row compatibility, never honoured)) — partial index on `(next_run_at) WHERE enabled` for the scheduler tick.
     - `line_push_logs` (per-push audit rows, success/error/preview)
     - `security_push_configs` (event-driven LINE alert subscriptions for 安全監控: name, owner_fb_user_id, channel_id, group_ids[], account_ids[], anomaly_filters[] (deep_night/weekend/high_budget/burst), poll_interval_minutes, enabled, last_run_at, next_run_at, fail_count) — partial index on `(next_run_at) WHERE enabled`. The scheduler tick (`_security_push_tick`) piggybacks on `_scheduler_loop`; on each tick it fetches campaigns created since `last_run_at`, evaluates anomalies, and pushes a plain-text message via `line_client.line_push` to every group in `group_ids`. 5 consecutive failures auto-flip `enabled=false`.
   - **Browser localStorage** — ephemeral UI state only:
@@ -161,7 +161,7 @@ Renames (2026-05-26):
 Sidebar 工具區拆成兩個入口（2026-04-26 後）:
 - **廣告帳號設定** `/settings` — BM panel + 帳戶啟用 / 多選 / 拖曳排序。Topbar 右上有 **廣告金額預設%** input(2026-07-09 從費用中心工具列搬來):寫 `finance_default_markup` shared setting,是費用中心「沒有 per-row override 的活動」的 fallback markup(讀寫同一個 `useFinanceStore`,`SettingsProvider` 登入時 hydrate,任何頁面都可用)。
 - **LINE 推播設定** `/line-push` — `LineGroupsContent` **用 OA(channel)分頁**呈現(2026-07-07 改版:一個 tab 一個官方帳號,無「全部」總覽,預設第一個 OA);每個分頁內**左側是該 OA 的資料夾清單**(全部 / 未分類 / 使用者自訂資料夾 + 新增/改名/刪除,owner/admin 才可管理),右側表格列出該分類的群組(只顯示 `left_at IS NULL`)+ 每列一個「資料夾」下拉可搬移群組 + 該群組綁定的所有 push configs(一個 group 多 campaign)。**搜尋框 scope 在當下 OA 分頁**(選了資料夾則再收窄)。`channel_id` 為 NULL 的舊群組歸在「未指定官方帳號」分頁(無資料夾)。Topbar 右上有 **重新整理** icon:點擊後 `POST /api/line-groups/refresh-all` 批次拉每個 group 的 LINE display name、若 LINE 回 404(bot 已被踢出 / token 失效)就把 row 標記 `left_at = NOW()` 從 UI 中移除,接著 `refetchQueries(['lineGroups', 'lineGroupConfigs'])` 並 toast「已更新 N 個群組名稱、移除 M 個已退出群組」。每筆 config 有編輯/刪除按鈕,新增推播時用可搜尋的 `GroupPushConfigModal` 選帳戶 / 行銷活動(combobox 顯示活動狀態 badge)。
-- 推播設定 modal 預設值:每週五 09:00 / 本月1日-昨日 / 花費+%/私訊數/私訊成本 / `include_report_button=false` / `include_recommendations=false`(兩者都是 opt-in)。
+- 推播設定 modal 預設值:每週五 09:00 / 本月1日-昨日 / 花費+%/私訊數/私訊成本 / `include_report_button=false`(opt-in)。(「是否啟用優化建議」checkbox 已於 2026-07-14 移除。)
 
 ## Account Selection Logic
 
@@ -241,7 +241,6 @@ Do NOT use `accent-color` inline style — always use the `custom-cb` class.
 - Chip is a vertical box with `cornerRadius:md`, `backgroundColor:#FFFFFF`, small symmetric padding, `gravity:top`. **Do not** add `height` or `justifyContent` — some property combos cause LINE to 400 the entire message ("messages[0] is invalid"). Intrinsic text height + padding + gravity is sufficient.
 - Body section is opt-in:
   - `include_report_button=true` → footer button linking to a **frozen snapshot** (`/r/s/:id`) generated once at push time by `_snapshot_url_for_push` (server-side `_gather_report_snapshot` with `provided=None`, tagged `created_by='line-push'`), so recipients read a zero-FB copy instead of every tap re-hitting Facebook (which piled toward code-17 rate limits). Falls back to the live `/r/:campaignId` link (`_share_url_for_config`) if generation errors.
-  - `include_recommendations=true` → 優化建議 bullet list under the KPI grid (uses `_evaluate_alert_recommendations`)
 
 ## Alert Thresholds
 
@@ -259,24 +258,7 @@ Do NOT use `accent-color` inline style — always use the `custom-cb` class.
 
 ## Insight Report (LINE flex push + share page `/r/:id`)
 
-The same recommendation logic runs in two places — keep them in sync:
-- Backend `_evaluate_alert_recommendations` in `main.py` → embedded in the LINE flex push body.
-- Frontend `lib/recommendations.ts` `buildCampaignRecommendations` → bullet list above the share-page report.
-
-**Rule order** (priority from top):
-
-| 條件 | 結果 |
-|------|------|
-| msgs > 0 且 msgCost < $100 | 「非常好,持續以私訊轉換為主軸」(忽略 CPC) |
-| msgs > 0 且 100 ≤ msgCost ≤ 200 | 「平均值,維持現狀即可」 |
-| msgs > 0 且 200 < msgCost ≤ 300 | 「偏高,待觀察」 |
-| msgs > 0 且 msgCost > 300 + CPC ≤ 4 | 「太高、但 CPC 表現不錯,檢視私訊回覆流程」 (此情境下 **略過頻次警示**) |
-| msgs > 0 且 msgCost > 300 + CPC > 4 | 「太高、CPC 也偏高,整體優化」 (此情境下 **略過頻次警示**) |
-| msgs == 0 且 CPC > 6 | 「太高,需要調整」 |
-| msgs == 0 且 5 < CPC ≤ 6 | 「可以優化」 |
-| msgs == 0 且 4 < CPC ≤ 5 | 「偏高,待觀察」 |
-| frequency > 5 + spend > $1,000 | 「過高,擴大受眾」 |
-| frequency > 4 + spend > $500 | 「偏高,留意素材疲勞」 |
+**優化建議 removed everywhere (2026-07-14)**: the rule engine (backend `_evaluate_alert_recommendations`, frontend `buildCampaignRecommendations`) and its rendering (LINE flex bullet list, report 優化建議 block, 推播設定 modal「是否啟用優化建議」checkbox, `?advice=` share param) were all deleted. Reports and pushes carry raw numbers only. `lib/recommendations.ts` still exists but only exports `isTrafficObjective`. The `include_recommendations` DB column / API field remains for row compatibility but is never honoured (UI always saves false).
 
 ### Report versions (dashboard 報告 icon)
 
@@ -301,7 +283,6 @@ Both versions share the 花費/花費+% toggle and the 複製分享連結 button
 `ReportContent` (shared by `<ReportModal/>` and `<ShareReportPage/>`) is **insight-oriented**, fully auto-expanded:
 1. Header (status / objective / date label)
 2. 12-cell KPI grid — 花費 / 私訊數 / 私訊成本 cards have an orange highlight border so the operator's eye lands on outcomes first.
-3. **優化建議** narrative bullet list (from `buildCampaignRecommendations`).
 4. Per-adset card (`AdsetCard`):
    - Mini KPI row
    - `<BreakdownInsightStrip/>` — 4 cards (版位 / 性別 / 年齡 / 地區), each fires its own React Query in parallel and shows the **winner** for that dim. Winner picked by: msgCost (lowest, if any bucket has messages) → CTR (highest, requires impressions ≥100) → impressions (fallback).

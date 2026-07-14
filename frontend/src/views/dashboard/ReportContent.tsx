@@ -18,7 +18,7 @@ import {
 } from "@/lib/insights";
 import { translateObjective } from "@/lib/objective";
 import { proxyImage } from "@/lib/proxyImage";
-import { buildCampaignRecommendations, isTrafficObjective } from "@/lib/recommendations";
+import { isTrafficObjective } from "@/lib/recommendations";
 import type { FbAdset, FbBaseEntity, FbCampaign, FbCreativeEntity } from "@/types/fb";
 import { formatNickname } from "@/views/finance/financeData";
 import { useQuery } from "@tanstack/react-query";
@@ -52,7 +52,6 @@ const PreviewMediaOnlyContext = createContext(false);
  *   [Header]            big concrete date range + status + objective
  *   [KPI grid]          12 KPIs (msg cells suppressed for traffic
  *                       objectives — they're noise there)
- *   [Recommendations]   bullet narrative (mirrors the LINE flex push)
  *   [Adset section ×N]  auto-expanded
  *     - mini KPI row
  *     - 4-card audience insight strip (best per dim)
@@ -204,13 +203,6 @@ export interface ReportContentProps {
    *  finance_row_markups[campaignId] or finance_default_markup at the
    *  time the modal/share-link was created. */
   markupPercent?: number;
-  /** When false the「優化建議」block is hidden. Mirrors the LINE
-   *  push config's `include_recommendations` so a share link sent
-   *  from a config that opted out doesn't surface advice the
-   *  operator deliberately suppressed. Default true preserves the
-   *  legacy share-page behaviour for links generated outside the
-   *  push flow (dashboard report modal). */
-  showRecommendations?: boolean;
   /** KPI codes (e.g. ["spend", "msgs", "msg_cost"]) the LINE push
    *  config picked. When provided the campaign / adset / ad KPI
    *  layouts only render those cells, in the supplied order, so the
@@ -238,7 +230,6 @@ export function ReportContent({
   date,
   useSpendPlus = false,
   markupPercent = 0,
-  showRecommendations = true,
   selectedFields = null,
   disablePreview = false,
   previewMediaOnly = false,
@@ -247,8 +238,6 @@ export function ReportContent({
   const ins = getIns(campaign);
   const msgs = getMsgCount(campaign);
   const spend = num(ins.spend);
-  const cpc = num(ins.cpc);
-  const frequency = num(ins.frequency);
   const msgCost = msgs > 0 ? spend / msgs : 0;
   const trafficMode = isTrafficObjective(campaign.objective);
   // Prefer the 店家 · 設計師 nickname: campaign.nickname (share page,
@@ -256,15 +245,6 @@ export function ReportContent({
   const nicknames = useNicknames();
   const displayName =
     campaign.nickname?.trim() || formatNickname(nicknames.data?.[campaign.id]) || campaign.name;
-
-  const recommendations = buildCampaignRecommendations({
-    spend,
-    msgs,
-    msgCost,
-    cpc,
-    frequency,
-    objective: campaign.objective,
-  });
 
   const money = (v: number | string | null | undefined): string =>
     hideMoney ? "—" : v !== null && v !== undefined && v !== "" ? `$${fM(v)}` : "—";
@@ -342,25 +322,6 @@ export function ReportContent({
                     ]
               }
             />
-
-            {/* Recommendations narrative */}
-            {showRecommendations && recommendations.length > 0 && (
-              <div className="rounded-xl border border-orange/30 bg-orange-bg/40 px-4 py-3.5">
-                <div className="mb-2 text-[13px] font-bold text-orange">優化建議</div>
-                <ul className="flex flex-col gap-1.5">
-                  {recommendations.map((r, i) => (
-                    <li
-                      // biome-ignore lint/suspicious/noArrayIndexKey: stable bullet list
-                      key={i}
-                      className="flex items-start gap-2 text-[14px] text-ink"
-                    >
-                      <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-orange" />
-                      <span>{r}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
 
             {/* Adsets — top 3 by spend auto-expand to keep the first paint
           insight-rich; the rest collapse to a header-only row that
