@@ -2,12 +2,13 @@ import { type AdminUser, api, friendlyApiError } from "@/api/client";
 import { Modal } from "@/components/Modal";
 import { toast } from "@/components/Toast";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 
 const TIER_LABEL: Record<string, string> = {
-  free: "免費",
-  basic: "基本",
-  plus: "進階",
-  max: "旗艦",
+  free: "Free",
+  basic: "Basic",
+  plus: "Plus",
+  max: "Max",
 };
 
 /**
@@ -39,6 +40,15 @@ export function UserListModal({
     },
     onError: (e) => toast(`更新失敗:${friendlyApiError(e)}`, "error", 4000),
   });
+  const setNickname = useMutation({
+    mutationFn: ({ id, nickname }: { id: string; nickname: string }) =>
+      api.admin.setUserNickname(id, nickname),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin", "users"] });
+      toast("已更新暱稱", "success", 2000);
+    },
+    onError: (e) => toast(`更新失敗:${friendlyApiError(e)}`, "error", 4000),
+  });
 
   const rows = q.data?.data ?? [];
   const defaults = new Set(q.data?.default_admin_ids ?? []);
@@ -66,6 +76,7 @@ export function UserListModal({
             <thead>
               <tr className="border-border border-b bg-bg text-left text-[11px] font-semibold uppercase tracking-[0.5px] text-gray-400">
                 <th className="px-3 py-2">用戶</th>
+                <th className="px-3 py-2">暱稱</th>
                 <th className="px-3 py-2">fb_user_id</th>
                 <th className="px-3 py-2">方案</th>
                 <th className="px-3 py-2">權限</th>
@@ -79,6 +90,7 @@ export function UserListModal({
                   isDefaultAdmin={defaults.has(u.fb_user_id)}
                   busy={setRole.isPending}
                   onRole={(role) => setRole.mutate({ id: u.fb_user_id, role })}
+                  onNickname={(nickname) => setNickname.mutate({ id: u.fb_user_id, nickname })}
                 />
               ))}
             </tbody>
@@ -94,11 +106,13 @@ function UserRow({
   isDefaultAdmin,
   busy,
   onRole,
+  onNickname,
 }: {
   user: AdminUser;
   isDefaultAdmin: boolean;
   busy: boolean;
   onRole: (role: "admin" | "user") => void;
+  onNickname: (nickname: string) => void;
 }) {
   return (
     <tr className="border-border border-b last:border-0">
@@ -120,6 +134,9 @@ function UserRow({
           <span className="truncate font-semibold text-ink">{user.name || "(未知)"}</span>
         </div>
       </td>
+      <td className="px-3 py-2">
+        <NicknameCell value={user.nickname ?? ""} onSave={onNickname} />
+      </td>
       <td className="px-3 py-2 font-mono text-[11px] text-gray-500">{user.fb_user_id}</td>
       <td className="px-3 py-2 text-gray-500">{TIER_LABEL[user.tier] ?? user.tier}</td>
       <td className="px-3 py-2">
@@ -140,5 +157,30 @@ function UserRow({
         )}
       </td>
     </tr>
+  );
+}
+
+/** Inline editable nickname — saves on blur or Enter (only when changed). */
+function NicknameCell({ value, onSave }: { value: string; onSave: (v: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  // Keep in sync when the server value changes (e.g. after a refetch).
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+  const commit = () => {
+    if (draft.trim() !== value.trim()) onSave(draft.trim());
+  };
+  return (
+    <input
+      type="text"
+      value={draft}
+      onChange={(e) => setDraft(e.currentTarget.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+      }}
+      placeholder="—"
+      className="h-[28px] w-[120px] rounded-md border border-border bg-white px-2 text-[12px] outline-none focus:border-orange"
+    />
   );
 }

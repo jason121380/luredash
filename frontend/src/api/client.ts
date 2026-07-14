@@ -1649,6 +1649,13 @@ export const api = {
         `/api/admin/users/${encodeURIComponent(fbUserId)}/role`,
         { body: { role }, source: "admin" },
       ),
+    /** Set / clear an admin-editable nickname for a user (admin only). */
+    setUserNickname: (fbUserId: string, nickname: string) =>
+      request<{ ok: boolean; nickname: string | null }>(
+        "POST",
+        `/api/admin/users/${encodeURIComponent(fbUserId)}/nickname`,
+        { body: { nickname }, source: "admin" },
+      ),
   },
 
   billing: {
@@ -1682,6 +1689,8 @@ export interface AdminUser {
   fb_user_id: string;
   name: string | null;
   picture_url: string | null;
+  /** Admin-editable label. */
+  nickname: string | null;
   tier: TierId;
   status: string;
   first_login_at: string | null;
