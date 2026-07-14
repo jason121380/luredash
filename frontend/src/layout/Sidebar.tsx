@@ -1,3 +1,4 @@
+import { useIsAdmin } from "@/api/hooks/useAdmin";
 import { useSubscription } from "@/api/hooks/useSubscription";
 import metadashLogoUrl from "@/assets/metadash-logo.svg";
 import { useFbAuth } from "@/auth/FbAuthProvider";
@@ -7,6 +8,7 @@ import { TierBadge } from "@/components/TierBadge";
 import { withReloadOnChunkError } from "@/lib/chunkReload";
 import { cn } from "@/lib/cn";
 import { prefetchView } from "@/router";
+import { UserListModal } from "@/views/admin/UserListModal";
 import { Suspense, lazy, useState } from "react";
 import { NavLink } from "react-router-dom";
 
@@ -231,6 +233,24 @@ const ICON_TERMINAL = (
     <line x1="12" y1="19" x2="20" y2="19" />
   </svg>
 );
+const ICON_USERS = (
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+    <circle cx="9" cy="7" r="4" />
+    <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+  </svg>
+);
 const ICON_LOGOUT = (
   <svg
     width="16"
@@ -302,6 +322,8 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
   const sub = subQuery.data;
   const [engineeringOpen, setEngineeringOpen] = useState(false);
   const [identityOpen, setIdentityOpen] = useState(false);
+  const [userListOpen, setUserListOpen] = useState(false);
+  const isAdmin = useIsAdmin();
 
   return (
     <aside
@@ -348,23 +370,38 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
             {group.items.map((item) => (
               <SidebarLink key={item.to} item={item} />
             ))}
-            {group.label === "設定" && (
-              <SidebarActionButton
-                icon={ICON_TERMINAL}
-                label="工程模式"
-                onMouseEnter={() => {
-                  void importEngineeringModal();
-                }}
-                onFocus={() => {
-                  void importEngineeringModal();
-                }}
-                onClick={() => {
-                  setEngineeringOpen(true);
-                }}
-              />
-            )}
           </div>
         ))}
+
+        {/* 管理員 — only visible to admins (server-authoritative). Holds
+            工程模式 + 用戶列表. */}
+        {isAdmin && (
+          <div>
+            <div className="mt-1 px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-[0.8px] text-gray-300">
+              管理員
+            </div>
+            <SidebarActionButton
+              icon={ICON_TERMINAL}
+              label="工程模式"
+              onMouseEnter={() => {
+                void importEngineeringModal();
+              }}
+              onFocus={() => {
+                void importEngineeringModal();
+              }}
+              onClick={() => {
+                setEngineeringOpen(true);
+              }}
+            />
+            <SidebarActionButton
+              icon={ICON_USERS}
+              label="用戶列表"
+              onClick={() => {
+                setUserListOpen(true);
+              }}
+            />
+          </div>
+        )}
       </nav>
 
       {/* User footer */}
@@ -440,6 +477,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
         </Suspense>
       )}
       <IdentityModal open={identityOpen} onOpenChange={setIdentityOpen} />
+      {userListOpen && <UserListModal open={userListOpen} onOpenChange={setUserListOpen} />}
     </aside>
   );
 }

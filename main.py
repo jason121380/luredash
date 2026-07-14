@@ -1068,6 +1068,21 @@ async def lifespan(app: FastAPI):
                     )
                     """
                 )
+                # `fb_user_profiles`: a directory of everyone who has ever
+                # logged in (name + avatar captured at login). Persists
+                # across logout (unlike user_fb_tokens, which is deleted),
+                # so the 管理員 → 用戶列表 can list all users.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS fb_user_profiles (
+                        fb_user_id TEXT PRIMARY KEY,
+                        name TEXT,
+                        picture_url TEXT,
+                        first_login_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        last_login_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
                 # ── Billing / Subscription (Polar.sh) ─────────────
                 # `subscriptions`: one row per fb_user_id. Tracks Polar
                 # state + denormalized quota limits so per-request
@@ -1312,6 +1327,8 @@ async def lifespan(app: FastAPI):
         # works immediately on first request post-restart instead of
         # falling through to the legacy _runtime_token global.
         await _load_user_tokens_cache()
+        # Load the extra-admin allowlist (for the 管理員 nav group).
+        await _load_admin_users()
 
     # Multi-user (2026-04-30): no auto-seeded default channel.
     # Each user adds their own LINE Official Accounts via the UI;
@@ -3261,6 +3278,34 @@ async def _persist_user_token(uid: str, token: Optional[str]) -> None:
         print(f"[user-token] persist failed for {uid[-4:]}: {exc}", flush=True)
 
 
+async def _persist_user_profile(
+    uid: str, name: Optional[str], picture: Optional[str]
+) -> None:
+    """Upsert the user's display name / avatar into `fb_user_profiles`.
+    Unlike `user_fb_tokens` (deleted on logout), this directory persists
+    so the 管理員 → 用戶列表 can list everyone who has ever logged in.
+    Best-effort — COALESCE keeps prior values when a field is None."""
+    if not uid or _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO fb_user_profiles (fb_user_id, name, picture_url, first_login_at, last_login_at)
+                VALUES ($1, $2, $3, NOW(), NOW())
+                ON CONFLICT (fb_user_id) DO UPDATE
+                SET name = COALESCE(EXCLUDED.name, fb_user_profiles.name),
+                    picture_url = COALESCE(EXCLUDED.picture_url, fb_user_profiles.picture_url),
+                    last_login_at = NOW()
+                """,
+                uid,
+                name,
+                picture,
+            )
+    except Exception as exc:
+        print(f"[user-profile] persist failed for {uid[-4:]}: {exc}", flush=True)
+
+
 async def _load_user_tokens_cache() -> None:
     """Populate `_user_token_cache` from `user_fb_tokens` on lifespan
     startup. Called after `_db_pool` is created so post-redeploy reads
@@ -3352,6 +3397,69 @@ async def _persist_known_user(uid: str) -> None:
             )
     except Exception as exc:
         print(f"[auth] persist known user failed: {exc}", flush=True)
+
+
+# ── Admin allowlist ──────────────────────────────────────────────
+# The 管理員 nav group + user-list endpoints are gated on this set. The
+# two seed ids are ALWAYS admin (protected from lockout); extra admins
+# granted via 用戶列表 are stored in shared_settings._admin_fb_users
+# (underscore-prefixed → filtered out of GET /api/settings/shared).
+_DEFAULT_ADMIN_FB_IDS = {"122153891258988817", "10243465392077273"}
+_ADMIN_FB_USERS: "set[str]" = set()
+
+
+async def _load_admin_users() -> None:
+    """Load the extra-admin set from shared_settings on startup."""
+    global _ADMIN_FB_USERS
+    if _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value FROM shared_settings WHERE key = $1", "_admin_fb_users"
+            )
+        loaded: "set[str]" = set()
+        if row:
+            v = row["value"]
+            if isinstance(v, str):
+                v = _json.loads(v)
+            if isinstance(v, list):
+                loaded = {str(x) for x in v if x}
+        _ADMIN_FB_USERS = loaded
+        print(f"[startup] admin users: {len(_ADMIN_FB_USERS)} extra", flush=True)
+    except Exception as exc:
+        print(f"[admin] load admin users failed: {exc}", flush=True)
+
+
+async def _persist_admin_users() -> None:
+    if _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO shared_settings (key, value, updated_at)
+                VALUES ($1, $2::jsonb, NOW())
+                ON CONFLICT (key) DO UPDATE
+                SET value = EXCLUDED.value, updated_at = NOW()
+                """,
+                "_admin_fb_users",
+                _json.dumps(sorted(_ADMIN_FB_USERS)),
+            )
+    except Exception as exc:
+        print(f"[admin] persist admin users failed: {exc}", flush=True)
+
+
+def _is_admin(uid: Optional[str]) -> bool:
+    return bool(uid) and (uid in _DEFAULT_ADMIN_FB_IDS or uid in _ADMIN_FB_USERS)
+
+
+def _require_admin() -> str:
+    """Raise 403 unless the current session belongs to an admin."""
+    uid = (_current_fb_user_id.get() or "").strip()
+    if not _is_admin(uid):
+        raise HTTPException(status_code=403, detail="需要管理員權限")
+    return uid
 
 
 def _assert_known_user(uid: str) -> None:
@@ -3696,6 +3804,7 @@ async def _verify_token_with_fb(token: str, cache_key: str) -> dict:
         if uid:
             _user_token_cache[uid] = token
             await _persist_user_token(uid, token)
+            await _persist_user_profile(uid, me.get("name"), pic)
             _KNOWN_FB_USERS.add(uid)
             await _persist_known_user(uid)
         # Cache the verified /me response in both layers so subsequent
@@ -3760,6 +3869,105 @@ async def get_me():
             return {"logged_in": True, "id": uid, "name": "User"}
         return {"logged_in": False}
     return {"logged_in": True, **me}
+
+
+# ── 管理員 / 用戶列表 ─────────────────────────────────────────────────
+#
+# The 管理員 nav group is shown only to admins (see _is_admin). It exposes
+# a list of everyone who has ever logged in (fb_user_profiles + known
+# users) with their tier + role, and lets admins grant/revoke admin.
+
+
+@app.get("/api/admin/whoami")
+async def admin_whoami():
+    """Any logged-in user: am I an admin? Drives the 管理員 nav group."""
+    uid = (_current_fb_user_id.get() or "").strip()
+    return {"is_admin": _is_admin(uid), "fb_user_id": uid}
+
+
+@app.get("/api/admin/users")
+async def admin_list_users():
+    """List every user who has logged in, with tier + role. Admin only."""
+    _require_admin()
+    if _db_pool is None:
+        return {"data": []}
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT p.fb_user_id, p.name, p.picture_url, p.first_login_at, p.last_login_at,
+                   s.tier, s.status
+            FROM fb_user_profiles p
+            LEFT JOIN subscriptions s ON s.fb_user_id = p.fb_user_id
+            """
+        )
+        known_row = await conn.fetchrow(
+            "SELECT value FROM shared_settings WHERE key = $1", "_fb_known_users"
+        )
+    by_id: dict = {}
+    for r in rows:
+        uid = str(r["fb_user_id"])
+        by_id[uid] = {
+            "fb_user_id": uid,
+            "name": r["name"],
+            "picture_url": r["picture_url"],
+            "tier": r["tier"] or "free",
+            "status": r["status"] or "free",
+            "first_login_at": r["first_login_at"].isoformat() if r["first_login_at"] else None,
+            "last_login_at": r["last_login_at"].isoformat() if r["last_login_at"] else None,
+            "role": "admin" if _is_admin(uid) else "user",
+        }
+    # Include ids known but without a profile row (legacy logins), plus
+    # every admin id, so the list is complete.
+    extra_ids: "set[str]" = set(_DEFAULT_ADMIN_FB_IDS) | set(_ADMIN_FB_USERS)
+    if known_row:
+        v = known_row["value"]
+        if isinstance(v, str):
+            v = _json.loads(v)
+        if isinstance(v, list):
+            extra_ids |= {str(x) for x in v if x}
+    for uid in extra_ids:
+        if uid not in by_id:
+            by_id[uid] = {
+                "fb_user_id": uid,
+                "name": None,
+                "picture_url": None,
+                "tier": "free",
+                "status": "free",
+                "first_login_at": None,
+                "last_login_at": None,
+                "role": "admin" if _is_admin(uid) else "user",
+            }
+    data = sorted(
+        by_id.values(),
+        # admins first, then by name, then id
+        key=lambda u: (u["role"] != "admin", (u["name"] or "￿").lower(), u["fb_user_id"]),
+    )
+    return {"data": data, "default_admin_ids": sorted(_DEFAULT_ADMIN_FB_IDS)}
+
+
+class AdminRolePayload(BaseModel):
+    role: str
+
+
+@app.post("/api/admin/users/{target_fb_user_id}/role")
+async def admin_set_user_role(target_fb_user_id: str, payload: AdminRolePayload):
+    """Grant / revoke admin for another user. Admin only; the two seed
+    admins are protected from change to avoid lockout."""
+    _require_admin()
+    role = payload.role
+    if role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="role 必須是 admin 或 user")
+    uid = str(target_fb_user_id).strip()
+    if not uid:
+        raise HTTPException(status_code=400, detail="缺少使用者 id")
+    if uid in _DEFAULT_ADMIN_FB_IDS:
+        raise HTTPException(status_code=400, detail="預設管理員無法變更權限")
+    if role == "admin":
+        _ADMIN_FB_USERS.add(uid)
+    else:
+        _ADMIN_FB_USERS.discard(uid)
+    await _persist_admin_users()
+    return {"ok": True, "role": role}
 
 
 # ── Campaign Nicknames (PostgreSQL-backed) ────────────────────────────
