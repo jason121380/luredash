@@ -8200,80 +8200,9 @@ def _share_url_for_config(
     return f"{PUBLIC_SITE_URL}/r/{quote(campaign_id, safe='')}?{qs}"
 
 
-async def _snapshot_url_for_push(
-    campaign_id: str,
-    account_id: Optional[str],
-    date_preset: str,
-    time_range: Optional[str],
-    variant: str,
-    date_label: str,
-    use_spend_plus: bool,
-    markup_pct: float,
-    selected_fields: Optional[List[str]],
-) -> Optional[str]:
-    """Freeze the whole report ONCE (server-side) and return its public
-    `/r/s/<id>` snapshot URL for the LINE「查看完整報告」button.
-
-    This replaces the old live `/r/:campaignId` link: instead of every
-    recipient's tap re-fetching from Facebook (which accumulates toward
-    the ad-account rate limit — code 17), the push generates a single
-    frozen snapshot at send time and everyone reads that immutable copy
-    with ZERO Facebook calls. Each push is its own snapshot row, so the
-    numbers can never shift under recipients' eyes after delivery.
-
-    Returns None when `PUBLIC_SITE_URL` is unset or the DB is unavailable
-    (caller omits the button, same as `_share_url_for_config`). Raises on
-    a generation error so the caller can fall back to the live link."""
-    if not PUBLIC_SITE_URL or _db_pool is None:
-        return None
-    from urllib.parse import quote
-
-    async with _db_pool.acquire() as conn:
-        # Shell row first so the assets FK is satisfiable while thumbnails
-        # stream in, then UPDATE the payload once gathering finishes —
-        # mirrors create_report_snapshot. `created_by` is tagged so
-        # push-generated snapshots are distinguishable from manual ones.
-        row = await conn.fetchrow(
-            """
-            INSERT INTO report_snapshots (campaign_id, account_id, variant, created_by, date_label)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id
-            """,
-            campaign_id, account_id, variant, "line-push", date_label,
-        )
-        sid = str(row["id"])
-        try:
-            # No browser payload here (the scheduler has no client cache),
-            # so _gather_report_snapshot re-fetches the full tree from FB
-            # ONCE. That single generation is the whole point — it buys
-            # every subsequent view a zero-FB frozen copy.
-            payload = await _gather_report_snapshot(
-                conn, sid, campaign_id, date_preset, time_range, variant, None
-            )
-        except BaseException:
-            # BaseException (not Exception): the caller wraps this in
-            # asyncio.wait_for, whose timeout CANCELS us mid-gather —
-            # CancelledError must also clean up the shell row, or an
-            # empty ghost entry shows up in 生成紀錄.
-            await conn.execute("DELETE FROM report_snapshots WHERE id = $1::uuid", sid)
-            raise
-        payload["meta"].update(
-            {
-                "hide_money": False,
-                "use_spend_plus": use_spend_plus,
-                "markup_percent": markup_pct,
-                "selected_fields": selected_fields,
-                "creative_fields": None,
-                "date_label": date_label,
-            }
-        )
-        camp = payload.get("campaign") or {}
-        label = (camp.get("nickname") or camp.get("name")) if isinstance(camp, dict) else None
-        await conn.execute(
-            "UPDATE report_snapshots SET payload = $2::jsonb, label = $3 WHERE id = $1::uuid",
-            sid, json.dumps(payload), label,
-        )
-    return f"{PUBLIC_SITE_URL}/r/s/{quote(sid, safe='')}"
+# (_snapshot_url_for_push removed 2026-07-14 — the LINE push report button
+# links to the LIVE share page; frozen snapshots are generated only by the
+# dashboard's manual 生成報告 flow via POST /api/report-snapshots.)
 
 
 async def _campaign_nickname_display(campaign_id: str) -> str:
@@ -8491,15 +8420,8 @@ def _entity_status_chip(entity: dict) -> "tuple[str, str]":
     return status_label, status_color
 
 
-async def _build_flex_for_config(cfg: dict, snapshot_timeout: float = 60.0) -> dict:
+async def _build_flex_for_config(cfg: dict) -> dict:
     """Produce the LINE Flex Message for one push config row.
-
-    ``snapshot_timeout``: sub-budget (seconds) for the frozen-snapshot
-    generation behind the report button. On timeout the button falls
-    back to the live share link instead of failing the whole push. The
-    測試 endpoint passes a tight budget so its 25s gateway window has
-    room for the flex build + LINE push; the scheduler keeps the
-    generous default (no gateway cap there).
 
     Hits FB's per-campaign Graph endpoint directly (`GET /{campaign_id}`)
     instead of `_fetch_campaigns_for_account` which would page through
@@ -8602,64 +8524,30 @@ async def _build_flex_for_config(cfg: dict, snapshot_timeout: float = 60.0) -> d
         share_fields = ["spend", "impressions", "clicks", "ctr", "cpc"]
         if not traffic_mode:
             share_fields += ["msgs", "msg_cost"]
-    # Report button now links to a FROZEN snapshot (/r/s/:id) generated
-    # once at push time — recipients read a zero-FB copy instead of every
-    # tap re-hitting Facebook (which piled toward the code-17 rate limit).
-    # If snapshot generation fails OR exceeds its sub-budget (FB throttle
-    # can hang the gather; without a cap it ate the 測試 endpoint's whole
-    # 25s window → 504 with NO push at all), fall back to the live
-    # /r/:campaignId link so the button still works.
+    # Report button links to the LIVE share page (/r/:campaignId, with
+    # the reporting window concretized to from/to inside
+    # _share_url_for_config). Pushes are inherently periodic — every
+    # send covers a fresh window and re-reads FB anyway — so the button
+    # simply opens the current numbers. Frozen snapshots (/r/s/:id) are
+    # reserved for the dashboard's manual 生成報告 flow (2026-07-14
+    # decision; the earlier push-time snapshot generation was removed —
+    # it made 測試 slow/504-prone and cluttered 生成紀錄).
     report_variant = str(cfg.get("report_variant") or "standard")
-    report_url: Optional[str] = None
-    if cfg.get("include_report_button"):
-        share_label = concrete_range or _date_range_label(date_range, date_from, date_to)
-        # Concretize the reporting window to ISO from/to for the FROZEN
-        # copy: a snapshot stored with a rolling preset (last_30d) would
-        # have its displayed 資料區間 re-computed at every view (drifting
-        # to e.g. 6/15-7/14 while the frozen data covers 6/14-7/13). The
-        # explicit time_range is the same FB window, but the share page
-        # then renders the fixed dates the data actually covers.
-        snap_time_range = time_range
-        if snap_time_range is None:
-            bounds = _date_range_iso_bounds(date_range, date_from, date_to)
-            if bounds is not None:
-                s, u = bounds
-                snap_time_range = _json.dumps(
-                    {"since": s.isoformat(), "until": u.isoformat()},
-                    separators=(",", ":"),
-                )
-        try:
-            report_url = await asyncio.wait_for(
-                _snapshot_url_for_push(
-                    campaign_id,
-                    account_id,
-                    date_preset,
-                    snap_time_range,
-                    report_variant,
-                    share_label,
-                    use_spend_plus,
-                    markup_pct,
-                    share_fields,
-                ),
-                timeout=snapshot_timeout,
-            )
-        except Exception as exc:
-            print(
-                f"[flex] snapshot generation failed for {campaign_id}, "
-                f"falling back to live link: {exc!r}",
-                flush=True,
-            )
-            report_url = _share_url_for_config(
-                account_id,
-                campaign_id,
-                date_range,
-                date_from,
-                date_to,
-                use_spend_plus=use_spend_plus,
-                markup_pct=markup_pct,
-                selected_fields=share_fields,
-                report_variant=report_variant,
-            )
+    report_url = (
+        _share_url_for_config(
+            account_id,
+            campaign_id,
+            date_range,
+            date_from,
+            date_to,
+            use_spend_plus=use_spend_plus,
+            markup_pct=markup_pct,
+            selected_fields=share_fields,
+            report_variant=report_variant,
+        )
+        if cfg.get("include_report_button")
+        else None
+    )
 
     # Member scoping: adset_ids (以廣告組合播報) or ad_ids (以廣告播報).
     # Mutually exclusive (enforced at save time); the FB request shape
@@ -10351,13 +10239,10 @@ async def test_push_config(config_id: str, fb_user_id: Optional[str] = None):
         # return a clear 504 instead of letting Zeabur's edge (~30s)
         # bounce the request as a generic "HTTP 502". FB throttle
         # recovery is the usual culprit — calls hang for 30+ s before
-        # FB itself errors. When the report button is on, the build also
-        # freezes a full snapshot (whole tree + thumbnails), so 25s gives
-        # that some headroom while staying under the 30s gateway cap.
+        # FB itself errors. 18s gives the flex build + LINE push +
+        # logging some headroom under the 30s gateway cap.
         try:
-            flex = await asyncio.wait_for(
-                _build_flex_for_config(cfg, snapshot_timeout=12.0), timeout=25.0
-            )
+            flex = await asyncio.wait_for(_build_flex_for_config(cfg), timeout=18.0)
         except asyncio.TimeoutError:
             raise HTTPException(
                 status_code=504,
