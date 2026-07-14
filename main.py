@@ -5946,6 +5946,53 @@ async def _fetch_campaign_insights_bulk(
     return out
 
 
+async def _fetch_single_campaign_insights(
+    campaign_id: str,
+    date_preset: str,
+    time_range: Optional[str],
+) -> dict:
+    """Fetch ONE campaign's aggregated insights via its `/insights` edge
+    (`GET /{campaign_id}/insights`) — the SAME canonical path the
+    dashboard uses (`act_xxx/insights?level=campaign`), just scoped to a
+    single campaign. Returns the insights row dict, or {} when the
+    campaign had no delivery in the window.
+
+    Why not field-expansion (`GET /{campaign_id}?fields=insights...`):
+    the LINE push used that, but field-expanded insights can come back
+    EMPTY for some campaigns (awareness objectives / certain delivery
+    structures) even when the campaign clearly spent — while the
+    dashboard's /insights edge returns the real numbers for the SAME
+    campaign + window. Reading the edge here keeps the push in lock-step
+    with the dashboard. Tiered fields mirror _fetch_campaign_insights_bulk
+    (progressively drop optional fields some accounts reject)."""
+    full_fields = (
+        "spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
+        "inline_link_clicks,cost_per_inline_link_click,"
+        "cost_per_action_type,purchase_roas,website_purchase_roas"
+    )
+    mid_fields = (
+        "spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,inline_link_clicks"
+    )
+    min_fields = "spend,impressions,clicks,ctr,cpc,cpm,actions"
+
+    params: dict = {}
+    if time_range:
+        params["time_range"] = time_range
+    else:
+        params["date_preset"] = date_preset
+
+    for fields in (full_fields, mid_fields, min_fields):
+        try:
+            resp = await fb_get(f"{campaign_id}/insights", {**params, "fields": fields})
+            data = resp.get("data") if isinstance(resp, dict) else None
+            return data[0] if isinstance(data, list) and data else {}
+        except HTTPException as e:
+            if _is_rate_limit_exception(e):
+                raise
+            continue
+    return {}
+
+
 async def _fetch_campaigns_for_account(
     account_id: str,
     date_preset: str,
@@ -8515,15 +8562,25 @@ async def _build_flex_for_config(cfg: dict) -> dict:
         date_preset,
         time_range,
     )
-    fields = f"id,name,status,objective,daily_budget,lifetime_budget,updated_time,{ins_clause}"
+    # Campaign KPIs: fetch metadata + insights SEPARATELY. The numbers
+    # come from the campaign's `/insights` EDGE (the same canonical path
+    # the dashboard uses via act_xxx/insights?level=campaign) instead of
+    # field-expanding `insights` on the campaign node. Field-expansion
+    # can return an EMPTY insights row for some campaigns (awareness
+    # objectives / certain delivery structures) even when they clearly
+    # spent — the bug where a LINE card showed 花費 $0 while the
+    # dashboard showed real spend for the SAME campaign + window. The
+    # edge keeps the two surfaces in lock-step.
+    meta_fields = "id,name,status,objective,daily_budget,lifetime_budget,updated_time"
     try:
-        camp = await fb_get(campaign_id, {"fields": fields})
+        camp, ins = await asyncio.gather(
+            fb_get(campaign_id, {"fields": meta_fields}),
+            _fetch_single_campaign_insights(campaign_id, date_preset, time_range),
+        )
     except HTTPException:
-        # Fall back to the account-wide path if FB rejects the
-        # single-campaign request (e.g. campaign was archived in a
-        # way that needs the account-level filter to surface).
-        # LINE flex push only reads campaign-level fields (spend / msgs
-        # / CPC) — no adset nesting needed, so opt out to save BUCU.
+        # Metadata call failed — fall back to the account-wide path,
+        # which pulls metadata AND insights via the bulk /insights edge
+        # (so the numbers still match the dashboard).
         campaigns = await _fetch_campaigns_for_account(
             account_id, date_preset, time_range,
             include_archived=True, lite=False, include_adsets=False,
@@ -8531,9 +8588,8 @@ async def _build_flex_for_config(cfg: dict) -> dict:
         camp = next((c for c in campaigns if c.get("id") == campaign_id), None)
         if camp is None:
             raise RuntimeError(f"Campaign {campaign_id} not found under {account_id}")
-
-    ins_list = (camp.get("insights") or {}).get("data") or []
-    ins = ins_list[0] if ins_list else {}
+        ins_list = (camp.get("insights") or {}).get("data") or []
+        ins = ins_list[0] if ins_list else {}
 
     objective = camp.get("objective")
     traffic_mode = _is_traffic_objective(objective)
