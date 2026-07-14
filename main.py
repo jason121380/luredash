@@ -5946,25 +5946,27 @@ async def _fetch_campaign_insights_bulk(
     return out
 
 
-async def _fetch_single_campaign_insights(
-    campaign_id: str,
+async def _fetch_single_entity_insights(
+    entity_id: str,
     date_preset: str,
     time_range: Optional[str],
 ) -> dict:
-    """Fetch ONE campaign's aggregated insights via its `/insights` edge
-    (`GET /{campaign_id}/insights`) — the SAME canonical path the
-    dashboard uses (`act_xxx/insights?level=campaign`), just scoped to a
-    single campaign. Returns the insights row dict, or {} when the
-    campaign had no delivery in the window.
+    """Fetch ONE entity's aggregated insights via its `/insights` edge
+    (`GET /{entity_id}/insights`). Works at ANY level — campaign, adset,
+    or ad — because the `/insights` edge is level-agnostic (it aggregates
+    for whatever object the id points at). Returns the insights row dict,
+    or {} when the entity had no delivery in the window.
 
-    Why not field-expansion (`GET /{campaign_id}?fields=insights...`):
-    the LINE push used that, but field-expanded insights can come back
-    EMPTY for some campaigns (awareness objectives / certain delivery
-    structures) even when the campaign clearly spent — while the
-    dashboard's /insights edge returns the real numbers for the SAME
-    campaign + window. Reading the edge here keeps the push in lock-step
-    with the dashboard. Tiered fields mirror _fetch_campaign_insights_bulk
-    (progressively drop optional fields some accounts reject)."""
+    Why the edge and NOT field-expansion (`GET /{id}?fields=insights...`):
+    the LINE push used field-expansion, but expanded insights on an entity
+    NODE can come back EMPTY for some entities (awareness objectives /
+    certain delivery structures) even when they clearly spent — while the
+    /insights edge returns the real numbers for the SAME entity + window
+    (this is what the dashboard reads at campaign level via
+    `act_xxx/insights?level=campaign`). Reading the edge at every level
+    keeps the push in lock-step with the dashboard. Tiered fields mirror
+    _fetch_campaign_insights_bulk (drop optional fields some accounts
+    reject; e.g. an ad without frequency support falls to a leaner tier)."""
     full_fields = (
         "spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
         "inline_link_clicks,cost_per_inline_link_click,"
@@ -5983,7 +5985,7 @@ async def _fetch_single_campaign_insights(
 
     for fields in (full_fields, mid_fields, min_fields):
         try:
-            resp = await fb_get(f"{campaign_id}/insights", {**params, "fields": fields})
+            resp = await fb_get(f"{entity_id}/insights", {**params, "fields": fields})
             data = resp.get("data") if isinstance(resp, dict) else None
             return data[0] if isinstance(data, list) and data else {}
         except HTTPException as e:
@@ -8555,13 +8557,6 @@ async def _build_flex_for_config(cfg: dict) -> dict:
     date_to = cfg.get("date_to")
     date_preset, time_range = _date_range_to_preset(date_range, date_from, date_to)
 
-    ins_clause = _insights_clause(
-        "spend,impressions,clicks,ctr,cpc,cpm,frequency,reach,actions,"
-        "inline_link_clicks,cost_per_inline_link_click,"
-        "cost_per_action_type,purchase_roas,website_purchase_roas",
-        date_preset,
-        time_range,
-    )
     # Campaign KPIs: fetch metadata + insights SEPARATELY. The numbers
     # come from the campaign's `/insights` EDGE (the same canonical path
     # the dashboard uses via act_xxx/insights?level=campaign) instead of
@@ -8575,7 +8570,7 @@ async def _build_flex_for_config(cfg: dict) -> dict:
     try:
         camp, ins = await asyncio.gather(
             fb_get(campaign_id, {"fields": meta_fields}),
-            _fetch_single_campaign_insights(campaign_id, date_preset, time_range),
+            _fetch_single_entity_insights(campaign_id, date_preset, time_range),
         )
     except HTTPException:
         # Metadata call failed — fall back to the account-wide path,
@@ -8737,11 +8732,27 @@ async def _build_flex_for_config(cfg: dict) -> dict:
     # numbers are scoped, not pro-rated. Members are fetched in
     # parallel because FB rate-limits per-edge, not per-account.
     # `updated_time` feeds the per-member status chip's「M/D 已暫停」.
-    member_fields = f"id,name,status,updated_time,{ins_clause}"
-    member_tasks = [
-        fb_get(mid, {"fields": member_fields}) for mid in member_ids
-    ]
-    member_results = await asyncio.gather(*member_tasks, return_exceptions=True)
+    #
+    # Metadata + insights are fetched SEPARATELY, with the numbers coming
+    # from the member's `/insights` EDGE (same as the campaign-level path
+    # above) rather than field-expanding `insights` on the adset/ad node —
+    # node-level expansion has the same empty-row failure mode that showed
+    # 花費 $0 at campaign level. The edge is level-agnostic, so this keeps
+    # adset / ad pushes in lock-step with the dashboard too.
+    member_meta_fields = "id,name,status,updated_time"
+
+    async def _fetch_member(mid: str) -> dict:
+        meta, ins_row = await asyncio.gather(
+            fb_get(mid, {"fields": member_meta_fields}),
+            _fetch_single_entity_insights(mid, date_preset, time_range),
+        )
+        m = dict(meta) if isinstance(meta, dict) else {}
+        m["insights"] = {"data": [ins_row]} if ins_row else {"data": []}
+        return m
+
+    member_results = await asyncio.gather(
+        *[_fetch_member(mid) for mid in member_ids], return_exceptions=True
+    )
     bubbles: list[dict] = []
     for mid, res in zip(member_ids, member_results):
         if isinstance(res, BaseException):
