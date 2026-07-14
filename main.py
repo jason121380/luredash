@@ -1078,10 +1078,14 @@ async def lifespan(app: FastAPI):
                         fb_user_id TEXT PRIMARY KEY,
                         name TEXT,
                         picture_url TEXT,
+                        nickname TEXT,
                         first_login_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         last_login_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                     """
+                )
+                await conn.execute(
+                    "ALTER TABLE fb_user_profiles ADD COLUMN IF NOT EXISTS nickname TEXT"
                 )
                 # ── Billing / Subscription (Polar.sh) ─────────────
                 # `subscriptions`: one row per fb_user_id. Tracks Polar
@@ -3887,62 +3891,102 @@ async def admin_whoami():
 
 @app.get("/api/admin/users")
 async def admin_list_users():
-    """List every user who has logged in, with tier + role. Admin only."""
+    """List every user who has logged in, with tier + role + nickname.
+    Admin only. Names/avatars fall back to the auth-verify cache so users
+    who logged in before fb_user_profiles existed still show up named."""
     _require_admin()
     if _db_pool is None:
         return {"data": []}
     async with _db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT p.fb_user_id, p.name, p.picture_url, p.first_login_at, p.last_login_at,
-                   s.tier, s.status
-            FROM fb_user_profiles p
-            LEFT JOIN subscriptions s ON s.fb_user_id = p.fb_user_id
-            """
+        profiles = await conn.fetch(
+            "SELECT fb_user_id, name, picture_url, nickname, first_login_at, last_login_at FROM fb_user_profiles"
+        )
+        subs = await conn.fetch("SELECT fb_user_id, tier, status FROM subscriptions")
+        # Latest verified /me per uid — backfills name/avatar for users
+        # who predate fb_user_profiles.
+        verify = await conn.fetch(
+            "SELECT DISTINCT ON (uid) uid, name, picture_url FROM auth_verify_cache ORDER BY uid, verified_at DESC"
         )
         known_row = await conn.fetchrow(
             "SELECT value FROM shared_settings WHERE key = $1", "_fb_known_users"
         )
+
+    sub_map = {str(r["fb_user_id"]): (r["tier"], r["status"]) for r in subs}
+    verify_map = {str(r["uid"]): (r["name"], r["picture_url"]) for r in verify}
+
     by_id: dict = {}
-    for r in rows:
+    for r in profiles:
         uid = str(r["fb_user_id"])
         by_id[uid] = {
-            "fb_user_id": uid,
             "name": r["name"],
             "picture_url": r["picture_url"],
-            "tier": r["tier"] or "free",
-            "status": r["status"] or "free",
+            "nickname": r["nickname"],
             "first_login_at": r["first_login_at"].isoformat() if r["first_login_at"] else None,
             "last_login_at": r["last_login_at"].isoformat() if r["last_login_at"] else None,
-            "role": "admin" if _is_admin(uid) else "user",
         }
-    # Include ids known but without a profile row (legacy logins), plus
-    # every admin id, so the list is complete.
-    extra_ids: "set[str]" = set(_DEFAULT_ADMIN_FB_IDS) | set(_ADMIN_FB_USERS)
+    # Every candidate id: profiles ∪ known ∪ admins ∪ subscribers.
+    all_ids: "set[str]" = set(by_id) | set(sub_map) | set(_DEFAULT_ADMIN_FB_IDS) | set(_ADMIN_FB_USERS)
     if known_row:
         v = known_row["value"]
         if isinstance(v, str):
             v = _json.loads(v)
         if isinstance(v, list):
-            extra_ids |= {str(x) for x in v if x}
-    for uid in extra_ids:
-        if uid not in by_id:
-            by_id[uid] = {
+            all_ids |= {str(x) for x in v if x}
+
+    data = []
+    for uid in all_ids:
+        base = by_id.get(uid, {})
+        vn, vp = verify_map.get(uid, (None, None))
+        tier, status = sub_map.get(uid, ("free", "free"))
+        data.append(
+            {
                 "fb_user_id": uid,
-                "name": None,
-                "picture_url": None,
-                "tier": "free",
-                "status": "free",
-                "first_login_at": None,
-                "last_login_at": None,
+                "name": base.get("name") or vn,
+                "picture_url": base.get("picture_url") or vp,
+                "nickname": base.get("nickname"),
+                "tier": tier or "free",
+                "status": status or "free",
+                "first_login_at": base.get("first_login_at"),
+                "last_login_at": base.get("last_login_at"),
                 "role": "admin" if _is_admin(uid) else "user",
             }
-    data = sorted(
-        by_id.values(),
-        # admins first, then by name, then id
-        key=lambda u: (u["role"] != "admin", (u["name"] or "￿").lower(), u["fb_user_id"]),
+        )
+    data.sort(
+        # admins first, then by nickname / name, then id
+        key=lambda u: (
+            u["role"] != "admin",
+            (u["nickname"] or u["name"] or "￿").lower(),
+            u["fb_user_id"],
+        ),
     )
     return {"data": data, "default_admin_ids": sorted(_DEFAULT_ADMIN_FB_IDS)}
+
+
+class AdminNicknamePayload(BaseModel):
+    nickname: str = ""
+
+
+@app.post("/api/admin/users/{target_fb_user_id}/nickname")
+async def admin_set_user_nickname(target_fb_user_id: str, payload: AdminNicknamePayload):
+    """Set / clear an admin-editable nickname for a user. Admin only."""
+    _require_admin()
+    uid = str(target_fb_user_id).strip()
+    if not uid:
+        raise HTTPException(status_code=400, detail="缺少使用者 id")
+    if _db_pool is None:
+        raise HTTPException(status_code=503, detail="資料庫尚未連線")
+    nn = (payload.nickname or "").strip() or None
+    async with _db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO fb_user_profiles (fb_user_id, nickname)
+            VALUES ($1, $2)
+            ON CONFLICT (fb_user_id) DO UPDATE SET nickname = EXCLUDED.nickname
+            """,
+            uid,
+            nn,
+        )
+    return {"ok": True, "nickname": nn}
 
 
 class AdminRolePayload(BaseModel):
