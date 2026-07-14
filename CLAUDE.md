@@ -237,7 +237,7 @@ Do NOT use `accent-color` inline style — always use the `custom-cb` class.
   - ARCHIVED / DELETED → `#888888`
 - Chip is a vertical box with `cornerRadius:md`, `backgroundColor:#FFFFFF`, small symmetric padding, `gravity:top`. **Do not** add `height` or `justifyContent` — some property combos cause LINE to 400 the entire message ("messages[0] is invalid"). Intrinsic text height + padding + gravity is sufficient.
 - Body section is opt-in:
-  - `include_report_button=true` → footer button linking to `/r/:campaignId`
+  - `include_report_button=true` → footer button linking to a **frozen snapshot** (`/r/s/:id`) generated once at push time by `_snapshot_url_for_push` (server-side `_gather_report_snapshot` with `provided=None`, tagged `created_by='line-push'`), so recipients read a zero-FB copy instead of every tap re-hitting Facebook (which piled toward code-17 rate limits). Falls back to the live `/r/:campaignId` link (`_share_url_for_config`) if generation errors.
   - `include_recommendations=true` → 優化建議 bullet list under the KPI grid (uses `_evaluate_alert_recommendations`)
 
 ## Alert Thresholds
@@ -289,7 +289,7 @@ Report header shows the **店家 · 設計師 nickname** instead of the raw camp
 
 Thumbnail sharpness applies to BOTH reports' ad cards (`ReportContent`'s `AdCard` + `PerformanceReportContent`'s `CreativeCard`): image_url → 600px hires → raw thumbnail_url. **Share page is view-only**: `<ShareReportPage/>` passes `disablePreview` to both report components (a `PreviewDisabledContext` in `ReportContent` reaches the deep `AdCard`; a prop on `PerformanceReportContent`) so clients see thumbnails but cannot click to open the enlarge modal.
 
-**LINE push report button** (`campaign_line_push_configs.report_variant`, `'standard'|'perf'`, `_norm_report_variant` whitelists): when `include_report_button` is on, `GroupPushConfigModal` shows a dropdown (以廣告組合報告 / 以廣告報告); `_share_url_for_config` appends `?report=perf` for the perf variant so the flex button links to the matching share layout.
+**LINE push report button** (`campaign_line_push_configs.report_variant`, `'standard'|'perf'`, `_norm_report_variant` whitelists): when `include_report_button` is on, `GroupPushConfigModal` shows a dropdown (以廣告組合報告 / 以廣告報告). The button links to a frozen snapshot (`/r/s/:id`, `_snapshot_url_for_push` with the matching `variant`) generated once at send time in `_build_flex_for_config` — no live FB re-fetch per view. The old live-link path (`_share_url_for_config`, which appended `?report=perf` for the perf variant) remains as the error fallback. Because snapshot generation freezes the whole tree + thumbnails, the 測試 button's `_build_flex_for_config` timeout is 25s (was 18s).
 
 Both versions share the 花費/花費+% toggle and the 複製分享連結 button. The share URL carries `?report=perf` for 成效報告 (`buildShareUrl({variant})` → `ShareReportPage` parses `report` and renders the matching component). `translateObjective` was extracted to `@/lib/objective` so both report components use it.
 
