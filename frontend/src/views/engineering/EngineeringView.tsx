@@ -190,7 +190,7 @@ function RuntimeDiagnosticsPanel() {
         <h2 className="text-[15px] font-bold text-ink">其他</h2>
         <p className="mt-0.5 text-xs text-gray-400">其他診斷:身分、記憶體、前端快取與本機環境。</p>
       </header>
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4">
         <MemoryPanel />
       </div>
       <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
