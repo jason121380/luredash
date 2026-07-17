@@ -55,6 +55,45 @@ function formatDateRangeLabel(cfg: LinePushConfig): string {
   return DATE_RANGE_LABELS[cfg.date_range] ?? cfg.date_range;
 }
 
+/** Translate a stored push error to a SHORT actionable Chinese line.
+ *  Backend already writes friendly text (with the owner's name) for NEW
+ *  failures; this also covers rows whose last_error was stored as raw FB
+ *  English BEFORE that shipped, so they read cleanly without waiting for
+ *  a retry. Anything already Chinese / unrecognised passes through. */
+function friendlyPushError(raw: string): string {
+  const low = raw.toLowerCase();
+  if (
+    low.includes("access token") ||
+    low.includes("session has expired") ||
+    low.includes("session is invalid") ||
+    low.includes("session has been invalidated") ||
+    low.includes("oauthexception") ||
+    low.includes("code=190")
+  ) {
+    return "Facebook 登入憑證已失效,請由官方帳號擁有者重新用 Facebook 登入本平台一次即可修復(推播設定不需重設)。";
+  }
+  if (
+    low.includes("code=17") ||
+    low.includes("code=80004") ||
+    low.includes("request limit") ||
+    low.includes("rate limit") ||
+    low.includes("限流") ||
+    low.includes("throttle")
+  ) {
+    return "Facebook 目前呼叫量過高(限流中),系統會自動稍後重試,通常無需處理。";
+  }
+  if (low.includes("no enabled line channel") || low.includes("not a member")) {
+    return "找不到可用的 LINE 官方帳號,或 Bot 已被移出此群組。";
+  }
+  if (low.includes("timeout") || low.includes("timed out")) {
+    return "連線 Facebook 逾時(多半是限流中),系統會自動重試。";
+  }
+  // Already-friendly Chinese (or an error we don't have a mapping for) —
+  // pass through, but hard-cap length so a stray long string can't blow
+  // out the row.
+  return raw.length > 120 ? `${raw.slice(0, 120)}…` : raw;
+}
+
 /** ISO timestamp → "M/D HH:MM" in the viewer's local time. The server
  *  stores next_run_at in UTC; browsers in the team's TZ (Asia/Taipei,
  *  same as SCHEDULER_TZ) see the schedule they configured. */
@@ -822,8 +861,11 @@ function PushConfigRow({
             silent no-push is self-diagnosable from this list instead of
             requiring DB access. Cleared automatically on the next success. */}
         {cfg.last_error && (
-          <div className="mt-0.5 truncate text-[11px] text-red" title={cfg.last_error}>
-            上次失敗:{cfg.last_error}
+          <div
+            className="mt-0.5 line-clamp-2 max-w-[70vw] break-words text-[11px] text-red md:max-w-[460px]"
+            title={cfg.last_error}
+          >
+            上次失敗:{friendlyPushError(cfg.last_error)}
             {cfg.fail_count > 1 ? `(連續 ${cfg.fail_count} 次)` : ""}
           </div>
         )}
