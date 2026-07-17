@@ -2376,6 +2376,53 @@ def _is_rate_limit_exception(exc: HTTPException) -> bool:
     )
 
 
+def _friendly_push_error(err: Any, owner_name: Optional[str] = None) -> str:
+    """Turn a raw push failure into an actionable Chinese message stored
+    in `last_error` and shown on the LINE push config row.
+
+    The most common real-world failure is an expired FB token — the raw
+    text is「Error validating access token: The session is invalid...」,
+    which nobody can act on. We translate the frequent cases and, for
+    token failures, name WHO must re-log in (the LINE 官方帳號 owner —
+    the push runs on that owner's FB token, not on whoever created the
+    config)."""
+    # LinePushError already carries a translated friendly_message.
+    friendly = getattr(err, "friendly_message", None)
+    if friendly:
+        return str(friendly)[:500]
+
+    raw = str(err or "")
+    low = raw.lower()
+    who = f"「{owner_name}」" if owner_name else "官方帳號擁有者"
+
+    # Expired / invalidated FB access token — the screenshot case.
+    if (
+        "access token" in low
+        or "session is invalid" in low
+        or "session has been invalidated" in low
+        or "oauthexception" in low
+        or "code=190" in low
+    ):
+        return (
+            f"Facebook 登入憑證已失效,請由{who}重新用 Facebook 登入本平台一次即可修復"
+            "(推播設定不需重設,系統會自動用新憑證重試)。"
+        )
+    # FB rate limit / throttle — transient, auto-retried.
+    if any(
+        m in low
+        for m in ("code=17", "code=4)", "code=80004", "request limit", "rate limit", "節流", "throttle")
+    ):
+        return "Facebook 目前呼叫量過高(限流中),系統會自動稍後重試,通常無需處理。"
+    # LINE side: bot removed from the group / no usable channel.
+    if "no enabled line channel" in low or "not a member" in low or "bot" in low:
+        return "找不到可用的 LINE 官方帳號,或 Bot 已被移出此群組,請確認 Bot 仍在群組內。"
+    # Timeout talking to FB.
+    if "timeout" in low or "timed out" in low:
+        return "連線 Facebook 逾時(多半是限流中),系統會自動重試。"
+    # Unknown — keep the raw text so nothing is silently swallowed.
+    return raw[:500]
+
+
 async def _fb_request(
     method: str,
     path: str,
@@ -4825,6 +4872,25 @@ async def _get_group_owner(group_id: str) -> Optional[str]:
             group_id,
         )
     return uid
+
+
+async def _fb_user_display_name(uid: Optional[str]) -> Optional[str]:
+    """Best-effort display name (暱稱 → FB name) for a fb_user_id, so a
+    token-expired push error can name WHO must re-log in. Returns None if
+    unknown / no DB."""
+    if not uid or _db_pool is None:
+        return None
+    try:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT nickname, name FROM fb_user_profiles WHERE fb_user_id = $1",
+                uid,
+            )
+        if row:
+            return (row["nickname"] or row["name"] or None)
+    except Exception:
+        pass
+    return None
 
 
 def _tier_limit_error(resource: str, limit: int, tier: str, message: str) -> HTTPException:
@@ -10289,6 +10355,11 @@ async def test_push_config(config_id: str, fb_user_id: Optional[str] = None):
         # wait_for above) — preserve its status + detail.
         raise
     except Exception as e:
+        # Translate to actionable Chinese (token-expired names the 官方帳號
+        # owner who must re-log in) so the 測試 toast + log are readable.
+        owner_uid = await _get_group_owner(cfg["group_id"])
+        owner_name = await _fb_user_display_name(owner_uid)
+        friendly = _friendly_push_error(e, owner_name=owner_name)
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -10296,9 +10367,9 @@ async def test_push_config(config_id: str, fb_user_id: Optional[str] = None):
                 VALUES ($1::uuid, FALSE, $2)
                 """,
                 config_id,
-                str(e)[:500],
+                friendly,
             )
-        raise HTTPException(status_code=502, detail=f"LINE push failed: {e}")
+        raise HTTPException(status_code=502, detail=friendly)
 
 
 @app.get("/api/line-push/logs")
@@ -11194,15 +11265,11 @@ async def _scheduler_tick() -> None:
                 flush=True,
             )
         except Exception as e:
-            # Use the LinePushError friendly message when available so
-            # the「last_error」 column shows actionable Chinese (e.g.
-            # 「LINE 官方帳號本月推播額度已用完 ...」 instead of the
-            # raw English 「You have reached your monthly limit」.
-            err_text = (
-                e.friendly_message
-                if isinstance(e, line_client.LinePushError)
-                else str(e)
-            )[:500]
+            # Translate to actionable Chinese for the「last_error」column /
+            # LINE push config row. Token-expired errors name WHO must
+            # re-log in (the 官方帳號 owner, whose FB token the push uses).
+            owner_name = await _fb_user_display_name(owner_uid)
+            err_text = _friendly_push_error(e, owner_name=owner_name)
             fail_count = int(cfg.get("fail_count") or 0) + 1
             auto_disable = fail_count >= SCHEDULER_FAIL_THRESHOLD
             # Schedule a RETRY: next_run_at must move into the future,
