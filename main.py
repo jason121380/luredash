@@ -298,8 +298,8 @@ _global_throttle_events: deque = deque(maxlen=20)
 # `_scheduler_task` holds the background asyncio task started in
 # lifespan so we can cancel it cleanly on shutdown. The loop ticks
 # every SCHEDULER_TICK_SECONDS and fires any push configs whose
-# next_run_at has passed. 3 failures in a row flips `enabled=false`
-# so a broken token doesn't spam the log forever.
+# next_run_at has passed. SCHEDULER_FAIL_THRESHOLD consecutive failures
+# flip `enabled=false` so a broken token doesn't spam the log forever.
 _scheduler_task: Optional[asyncio.Task] = None
 _warm_task: Optional[asyncio.Task] = None
 # Background fire-and-forget tasks (e.g. one-shot LINE group name
@@ -307,7 +307,12 @@ _warm_task: Optional[asyncio.Task] = None
 # them mid-run. Tasks self-discard via `add_done_callback`.
 _bg_tasks: "set[asyncio.Task]" = set()
 SCHEDULER_TICK_SECONDS = 60
-SCHEDULER_FAIL_THRESHOLD = 3
+# 5 consecutive failures auto-disable a push config. Failures now RETRY
+# with 10min × fail_count backoff (10+20+30+40 ≈ 100min of tolerance), so
+# a typical ~1h FB throttle window no longer eats the whole budget the
+# way the old threshold of 3 (~30min) would; genuinely-dead configs
+# (bot kicked, expired token) still get disabled within a couple hours.
+SCHEDULER_FAIL_THRESHOLD = 5
 SCHEDULER_TZ_NAME = os.getenv("SCHEDULER_TZ", "Asia/Taipei")
 
 
@@ -10991,12 +10996,26 @@ async def _scheduler_tick() -> None:
     now = datetime.now(timezone.utc)
     async with _db_pool.acquire() as conn:
         async with conn.transaction():
+            # The `last_run_at < next_run_at` guard excludes rows another
+            # worker grabbed this tick (their last_run_at was just bumped).
+            # The 30-minute grace clause is the SELF-HEAL path: a row whose
+            # push failed (or whose worker crashed mid-push) is left with
+            # last_run_at >= next_run_at and would otherwise be stranded
+            # FOREVER — the exact bug where a scheduled push silently never
+            # fired again after one FB-throttled failure, while manual 測試
+            # kept working. A real in-flight push finishes in seconds, so
+            # anything still "grabbed" after 30 minutes is dead and safe to
+            # re-run.
             due = await conn.fetch(
                 """
                 SELECT * FROM campaign_line_push_configs
                 WHERE enabled
                   AND next_run_at <= $1
-                  AND (last_run_at IS NULL OR last_run_at < next_run_at)
+                  AND (
+                    last_run_at IS NULL
+                    OR last_run_at < next_run_at
+                    OR last_run_at <= $1 - INTERVAL '30 minutes'
+                  )
                 ORDER BY next_run_at ASC
                 LIMIT 50
                 FOR UPDATE SKIP LOCKED
@@ -11186,18 +11205,36 @@ async def _scheduler_tick() -> None:
             )[:500]
             fail_count = int(cfg.get("fail_count") or 0) + 1
             auto_disable = fail_count >= SCHEDULER_FAIL_THRESHOLD
+            # Schedule a RETRY: next_run_at must move into the future,
+            # or the due-filter's `last_run_at < next_run_at` guard
+            # strands this row forever (the silent-no-push bug). Backoff
+            # 10min × fail_count, but never past the next natural slot.
+            # Transient FB throttle → push goes out ~10-30min late;
+            # permanent errors (bot kicked, dead token) hit the fail
+            # threshold within ~3 retries and auto-disable.
+            next_natural = _compute_next_run(
+                cfg["frequency"],
+                cfg["weekdays"],
+                cfg["month_day"],
+                cfg["hour"],
+                cfg["minute"],
+            )
+            retry_at = now + timedelta(minutes=10 * fail_count)
+            next_retry = min(retry_at, next_natural)
             async with _db_pool.acquire() as conn:
                 await conn.execute(
                     """
                     UPDATE campaign_line_push_configs
                     SET fail_count = $1, last_error = $2,
                         enabled = CASE WHEN $3 THEN FALSE ELSE enabled END,
+                        next_run_at = $4,
                         updated_at = NOW()
-                    WHERE id = $4::uuid
+                    WHERE id = $5::uuid
                     """,
                     fail_count,
                     err_text,
                     auto_disable,
+                    next_natural if auto_disable else next_retry,
                     cfg["id"],
                 )
                 await conn.execute(
