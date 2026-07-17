@@ -55,6 +55,17 @@ function formatDateRangeLabel(cfg: LinePushConfig): string {
   return DATE_RANGE_LABELS[cfg.date_range] ?? cfg.date_range;
 }
 
+/** ISO timestamp → "M/D HH:MM" in the viewer's local time. The server
+ *  stores next_run_at in UTC; browsers in the team's TZ (Asia/Taipei,
+ *  same as SCHEDULER_TZ) see the schedule they configured. */
+function formatNextRun(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
+}
+
 function formatPushRule(cfg: LinePushConfig): string {
   const time = `${String(cfg.hour).padStart(2, "0")}:${String(cfg.minute).padStart(2, "0")}`;
   if (cfg.frequency === "daily") return `每日 ${time}`;
@@ -803,7 +814,19 @@ function PushConfigRow({
         </div>
         <div className="text-[11px] text-gray-500">
           {rule} · {dateLabel}
+          {cfg.enabled && cfg.next_run_at && (
+            <span className="text-gray-300"> · 下次 {formatNextRun(cfg.next_run_at)}</span>
+          )}
         </div>
+        {/* Scheduler health — surfaces the last failure + retry count so a
+            silent no-push is self-diagnosable from this list instead of
+            requiring DB access. Cleared automatically on the next success. */}
+        {cfg.last_error && (
+          <div className="mt-0.5 truncate text-[11px] text-red" title={cfg.last_error}>
+            上次失敗:{cfg.last_error}
+            {cfg.fail_count > 1 ? `(連續 ${cfg.fail_count} 次)` : ""}
+          </div>
+        )}
       </div>
       {editable && (
         <div className="flex shrink-0 items-center gap-1">
