@@ -180,6 +180,17 @@ export function useTestLinePush() {
   });
 }
 
+export function useEnableLinePush() {
+  const qc = useQueryClient();
+  const { user } = useFbAuth();
+  return useMutation({
+    mutationFn: (id: string) => api.linePush.enableConfig(user?.id ?? "", id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: GROUP_CONFIGS_PREFIX });
+    },
+  });
+}
+
 // ── Group folders (per-OA categorisation) ─────────────────────
 
 const FOLDERS_KEY = ["lineFolders"] as const;

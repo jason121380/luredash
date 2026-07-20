@@ -1430,6 +1430,14 @@ export const api = {
       request<{ ok: boolean }>("POST", `/api/line-push/configs/${encodeURIComponent(id)}/test`, {
         query: { fb_user_id: fbUserId },
       }),
+    /** Re-enable a config the scheduler auto-disabled (clears failure
+     *  state + reschedules). */
+    enableConfig: (fbUserId: string, id: string) =>
+      request<{ ok: boolean; next_run_at: string }>(
+        "POST",
+        `/api/line-push/configs/${encodeURIComponent(id)}/enable`,
+        { query: { fb_user_id: fbUserId } },
+      ),
     listLogs: (configId?: string, limit = 20) =>
       request<{
         data: Array<{
