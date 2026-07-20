@@ -4,6 +4,7 @@ import {
   useCreateLineFolder,
   useDeleteLineFolder,
   useDeleteLinePushConfig,
+  useEnableLinePush,
   useLineGroupFolders,
   useLineGroupPushConfigs,
   useLineGroups,
@@ -805,7 +806,17 @@ function PushConfigRow({
   const rule = formatPushRule(cfg);
   const deleteMutation = useDeleteLinePushConfig();
   const testMutation = useTestLinePush();
+  const enableMutation = useEnableLinePush();
   const editable = canEdit;
+
+  const onReenable = async () => {
+    try {
+      await enableMutation.mutateAsync(cfg.id);
+      toast(`已重新啟用「${name}」`, "success");
+    } catch (e) {
+      toast(`啟用失敗:${e instanceof Error ? e.message : String(e)}`, "error", 4500);
+    }
+  };
 
   const onUnbind = async () => {
     const ok = await confirm(`確定要解除「${name}」的推播綁定？`);
@@ -872,6 +883,16 @@ function PushConfigRow({
       </div>
       {editable && (
         <div className="flex shrink-0 items-center gap-1">
+          {!cfg.enabled && (
+            <button
+              type="button"
+              onClick={onReenable}
+              disabled={enableMutation.isPending}
+              className="rounded border border-orange bg-orange-bg px-1.5 py-0.5 text-[10px] font-semibold text-orange hover:bg-orange hover:text-white disabled:opacity-50"
+            >
+              {enableMutation.isPending ? "啟用中" : "重新啟用"}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onEdit(cfg)}

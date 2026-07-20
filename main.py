@@ -10289,6 +10289,43 @@ async def delete_push_config(config_id: str, fb_user_id: Optional[str] = None):
     return {"ok": True}
 
 
+@app.post("/api/line-push/configs/{config_id}/enable")
+async def enable_push_config(config_id: str, fb_user_id: Optional[str] = None):
+    """Re-enable a config the scheduler auto-disabled (5 consecutive
+    failures). Clears the failure state and reschedules the next run —
+    the one-click recovery for the「已停用」badge, so the operator
+    doesn't have to open 編輯 and hunt for the enable checkbox."""
+    pool = _require_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM campaign_line_push_configs WHERE id = $1::uuid",
+            config_id,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Config not found")
+    cfg = _config_row_to_dict(row)
+    await _assert_can_modify_config_for_group(cfg["group_id"], fb_user_id)
+    next_run = _compute_next_run(
+        cfg["frequency"],
+        cfg["weekdays"],
+        cfg["month_day"],
+        cfg["hour"],
+        cfg["minute"],
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE campaign_line_push_configs
+            SET enabled = TRUE, fail_count = 0, last_error = NULL,
+                next_run_at = $2, updated_at = NOW()
+            WHERE id = $1::uuid
+            """,
+            config_id,
+            next_run,
+        )
+    return {"ok": True, "next_run_at": next_run.isoformat()}
+
+
 @app.post("/api/line-push/configs/{config_id}/test")
 async def test_push_config(config_id: str, fb_user_id: Optional[str] = None):
     """Fire a push immediately without advancing next_run_at.
