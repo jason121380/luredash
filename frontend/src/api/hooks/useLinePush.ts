@@ -168,9 +168,15 @@ export function useDeleteLinePushConfig() {
 }
 
 export function useTestLinePush() {
+  const qc = useQueryClient();
   const { user } = useFbAuth();
   return useMutation({
     mutationFn: (id: string) => api.linePush.test(user?.id ?? "", id),
+    // A successful test clears the config's fail_count / last_error on the
+    // server — refetch so the red「上次失敗」line disappears immediately.
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: GROUP_CONFIGS_PREFIX });
+    },
   });
 }
 
