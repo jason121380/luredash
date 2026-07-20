@@ -10327,6 +10327,18 @@ async def test_push_config(config_id: str, fb_user_id: Optional[str] = None):
             _http_client, cfg["group_id"], [flex], access_token=creds[2]
         )
         async with pool.acquire() as conn:
+            # A successful 測試 proves the token/bot are healthy again, so
+            # clear any stale failure state — otherwise the red「上次失敗」
+            # line lingers until the next scheduled push (confusing after
+            # the owner re-logs in and tests to confirm the fix).
+            await conn.execute(
+                """
+                UPDATE campaign_line_push_configs
+                SET fail_count = 0, last_error = NULL, updated_at = NOW()
+                WHERE id = $1::uuid
+                """,
+                config_id,
+            )
             await conn.execute(
                 """
                 INSERT INTO line_push_logs (config_id, success, message_preview)
