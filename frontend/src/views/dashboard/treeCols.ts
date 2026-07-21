@@ -91,6 +91,9 @@ export interface TreeCol {
   label: string;
   /** Function returning the sort value for a row. Omit for non-sortable. */
   sortKey?: (entity: FbBaseEntity) => number;
+  /** Render the header label in orange + bold (matches the cell styling).
+   *  Used by 花費+% so the whole column reads as the highlighted total. */
+  emphasize?: boolean;
 }
 
 /** Optional e-commerce columns surfaced via the gear-icon picker.
@@ -148,7 +151,7 @@ export function buildTreeCols(multiAcct: boolean, extras: string[] = []): TreeCo
   // resolve — sorting by raw 花費 (its proxy) would be misleading when
   // campaigns carry different markups, so we leave the header static.
   if (enabled.has("spend_plus")) {
-    cols.push({ key: "spend_plus", label: "花費+%" });
+    cols.push({ key: "spend_plus", label: "花費+%", emphasize: true });
   }
   cols.push(
     { key: "impressions", label: "曝光", sortKey: (i) => Number(getIns(i).impressions) || 0 },

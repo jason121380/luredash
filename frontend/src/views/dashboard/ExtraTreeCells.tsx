@@ -29,7 +29,16 @@ export function SpendPlusCell({
   markupPercent: number;
 }) {
   if (!show) return null;
-  return <td className="num font-bold text-orange">{`$${fM(spendPlus(spend, markupPercent))}`}</td>;
+  // NOTE: use `tabular-nums`, NOT the `.num` class — `.num` hardcodes
+  // `color: var(--black)` in the same @layer utilities, which has equal
+  // specificity to `text-orange` and (being later in source order) wins,
+  // so `.num text-orange` renders BLACK. `tabular-nums` gives the same
+  // numeral alignment without fighting the colour.
+  return (
+    <td className="tabular-nums font-bold text-orange">
+      {`$${fM(spendPlus(spend, markupPercent))}`}
+    </td>
+  );
 }
 
 /**

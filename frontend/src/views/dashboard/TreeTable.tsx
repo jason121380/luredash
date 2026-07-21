@@ -117,7 +117,9 @@ export function TreeTable({
           <td />
           <td className="num text-[13px] font-bold">${fM(totalSpend)}</td>
           {showSpendPlus && (
-            <td className="num text-[13px] font-bold text-orange">${fM(totalSpendPlus)}</td>
+            <td className="tabular-nums text-[13px] font-bold text-orange">
+              ${fM(totalSpendPlus)}
+            </td>
           )}
           <td />
           <td />
@@ -177,7 +179,11 @@ function TreeHeaderCell({
       className={cn(
         "sticky top-0 z-[1] whitespace-nowrap border-b border-border bg-bg px-3.5 py-2.5",
         "text-left text-[11px] font-semibold uppercase tracking-[0.5px]",
-        isSorted ? "text-orange" : "text-gray-300",
+        col.emphasize
+          ? "font-bold text-orange"
+          : isSorted
+            ? "text-orange"
+            : "text-gray-300",
         sortable && "cursor-pointer select-none hover:text-orange",
       )}
     >
