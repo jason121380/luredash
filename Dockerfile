@@ -46,7 +46,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Add new top-level Python modules here as they're created — the
 # COPY is allow-listed (not `COPY . .`) so non-runtime junk
 # (.git, docs, tests, scratch files) doesn't bloat the image.
-COPY main.py line_client.py agent_personas.py ./
+COPY main.py line_client.py ezpay_client.py agent_personas.py ./
 COPY --from=frontend-builder /app/dist ./dist
 
 # Default to 8001 locally; Zeabur sets $PORT
