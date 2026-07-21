@@ -117,7 +117,9 @@ export function TreeTable({
           <td />
           <td className="num text-[13px] font-bold">${fM(totalSpend)}</td>
           {showSpendPlus && (
-            <td className="num text-[13px] font-bold text-orange">${fM(totalSpendPlus)}</td>
+            <td className="tabular-nums text-[13px] font-bold text-orange">
+              ${fM(totalSpendPlus)}
+            </td>
           )}
           <td />
           <td />
