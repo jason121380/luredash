@@ -1223,6 +1223,81 @@ async def lifespan(app: FastAPI):
                     )
                     """
                 )
+                # `invoice_buyers`: per-store 電子發票 buyer identity. Keyed
+                # by the free-text store label (matches campaign_nicknames.
+                # store) so the 開立發票 form can prefill from 店家花費. No FK
+                # — campaign_nicknames is keyed by campaign_id and store is
+                # not unique there. category B2B carries 統編; B2C carries a
+                # 載具 (carrier) or 捐贈碼 (love_code).
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS invoice_buyers (
+                        store        TEXT PRIMARY KEY,
+                        category     TEXT NOT NULL DEFAULT 'B2C',
+                        buyer_name   TEXT NOT NULL DEFAULT '',
+                        tax_id       TEXT NOT NULL DEFAULT '',
+                        email        TEXT NOT NULL DEFAULT '',
+                        carrier_type TEXT NOT NULL DEFAULT '',
+                        carrier_num  TEXT NOT NULL DEFAULT '',
+                        love_code    TEXT NOT NULL DEFAULT '',
+                        print_flag   TEXT NOT NULL DEFAULT 'N',
+                        address      TEXT NOT NULL DEFAULT '',
+                        notes        TEXT NOT NULL DEFAULT '',
+                        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                # `einvoices`: issued 電子發票 ledger. Buyer fields are a
+                # snapshot frozen at issue time (the profile may change
+                # later). merchant_order_no is our idempotency key (ezPay
+                # rejects reused order numbers permanently). raw_request /
+                # raw_response hold the decrypted ezPay payloads (PII — read
+                # routes are admin-gated). Populated from Phase 2 onward;
+                # created here so the schema is stable.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS einvoices (
+                        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        store             TEXT NOT NULL DEFAULT '',
+                        category          TEXT NOT NULL,
+                        buyer_name        TEXT NOT NULL DEFAULT '',
+                        buyer_tax_id      TEXT NOT NULL DEFAULT '',
+                        buyer_email       TEXT NOT NULL DEFAULT '',
+                        carrier_type      TEXT NOT NULL DEFAULT '',
+                        carrier_num       TEXT NOT NULL DEFAULT '',
+                        love_code         TEXT NOT NULL DEFAULT '',
+                        print_flag        TEXT NOT NULL DEFAULT 'N',
+                        tax_type          TEXT NOT NULL DEFAULT '1',
+                        tax_rate          NUMERIC NOT NULL DEFAULT 5,
+                        amt               INT NOT NULL,
+                        tax_amt           INT NOT NULL,
+                        total_amt         INT NOT NULL,
+                        items             JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        merchant_order_no TEXT NOT NULL UNIQUE,
+                        invoice_number    TEXT,
+                        random_number     TEXT,
+                        invoice_trans_no  TEXT,
+                        check_code        TEXT,
+                        status            TEXT NOT NULL DEFAULT 'issued',
+                        void_reason       TEXT,
+                        void_at           TIMESTAMPTZ,
+                        allowance_no      TEXT,
+                        allowance_amt     INT,
+                        allowance_at      TIMESTAMPTZ,
+                        raw_request       JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        raw_response      JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_by        TEXT,
+                        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_einvoices_store ON einvoices (store, created_at DESC)"
+                )
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_einvoices_status ON einvoices (status, created_at DESC)"
+                )
                 # user_settings is keyed (fb_user_id, key) — the PK
                 # already covers fb_user_id-leading queries, but bare
                 # WHERE fb_user_id=$1 fan-outs benefit from being able
@@ -4208,6 +4283,142 @@ async def delete_nickname(campaign_id: str):
     return {"ok": True}
 
 
+# ── 電子發票 (ezPay) buyer profiles ───────────────────────────────────
+#
+# Phase 1: per-store buyer identity (統編 / 載具 / 捐贈碼) that the 開立發票
+# form prefills from. Admin-gated — issuing statutory invoices and the
+# buyer PII behind it are finance/operator concerns. Keyed by the store
+# label so it lines up with 店家花費 aggregation.
+
+_TAX_ID_RE = re.compile(r"^\d{8}$")
+
+
+def _valid_tw_tax_id(tax_id: str) -> bool:
+    """Taiwan 統一編號 (8-digit) checksum. The logic (2026 rule that also
+    accepts the '7th digit == 7' special case) prevents a typo'd 統編 from
+    reaching ezPay as a hard reject / invalid statutory invoice."""
+    if not _TAX_ID_RE.match(tax_id):
+        return False
+    weights = (1, 2, 1, 2, 1, 2, 4, 1)
+    digits = [int(c) for c in tax_id]
+
+    def _digit_sum(n: int) -> int:
+        return n // 10 + n % 10
+
+    products = [_digit_sum(digits[i] * weights[i]) for i in range(8)]
+    total = sum(products)
+    if total % 5 == 0:
+        return True
+    # Special case: 7th digit (index 6) is 7 → the '7' can count as 0 or 1.
+    if digits[6] == 7 and (total + 1) % 5 == 0:
+        return True
+    return False
+
+
+class InvoiceBuyerPayload(BaseModel):
+    category: str = "B2C"          # B2B | B2C
+    buyer_name: str = ""
+    tax_id: str = ""
+    email: str = ""
+    carrier_type: str = ""         # B2C: '0'手機條碼 '1'自然人憑證 '2'ezPay會員
+    carrier_num: str = ""
+    love_code: str = ""            # 捐贈碼 (mutually exclusive with carrier)
+    print_flag: str = "N"
+    address: str = ""
+    notes: str = ""
+
+
+def _buyer_row_to_dict(r) -> dict:
+    return {
+        "store": r["store"],
+        "category": r["category"],
+        "buyer_name": r["buyer_name"],
+        "tax_id": r["tax_id"],
+        "email": r["email"],
+        "carrier_type": r["carrier_type"],
+        "carrier_num": r["carrier_num"],
+        "love_code": r["love_code"],
+        "print_flag": r["print_flag"],
+        "address": r["address"],
+        "notes": r["notes"],
+        "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+    }
+
+
+@app.get("/api/invoice-buyers")
+async def list_invoice_buyers():
+    _require_admin()
+    pool = _require_db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM invoice_buyers ORDER BY store"
+        )
+    return {"data": [_buyer_row_to_dict(r) for r in rows]}
+
+
+@app.post("/api/invoice-buyers/{store}")
+async def upsert_invoice_buyer(store: str, payload: InvoiceBuyerPayload):
+    _require_admin()
+    pool = _require_db()
+    store_key = (store or "").strip()
+    if not store_key:
+        raise HTTPException(status_code=400, detail="缺少店家名稱")
+    category = "B2B" if (payload.category or "").upper() == "B2B" else "B2C"
+    tax_id = (payload.tax_id or "").strip()
+    carrier_num = (payload.carrier_num or "").strip()
+    love_code = (payload.love_code or "").strip()
+    # B2B: 統編 required + valid; ezPay 三聯式 must print.
+    if category == "B2B":
+        if not _valid_tw_tax_id(tax_id):
+            raise HTTPException(status_code=400, detail="統一編號格式錯誤(需 8 碼且通過檢查碼)")
+        print_flag = "Y"
+        carrier_type = carrier_num = love_code = ""
+    else:
+        tax_id = ""
+        # B2C: carrier and 捐贈碼 are mutually exclusive.
+        if carrier_num and love_code:
+            raise HTTPException(status_code=400, detail="載具號碼與捐贈碼只能擇一")
+        carrier_type = (payload.carrier_type or "").strip()
+        print_flag = "Y" if (payload.print_flag or "").upper() == "Y" else "N"
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO invoice_buyers (
+                store, category, buyer_name, tax_id, email,
+                carrier_type, carrier_num, love_code, print_flag,
+                address, notes, updated_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, NOW())
+            ON CONFLICT (store) DO UPDATE SET
+                category = EXCLUDED.category,
+                buyer_name = EXCLUDED.buyer_name,
+                tax_id = EXCLUDED.tax_id,
+                email = EXCLUDED.email,
+                carrier_type = EXCLUDED.carrier_type,
+                carrier_num = EXCLUDED.carrier_num,
+                love_code = EXCLUDED.love_code,
+                print_flag = EXCLUDED.print_flag,
+                address = EXCLUDED.address,
+                notes = EXCLUDED.notes,
+                updated_at = NOW()
+            """,
+            store_key, category, (payload.buyer_name or "").strip(), tax_id,
+            (payload.email or "").strip(), carrier_type, carrier_num, love_code,
+            print_flag, (payload.address or "").strip(), (payload.notes or "").strip(),
+        )
+        row = await conn.fetchrow("SELECT * FROM invoice_buyers WHERE store = $1", store_key)
+    return {"ok": True, "data": _buyer_row_to_dict(row)}
+
+
+@app.delete("/api/invoice-buyers/{store}")
+async def delete_invoice_buyer(store: str):
+    _require_admin()
+    pool = _require_db()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM invoice_buyers WHERE store = $1", (store or "").strip())
+    return {"ok": True}
+
+
 # ── Settings (PostgreSQL-backed) ──────────────────────────────────────
 #
 # Two scopes:
@@ -4442,6 +4653,19 @@ async def delete_shared_setting(key: str):
 #      a stub that just persists raw payloads).
 #
 # Quota gates on the existing write endpoints land in Phase 5.
+
+# ── 電子發票 (ezPay 藍新) ────────────────────────────────────────────
+# Merchant credentials from the ezPay 商店後台. HashKey is 32 chars
+# (AES-256), HashIV is 16 chars. Default API base is the TEST host
+# (cinv.ezpay.com.tw); production = flip to https://inv.ezpay.com.tw
+# with production credentials. EZPAY_MOCK=1 prints the decrypted payload
+# instead of calling ezPay (dev, no credentials needed). Consumed from
+# Phase 2 (ezpay_client.py); declared here so config is one place.
+EZPAY_MERCHANT_ID = os.getenv("EZPAY_MERCHANT_ID", "")
+EZPAY_HASH_KEY = os.getenv("EZPAY_HASH_KEY", "")
+EZPAY_HASH_IV = os.getenv("EZPAY_HASH_IV", "")
+EZPAY_API_BASE = os.getenv("EZPAY_API_BASE", "https://cinv.ezpay.com.tw")
+EZPAY_MOCK = os.getenv("EZPAY_MOCK", "0")
 
 POLAR_API_KEY = os.getenv("POLAR_API_KEY", "")
 POLAR_WEBHOOK_SECRET = os.getenv("POLAR_WEBHOOK_SECRET", "")

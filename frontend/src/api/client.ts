@@ -36,6 +36,29 @@ export type LinePushDateRange =
   | "month_to_yesterday"
   | "custom";
 
+/** 電子發票 buyer category: B2B (company, 統編) or B2C (individual). */
+export type InvoiceCategory = "B2B" | "B2C";
+
+/** Editable fields of a store's 電子發票 buyer profile. */
+export interface InvoiceBuyerInput {
+  category: InvoiceCategory;
+  buyer_name: string;
+  tax_id: string;
+  email: string;
+  carrier_type: string;
+  carrier_num: string;
+  love_code: string;
+  print_flag: string;
+  address: string;
+  notes: string;
+}
+
+/** A stored buyer profile (keyed by store name). */
+export interface InvoiceBuyer extends InvoiceBuyerInput {
+  store: string;
+  updated_at: string | null;
+}
+
 export interface LinePushConfig {
   id: string;
   campaign_id: string;
@@ -1185,6 +1208,20 @@ export const api = {
         timeoutMs: 300_000,
         source: "finance",
       }),
+  },
+
+  /** 電子發票 (ezPay) — Phase 1 exposes only buyer-profile CRUD; issue /
+   *  void / allowance land in later phases. All routes are admin-gated. */
+  einvoice: {
+    listBuyers: () => request<{ data: InvoiceBuyer[] }>("GET", "/api/invoice-buyers"),
+    upsertBuyer: (store: string, body: InvoiceBuyerInput) =>
+      request<{ ok: boolean; data: InvoiceBuyer }>(
+        "POST",
+        `/api/invoice-buyers/${encodeURIComponent(store)}`,
+        { body },
+      ),
+    removeBuyer: (store: string) =>
+      request<{ ok: boolean }>("DELETE", `/api/invoice-buyers/${encodeURIComponent(store)}`),
   },
 
   nicknames: {
