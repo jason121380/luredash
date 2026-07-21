@@ -86,6 +86,22 @@ export interface IssuedInvoiceResult {
   mock: boolean;
 }
 
+/** A row in 開立紀錄 (list view — no raw PII payloads). */
+export interface EInvoiceRecord {
+  id: string;
+  store: string;
+  category: InvoiceCategory;
+  buyer_name: string;
+  buyer_tax_id: string;
+  total_amt: number;
+  invoice_number: string | null;
+  random_number: string | null;
+  status: "issued" | "void" | "allowance";
+  period: string | null;
+  campaign_id: string | null;
+  created_at: string | null;
+}
+
 export interface LinePushConfig {
   id: string;
   campaign_id: string;
@@ -1251,6 +1267,14 @@ export const api = {
       request<{ ok: boolean }>("DELETE", `/api/invoice-buyers/${encodeURIComponent(store)}`),
     issue: (body: IssueInvoiceInput) =>
       request<IssuedInvoiceResult>("POST", "/api/einvoice/issue", { body }),
+    list: (params?: { store?: string; status?: string; period?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.store) qs.set("store", params.store);
+      if (params?.status) qs.set("status", params.status);
+      if (params?.period) qs.set("period", params.period);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request<{ total: number; data: EInvoiceRecord[] }>("GET", `/api/einvoices${suffix}`);
+    },
   },
 
   nicknames: {
