@@ -616,7 +616,7 @@ function RecordsTab() {
                   <th className="px-2 py-2">發票號碼</th>
                   <th className="px-2 py-2">買方 / 店家</th>
                   <th className="px-2 py-2">類型</th>
-                  <th className="px-2 py-2 text-right">金額</th>
+                  <th className="px-2 py-2 text-right">花費</th>
                   <th className="px-2 py-2 text-right">發票金額</th>
                   <th className="px-3 py-2 md:px-5">狀態</th>
                 </tr>
@@ -641,9 +641,7 @@ function RecordsTab() {
                       </td>
                       <td className="px-2 py-2 text-gray-500">{r.category}</td>
                       <td className="px-2 py-2 text-right tabular-nums text-ink">
-                        {r.spend != null && r.markup_percent != null
-                          ? money(spendPlus(r.spend, r.markup_percent))
-                          : "—"}
+                        {r.spend != null ? money(r.spend) : "—"}
                       </td>
                       <td className="px-2 py-2 text-right font-bold tabular-nums text-orange">
                         {money(r.total_amt)}
