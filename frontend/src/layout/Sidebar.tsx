@@ -218,6 +218,24 @@ const ICON_CARD = (
     <line x1="2" y1="10" x2="22" y2="10" />
   </svg>
 );
+const ICON_INVOICE = (
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M6 2h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+    <path d="M14 2v6h6" />
+    <line x1="8" y1="13" x2="16" y2="13" />
+    <line x1="8" y1="17" x2="13" y2="17" />
+  </svg>
+);
 const ICON_TERMINAL = (
   <svg
     width="16"
@@ -300,6 +318,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: "/finance", label: "費用中心", icon: ICON_DOLLAR },
       { to: "/store-expenses", label: "店家花費", icon: ICON_STORE },
       { to: "/history", label: "歷史花費", icon: ICON_HISTORY },
+      { to: "/e-invoice", label: "電子發票", icon: ICON_INVOICE },
     ],
   },
   {

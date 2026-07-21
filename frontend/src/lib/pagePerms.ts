@@ -17,6 +17,7 @@ export const GATED_PAGES: GatedPage[] = [
   { key: "/finance", label: "費用中心" },
   { key: "/store-expenses", label: "店家花費" },
   { key: "/history", label: "歷史花費" },
+  { key: "/e-invoice", label: "電子發票" },
   { key: "/settings", label: "廣告帳號" },
   { key: "/line-push", label: "LINE 推播" },
   { key: "/billing", label: "我的訂閱" },
