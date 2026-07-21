@@ -1651,17 +1651,25 @@ function FbCallsPanel() {
             )}
           </div>
 
-          {/* Throttle 事件全紀錄 (durable, 不只 5 分鐘) */}
-          {data.throttle_events.length > 0 && (
-            <div className="mt-3">
-              <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
-                <h3 className="text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
-                  限流事件全紀錄
-                </h3>
+          {/* Throttle 事件全紀錄 (durable, 不只 5 分鐘) — 永遠顯示,空的時候
+              給提示,讓 operator 知道它在哪、確認在運作 */}
+          <div className="mt-3">
+            <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
+                限流事件全紀錄
+              </h3>
+              {data.throttle_events.length > 0 && (
                 <span className="text-[11px] text-gray-400">
                   共 {data.throttle_total} 筆(顯示最新 {data.throttle_events.length} 筆,含歷史)
                 </span>
+              )}
+            </div>
+            {data.throttle_events.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-border bg-bg px-3 py-2 text-[12px] text-gray-400">
+                目前尚無限流事件。當帳戶級(80000-80014)或全域(4/17/32/613)FB rate limit
+                發生時,會永久記錄於此(跨重啟、跨裝置皆可查)。畫面上的 參數錯誤(code 100)不算限流。
               </div>
+            ) : (
               <ul className="flex max-h-[360px] flex-col gap-0.5 overflow-y-auto text-[12px]">
                 {data.throttle_events.map((ev, idx) => {
                   const nm = nameFor(ev.account_id);
@@ -1737,8 +1745,8 @@ function FbCallsPanel() {
                   );
                 })}
               </ul>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* Recent calls table */}
           <div className="mt-3">
