@@ -56,3 +56,11 @@ export function useIssueInvoice() {
     },
   });
 }
+
+export function useEInvoices(params?: { store?: string; status?: string; period?: string }) {
+  return useQuery({
+    queryKey: ["einvoices", params ?? {}],
+    queryFn: () => api.einvoice.list(params),
+    staleTime: 30_000,
+  });
+}

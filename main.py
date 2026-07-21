@@ -4588,6 +4588,69 @@ async def issue_einvoice(payload: IssueInvoicePayload):
     }
 
 
+@app.get("/api/einvoices")
+async def list_einvoices(
+    store: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    period: Optional[str] = Query(None),
+    limit: int = Query(100),
+    offset: int = Query(0),
+):
+    """開立紀錄 list. Admin-gated. Never returns the raw_request /
+    raw_response payloads (buyer PII) — those are only in the per-id
+    detail endpoint (later)."""
+    _require_admin()
+    pool = _require_db()
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    conds = []
+    args: list = []
+    if store:
+        args.append(store)
+        conds.append(f"store = ${len(args)}")
+    if status:
+        args.append(status)
+        conds.append(f"status = ${len(args)}")
+    if period:
+        args.append(period)
+        conds.append(f"period = ${len(args)}")
+    where = f"WHERE {' AND '.join(conds)}" if conds else ""
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(f"SELECT count(*) FROM einvoices {where}", *args)
+        rows = await conn.fetch(
+            f"""
+            SELECT id, store, category, buyer_name, buyer_tax_id, total_amt,
+                   invoice_number, random_number, status, period, campaign_id,
+                   created_at
+            FROM einvoices
+            {where}
+            ORDER BY created_at DESC
+            LIMIT {limit} OFFSET {offset}
+            """,
+            *args,
+        )
+    return {
+        "total": int(total or 0),
+        "data": [
+            {
+                "id": str(r["id"]),
+                "store": r["store"],
+                "category": r["category"],
+                "buyer_name": r["buyer_name"],
+                "buyer_tax_id": r["buyer_tax_id"],
+                "total_amt": r["total_amt"],
+                "invoice_number": r["invoice_number"],
+                "random_number": r["random_number"],
+                "status": r["status"],
+                "period": r["period"],
+                "campaign_id": r["campaign_id"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ],
+    }
+
+
 # ── Settings (PostgreSQL-backed) ──────────────────────────────────────
 #
 # Two scopes:
