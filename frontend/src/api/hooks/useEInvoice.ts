@@ -1,4 +1,9 @@
-import { type InvoiceBuyer, type InvoiceBuyerInput, api } from "@/api/client";
+import {
+  type InvoiceBuyer,
+  type InvoiceBuyerInput,
+  type IssueInvoiceInput,
+  api,
+} from "@/api/client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 /**
@@ -38,6 +43,16 @@ export function useDeleteInvoiceBuyer() {
     mutationFn: (store: string) => api.einvoice.removeBuyer(store),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: BUYERS_KEY });
+    },
+  });
+}
+
+export function useIssueInvoice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: IssueInvoiceInput) => api.einvoice.issue(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["einvoices"] });
     },
   });
 }

@@ -24,6 +24,9 @@ from pydantic import BaseModel
 
 import asyncpg
 
+import uuid
+
+import ezpay_client
 import line_client
 
 load_dotenv()
@@ -1288,10 +1291,29 @@ async def lifespan(app: FastAPI):
                         raw_request       JSONB NOT NULL DEFAULT '{}'::jsonb,
                         raw_response      JSONB NOT NULL DEFAULT '{}'::jsonb,
                         created_by        TEXT,
-                        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        account_id        TEXT,
+                        campaign_id       TEXT,
+                        period            TEXT,
+                        spend             INT,
+                        markup_percent    NUMERIC
                     )
                     """
                 )
+                # Additive columns for DBs created before the 開立發票
+                # flow (Phase 1 shipped einvoices without these). Records
+                # which campaign / month / spend the invoice was issued
+                # against — feeds the cost-center invoice-number hook.
+                for _col, _type in (
+                    ("account_id", "TEXT"),
+                    ("campaign_id", "TEXT"),
+                    ("period", "TEXT"),
+                    ("spend", "INT"),
+                    ("markup_percent", "NUMERIC"),
+                ):
+                    await conn.execute(
+                        f"ALTER TABLE einvoices ADD COLUMN IF NOT EXISTS {_col} {_type}"
+                    )
                 await conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_einvoices_store ON einvoices (store, created_at DESC)"
                 )
@@ -4417,6 +4439,153 @@ async def delete_invoice_buyer(store: str):
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM invoice_buyers WHERE store = $1", (store or "").strip())
     return {"ok": True}
+
+
+# ── 電子發票 開立 (Phase 2) ───────────────────────────────────────────
+#
+# 手動開立 from the 開立發票 tab: the frontend reuses the 費用中心 numbers
+# (花費 / % / 花費+%) — the operator picks a campaign, and 花費+% (the
+# store bill, ceil(spend × (1+markup/100))) becomes the invoice 含稅總額.
+# 應稅 5%: Amt = round(TotalAmt/1.05), TaxAmt = TotalAmt - Amt (subtract,
+# never independently round, or ezPay rejects Amt+TaxAmt != TotalAmt).
+# 個人 (B2C) = 雲端發票 (no buyer fields); 統編 (B2B) = 統編 + 抬頭.
+
+
+class IssueInvoicePayload(BaseModel):
+    category: str                      # B2B | B2C
+    total_amt: int                     # 花費+% 含稅總額
+    item_name: str = "廣告行銷"
+    # buyer (B2B only; B2C 雲端發票 needs nothing)
+    buyer_name: str = ""
+    tax_id: str = ""
+    email: str = ""
+    # provenance (for the record + the cost-center hook)
+    store: str = ""
+    account_id: str = ""
+    campaign_id: str = ""
+    period: str = ""                   # YYYY-MM
+    spend: Optional[int] = None
+    markup_percent: Optional[float] = None
+
+
+def _gen_merchant_order_no() -> str:
+    # ezPay MerchantOrderNo: ≤20 alnum. "EI" + 16 hex = 18 chars. The
+    # DB UNIQUE constraint is the real dup guard.
+    return f"EI{uuid.uuid4().hex[:16]}"
+
+
+@app.post("/api/einvoice/issue")
+async def issue_einvoice(payload: IssueInvoicePayload):
+    uid = _require_admin()
+    pool = _require_db()
+    if _http_client is None:
+        raise HTTPException(status_code=503, detail="HTTP client 尚未就緒")
+
+    category = "B2B" if (payload.category or "").upper() == "B2B" else "B2C"
+    total = int(payload.total_amt or 0)
+    if total <= 0:
+        raise HTTPException(status_code=400, detail="發票金額必須大於 0")
+    item_name = (payload.item_name or "").strip() or "廣告行銷"
+
+    tax_id = (payload.tax_id or "").strip()
+    buyer_name = (payload.buyer_name or "").strip()
+    email = (payload.email or "").strip()
+    if category == "B2B":
+        if not _valid_tw_tax_id(tax_id):
+            raise HTTPException(status_code=400, detail="統一編號格式錯誤(需 8 碼且通過檢查碼)")
+        if not buyer_name:
+            raise HTTPException(status_code=400, detail="B2B 需填寫公司抬頭")
+        print_flag = "Y"
+    else:
+        # B2C 雲端發票 — no carrier / no 統編; ezPay stores it in the
+        # cloud (買方載具 = the merchant's default). PrintFlag N.
+        tax_id = ""
+        print_flag = "N"
+
+    # 應稅 5%: derive TaxAmt by subtraction.
+    amt = round(total / 1.05)
+    tax_amt = total - amt
+    # B2C item price/amt are tax-INCLUSIVE (= TotalAmt); B2B are
+    # tax-EXCLUSIVE (= Amt).
+    item_amt = total if category == "B2C" else amt
+    items = [{"name": item_name, "count": 1, "unit": "式", "price": item_amt, "amt": item_amt}]
+
+    order_no = _gen_merchant_order_no()
+    ts = int(time.time())
+
+    ezpay_params = {
+        "MerchantOrderNo": order_no,
+        "Status": "1",
+        "Category": category,
+        "BuyerName": buyer_name or ("個人" if category == "B2C" else ""),
+        "BuyerUBN": tax_id if category == "B2B" else "",
+        "BuyerEmail": email,
+        "PrintFlag": print_flag,
+        "TaxType": "1",
+        "TaxRate": "5",
+        "Amt": str(amt),
+        "TaxAmt": str(tax_amt),
+        "TotalAmt": str(total),
+        "ItemName": item_name,
+        "ItemCount": "1",
+        "ItemUnit": "式",
+        "ItemPrice": str(item_amt),
+        "ItemAmt": str(item_amt),
+    }
+
+    try:
+        result = await ezpay_client.issue_invoice(
+            _http_client,
+            base=EZPAY_API_BASE,
+            merchant_id=EZPAY_MERCHANT_ID,
+            hash_key=EZPAY_HASH_KEY,
+            hash_iv=EZPAY_HASH_IV,
+            params=ezpay_params,
+            timestamp=ts,
+            mock=EZPAY_MOCK,
+        )
+    except ezpay_client.EzpayError as e:
+        raise HTTPException(status_code=502, detail=e.friendly_message) from e
+
+    invoice_number = str(result.get("InvoiceNumber") or "") or None
+    random_number = str(result.get("RandomNum") or "") or None
+    invoice_trans_no = str(result.get("InvoiceTransNo") or "") or None
+    check_code = str(result.get("CheckCode") or "") or None
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO einvoices (
+                store, category, buyer_name, buyer_tax_id, buyer_email,
+                print_flag, tax_type, tax_rate, amt, tax_amt, total_amt,
+                items, merchant_order_no, invoice_number, random_number,
+                invoice_trans_no, check_code, status,
+                raw_request, raw_response, created_by,
+                account_id, campaign_id, period, spend, markup_percent
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,
+                    $16,$17,'issued',$18::jsonb,$19::jsonb,$20,$21,$22,$23,$24,$25)
+            RETURNING id, invoice_number, random_number, total_amt, status, created_at
+            """,
+            payload.store.strip(), category, buyer_name, tax_id, email,
+            print_flag, "1", 5, amt, tax_amt, total,
+            _json.dumps(items), order_no, invoice_number, random_number,
+            invoice_trans_no, check_code,
+            _json.dumps(ezpay_params), _json.dumps(result), uid,
+            payload.account_id.strip() or None, payload.campaign_id.strip() or None,
+            payload.period.strip() or None,
+            int(payload.spend) if payload.spend is not None else None,
+            payload.markup_percent,
+        )
+    return {
+        "ok": True,
+        "id": str(row["id"]),
+        "invoice_number": row["invoice_number"],
+        "random_number": row["random_number"],
+        "total_amt": row["total_amt"],
+        "status": row["status"],
+        "mock": bool(result.get("_mock")),
+    }
 
 
 # ── Settings (PostgreSQL-backed) ──────────────────────────────────────
