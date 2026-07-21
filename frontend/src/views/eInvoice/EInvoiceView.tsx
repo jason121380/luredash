@@ -424,7 +424,7 @@ function IssueTab({ month }: { month: string }) {
                       <td className="px-2 py-2 text-right tabular-nums text-gray-400">
                         {r.markup}%
                       </td>
-                      <td className="px-2 py-2 text-right font-semibold text-orange tabular-nums">
+                      <td className="px-2 py-2 text-right tabular-nums text-ink">
                         {money(r.plus)}
                       </td>
                       <td className="px-2 py-2 text-right font-bold text-orange tabular-nums">
