@@ -10,12 +10,14 @@ import { Toggle } from "@/components/Toggle";
 import type { DateConfig } from "@/lib/datePicker";
 import { fM, fN, fP } from "@/lib/format";
 import { getIns, getMsgCount } from "@/lib/insights";
+import { useFinanceStore } from "@/stores/financeStore";
 import { useUiStore } from "@/stores/uiStore";
 import type { FbCampaign, FbEntityStatus } from "@/types/fb";
+import { markupFor } from "@/views/finance/financeData";
 import { memo, useEffect, useState } from "react";
 import { AdsetRow } from "./AdsetRow";
 import type { BudgetModalTarget } from "./BudgetModal";
-import { ExtraTreeCells } from "./ExtraTreeCells";
+import { ExtraTreeCells, SpendPlusCell } from "./ExtraTreeCells";
 import { ReportModal } from "./ReportModal";
 
 export interface CampaignRowProps {
@@ -65,6 +67,11 @@ function CampaignRowInner({
     setPendingStatus(null);
   }, [campaign.status]);
   const displayStatus = pendingStatus ?? campaign.status;
+
+  const rowMarkups = useFinanceStore((s) => s.rowMarkups);
+  const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
+  const markupPercent = markupFor(campaign.id, rowMarkups, defaultMarkup);
+  const showSpendPlus = extras.includes("spend_plus");
 
   const ins = getIns(campaign);
   const msgs = getMsgCount(campaign);
@@ -133,6 +140,7 @@ function CampaignRowInner({
           <Badge status={displayStatus} />
         </td>
         <td className="num">{fM(ins.spend)}</td>
+        <SpendPlusCell show={showSpendPlus} spend={spend} markupPercent={markupPercent} />
         <td className="num">{fN(ins.impressions)}</td>
         <td className="num">{fN(ins.clicks)}</td>
         <td className="num">{fP(ins.ctr)}</td>
@@ -212,6 +220,7 @@ function CampaignRowInner({
           onOpenBudget={onOpenBudget}
           campaignName={campaign.name}
           extras={extras}
+          campaignMarkup={markupPercent}
         />
       )}
     </>
@@ -228,6 +237,7 @@ function CampaignAdsets({
   onOpenBudget,
   campaignName,
   extras,
+  campaignMarkup,
 }: {
   query: ReturnType<typeof useAdsets>;
   colCount: number;
@@ -236,6 +246,7 @@ function CampaignAdsets({
   onOpenBudget: (target: BudgetModalTarget) => void;
   campaignName: string;
   extras: string[];
+  campaignMarkup: number;
 }) {
   if (query.isLoading || query.isPending) {
     return (
@@ -281,6 +292,7 @@ function CampaignAdsets({
           onOpenBudget={onOpenBudget}
           campaignName={campaignName}
           extras={extras}
+          campaignMarkup={campaignMarkup}
         />
       ))}
     </>

@@ -14,7 +14,7 @@ import type { FbAdset, FbEntityStatus } from "@/types/fb";
 import { memo, useEffect, useState } from "react";
 import type { BudgetModalTarget } from "./BudgetModal";
 import { CreativeRow } from "./CreativeRow";
-import { ExtraTreeCells } from "./ExtraTreeCells";
+import { ExtraTreeCells, SpendPlusCell } from "./ExtraTreeCells";
 
 export interface AdsetRowProps {
   adset: FbAdset;
@@ -26,6 +26,9 @@ export interface AdsetRowProps {
    *  downloaded files inherit the parent campaign's name. */
   campaignName?: string;
   extras: string[];
+  /** Parent campaign's markup % — used to render the 花費+% cell at
+   *  adset/ad level (FB adsets/ads carry no markup of their own). */
+  campaignMarkup: number;
 }
 
 /**
@@ -49,7 +52,9 @@ function AdsetRowInner({
   onOpenBudget,
   campaignName,
   extras,
+  campaignMarkup,
 }: AdsetRowProps) {
+  const showSpendPlus = extras.includes("spend_plus");
   const expanded = useUiStore((s) => s.expandedAdsets.includes(adset.id));
   const toggleAdset = useUiStore((s) => s.toggleAdset);
   const creativesQuery = useCreatives(adset.id, date, expanded);
@@ -115,6 +120,7 @@ function AdsetRowInner({
           <Badge status={displayStatus} />
         </td>
         <td className="num">{fM(ins.spend)}</td>
+        <SpendPlusCell show={showSpendPlus} spend={spend} markupPercent={campaignMarkup} />
         <td className="num">{fN(ins.impressions)}</td>
         <td className="num">{fN(ins.clicks)}</td>
         <td className="num">{fP(ins.ctr)}</td>
@@ -164,6 +170,7 @@ function AdsetRowInner({
           multiAcct={multiAcct}
           campaignName={campaignName}
           extras={extras}
+          campaignMarkup={campaignMarkup}
         />
       )}
     </>
@@ -178,12 +185,14 @@ function AdsetCreatives({
   multiAcct,
   campaignName,
   extras,
+  campaignMarkup,
 }: {
   query: ReturnType<typeof useCreatives>;
   colCount: number;
   multiAcct: boolean;
   campaignName?: string;
   extras: string[];
+  campaignMarkup: number;
 }) {
   if (query.isLoading || query.isPending) {
     return (
@@ -238,6 +247,7 @@ function AdsetCreatives({
           multiAcct={multiAcct}
           campaignName={campaignName}
           extras={extras}
+          spendPlusMarkup={campaignMarkup}
         />
       ))}
     </>

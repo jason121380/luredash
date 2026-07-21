@@ -6,8 +6,10 @@ import type { DateConfig } from "@/lib/datePicker";
 import { isFrontPostCreative } from "@/lib/fbLinks";
 import { fM, fN } from "@/lib/format";
 import { getIns, getMsgCount } from "@/lib/insights";
+import { useFinanceStore } from "@/stores/financeStore";
 import { useUiStore } from "@/stores/uiStore";
 import type { FbAdset, FbCreativeEntity } from "@/types/fb";
+import { spendPlus } from "@/views/finance/financeData";
 import { useQueries } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { CreativeRow } from "./CreativeRow";
@@ -54,6 +56,8 @@ export function ComparisonTable({
   const setTreeSort = useUiStore((s) => s.setTreeSort);
 
   const extraTreeCols = useUiStore((s) => s.extraTreeCols);
+  const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
+  const showSpendPlus = extraTreeCols.includes("spend_plus");
   const cols = useMemo(() => buildTreeCols(multiAcct, extraTreeCols), [multiAcct, extraTreeCols]);
 
   // Subscribe to the adsets queries for every currently-expanded
@@ -197,6 +201,12 @@ export function ComparisonTable({
   const totalMsgSpend = sorted
     .filter((c) => getMsgCount(c) > 0)
     .reduce((s, c) => s + (Number(getIns(c).spend) || 0), 0);
+  // Flat view has no per-creative campaign context → apply the team
+  // default markup uniformly (same fallback the rows use).
+  const totalSpendPlus = sorted.reduce(
+    (s, c) => s + spendPlus(Number(getIns(c).spend) || 0, defaultMarkup),
+    0,
+  );
 
   return (
     <table className="tree w-full border-collapse text-[13px]">
@@ -219,6 +229,7 @@ export function ComparisonTable({
             creative={creative}
             multiAcct={multiAcct}
             extras={extraTreeCols}
+            spendPlusMarkup={defaultMarkup}
           />
         ))}
         <tr className="border-t border-border bg-bg">
@@ -227,6 +238,9 @@ export function ComparisonTable({
           </td>
           <td />
           <td className="num text-[13px] font-bold">${fM(totalSpend)}</td>
+          {showSpendPlus && (
+            <td className="num text-[13px] font-bold text-orange">${fM(totalSpendPlus)}</td>
+          )}
           <td />
           <td />
           <td />

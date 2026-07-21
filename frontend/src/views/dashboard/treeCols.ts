@@ -69,6 +69,7 @@ export type TreeColKey =
   | "account"
   | "status"
   | "spend"
+  | "spend_plus"
   | "impressions"
   | "clicks"
   | "ctr"
@@ -96,6 +97,11 @@ export interface TreeCol {
  * Order here = order they appear in the table when enabled.
  * Default-off — empty extras list keeps the legacy 11-column layout. */
 export const EXTRA_TREE_COLS: { key: TreeColKey; label: string }[] = [
+  // 花費+% is special: it renders IMMEDIATELY after the 花費 column
+  // (not in the trailing extras block) and needs the campaign markup
+  // %, so buildTreeCols / the row components handle it out-of-band.
+  // Listed here only so it appears as a checkbox in the column picker.
+  { key: "spend_plus", label: "花費+%" },
   { key: "link_clicks", label: "連結點擊" },
   { key: "cost_per_link_click", label: "連結點擊成本" },
   { key: "add_to_cart", label: "加入購物車" },
@@ -132,9 +138,19 @@ export function buildTreeCols(multiAcct: boolean, extras: string[] = []): TreeCo
   if (multiAcct) {
     cols.push({ key: "account", label: "帳戶" });
   }
+  const enabled = new Set(extras);
   cols.push(
     { key: "status", label: "狀態", sortKey: (i) => statusRank(i.status) },
     { key: "spend", label: "花費", sortKey: (i) => Number(getIns(i).spend) || 0 },
+  );
+  // 花費+% sits right after 花費. Non-sortable: the value depends on the
+  // per-campaign markup %, which the entity-only sortKey signature can't
+  // resolve — sorting by raw 花費 (its proxy) would be misleading when
+  // campaigns carry different markups, so we leave the header static.
+  if (enabled.has("spend_plus")) {
+    cols.push({ key: "spend_plus", label: "花費+%" });
+  }
+  cols.push(
     { key: "impressions", label: "曝光", sortKey: (i) => Number(getIns(i).impressions) || 0 },
     { key: "clicks", label: "點擊", sortKey: (i) => Number(getIns(i).clicks) || 0 },
     { key: "ctr", label: "CTR", sortKey: (i) => Number(getIns(i).ctr) || 0 },
@@ -152,9 +168,10 @@ export function buildTreeCols(multiAcct: boolean, extras: string[] = []): TreeCo
   );
   // Insert opt-in extras AFTER msgcost, BEFORE budget/actions, in the
   // order defined by EXTRA_TREE_COLS (so the picker order is stable
-  // regardless of the order the user clicked checkboxes).
-  const enabled = new Set(extras);
+  // regardless of the order the user clicked checkboxes). spend_plus is
+  // skipped here — it was already inserted right after 花費 above.
   for (const extra of EXTRA_TREE_COLS) {
+    if (extra.key === "spend_plus") continue;
     if (!enabled.has(extra.key)) continue;
     cols.push({
       key: extra.key,

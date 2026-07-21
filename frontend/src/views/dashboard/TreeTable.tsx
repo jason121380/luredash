@@ -1,15 +1,11 @@
 import { cn } from "@/lib/cn";
 import type { DateConfig } from "@/lib/datePicker";
 import { fM, fN } from "@/lib/format";
-import {
-  getAtcCount,
-  getIns,
-  getLinkClicks,
-  getMsgCount,
-  getPurchaseCount,
-} from "@/lib/insights";
+import { getAtcCount, getIns, getLinkClicks, getMsgCount, getPurchaseCount } from "@/lib/insights";
+import { useFinanceStore } from "@/stores/financeStore";
 import { useUiStore } from "@/stores/uiStore";
 import type { FbCampaign } from "@/types/fb";
+import { markupFor, spendPlus } from "@/views/finance/financeData";
 import { useMemo } from "react";
 import type { BudgetModalTarget } from "./BudgetModal";
 import { CampaignRow } from "./CampaignRow";
@@ -44,11 +40,11 @@ export function TreeTable({
   const treeSort = useUiStore((s) => s.treeSort);
   const setTreeSort = useUiStore((s) => s.setTreeSort);
   const extraTreeCols = useUiStore((s) => s.extraTreeCols);
+  const rowMarkups = useFinanceStore((s) => s.rowMarkups);
+  const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
+  const showSpendPlus = extraTreeCols.includes("spend_plus");
 
-  const cols = useMemo(
-    () => buildTreeCols(multiAcct, extraTreeCols),
-    [multiAcct, extraTreeCols],
-  );
+  const cols = useMemo(() => buildTreeCols(multiAcct, extraTreeCols), [multiAcct, extraTreeCols]);
 
   const filtered = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
@@ -83,6 +79,13 @@ export function TreeTable({
   const totalLinkClicks = sorted.reduce((s, c) => s + getLinkClicks(c), 0);
   const totalAtc = sorted.reduce((s, c) => s + getAtcCount(c), 0);
   const totalPurchases = sorted.reduce((s, c) => s + getPurchaseCount(c), 0);
+  // 花費+% total — sum each campaign's spend+markup individually so the
+  // per-campaign markup overrides are respected (matches 費用中心).
+  const totalSpendPlus = sorted.reduce(
+    (s, c) =>
+      s + spendPlus(Number(getIns(c).spend) || 0, markupFor(c.id, rowMarkups, defaultMarkup)),
+    0,
+  );
 
   return (
     <table className="tree w-full border-collapse text-[13px]">
@@ -113,6 +116,9 @@ export function TreeTable({
           </td>
           <td />
           <td className="num text-[13px] font-bold">${fM(totalSpend)}</td>
+          {showSpendPlus && (
+            <td className="num text-[13px] font-bold text-orange">${fM(totalSpendPlus)}</td>
+          )}
           <td />
           <td />
           <td />
@@ -121,11 +127,13 @@ export function TreeTable({
           <td className="num text-[13px] font-bold">
             {totalMsgs > 0 ? `$${fM(totalMsgSpend / totalMsgs)}` : "—"}
           </td>
-          {extraTreeCols.map((code) => (
-            <td key={code} className="num text-[13px] font-bold">
-              {totalsCellFor(code, { totalLinkClicks, totalAtc, totalPurchases })}
-            </td>
-          ))}
+          {extraTreeCols.map((code) =>
+            code === "spend_plus" ? null : (
+              <td key={code} className="num text-[13px] font-bold">
+                {totalsCellFor(code, { totalLinkClicks, totalAtc, totalPurchases })}
+              </td>
+            ),
+          )}
           <td colSpan={2} />
         </tr>
       </tbody>

@@ -9,8 +9,28 @@ import {
   getRoas,
 } from "@/lib/insights";
 import type { FbBaseEntity } from "@/types/fb";
+import { spendPlus } from "@/views/finance/financeData";
 import { Fragment } from "react";
 import type { TreeColKey } from "./treeCols";
+
+/**
+ * 花費+% cell — spend × (1 + markup/100), orange + bold. Rendered
+ * immediately after the 花費 column (out-of-band from the trailing
+ * extras) because it needs the campaign markup %. Renders nothing when
+ * the column isn't enabled so header/body column counts stay aligned.
+ */
+export function SpendPlusCell({
+  show,
+  spend,
+  markupPercent,
+}: {
+  show: boolean;
+  spend: number;
+  markupPercent: number;
+}) {
+  if (!show) return null;
+  return <td className="num font-bold text-orange">{`$${fM(spendPlus(spend, markupPercent))}`}</td>;
+}
 
 /**
  * Render the optionally-visible e-commerce KPI cells in the order
@@ -36,6 +56,10 @@ export function ExtraTreeCells({
 
 function renderCell(code: TreeColKey, entity: FbBaseEntity) {
   switch (code) {
+    // Rendered separately right after 花費 (see SpendPlusCell) — skip
+    // here so it isn't duplicated in the trailing extras block.
+    case "spend_plus":
+      return null;
     case "link_clicks": {
       const v = getLinkClicks(entity);
       return <td className="num">{v > 0 ? fN(v) : "—"}</td>;
