@@ -336,7 +336,7 @@ function IssueTab({ month }: { month: string }) {
                           const label = formatNickname({ store: r.store, designer: r.designer });
                           return (
                             <>
-                              <div className="max-w-[280px] truncate font-semibold text-ink">
+                              <div className="max-w-[280px] truncate font-medium text-ink">
                                 {label ?? r.name}
                               </div>
                               {label && (
