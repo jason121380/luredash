@@ -66,6 +66,16 @@ export function useEInvoices(params?: { store?: string; status?: string; period?
   });
 }
 
+export function useDeleteEInvoice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.einvoice.remove(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["einvoices"] });
+    },
+  });
+}
+
 const DRAFTS_KEY = ["einvoice-drafts"] as const;
 
 export function useEInvoiceDrafts() {

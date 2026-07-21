@@ -1,7 +1,8 @@
-import type { EInvoiceDraft, InvoiceCategory } from "@/api/client";
+import type { EInvoiceDraft, EInvoiceRecord, InvoiceCategory } from "@/api/client";
 import { friendlyApiError } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import {
+  useDeleteEInvoice,
   useEInvoiceDrafts,
   useEInvoices,
   useIssueInvoice,
@@ -203,6 +204,8 @@ function monthToDate(ym: string): DateConfig {
  *  independent of the per-campaign 月% (which is the internal store bill). */
 const INVOICE_MARKUP = 5;
 
+type SortKey = "name" | "status" | "spend" | "markup" | "plus" | "invoice";
+
 interface IssueRow {
   campaignId: string;
   accountId: string;
@@ -236,6 +239,18 @@ function IssueTab({ month }: { month: string }) {
   const [selectedAcct, setSelectedAcct] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [issuing, setIssuing] = useState<IssueRow | null>(null);
+  const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({
+    key: "invoice",
+    dir: "desc",
+  });
+
+  const toggleSort = (k: SortKey) =>
+    setSort((s) =>
+      s.key === k
+        ? { key: k, dir: s.dir === "asc" ? "desc" : "asc" }
+        : { key: k, dir: k === "name" || k === "status" ? "asc" : "desc" },
+    );
+  const arrow = (k: SortKey) => (sort.key === k ? (sort.dir === "asc" ? " ▲" : " ▼") : "");
 
   const accountRows = useMemo(
     () =>
@@ -275,8 +290,33 @@ function IssueTab({ month }: { month: string }) {
         invoiceAmt: spendPlus(spend, INVOICE_MARKUP),
       });
     }
-    return out.sort((a, b) => b.plus - a.plus);
-  }, [overview.campaigns, selectedAcct, rowMarkups, defaultMarkup, nicknames.data, search]);
+    const valOf = (r: IssueRow): string | number => {
+      switch (sort.key) {
+        case "name":
+          return formatNickname({ store: r.store, designer: r.designer }) ?? r.name;
+        case "status":
+          return r.status;
+        case "spend":
+          return r.spend;
+        case "markup":
+          return r.markup;
+        case "plus":
+          return r.plus;
+        default:
+          return r.invoiceAmt;
+      }
+    };
+    out.sort((a, b) => {
+      const va = valOf(a);
+      const vb = valOf(b);
+      const cmp =
+        typeof va === "string" && typeof vb === "string"
+          ? va.localeCompare(vb, "zh-Hant")
+          : (va as number) - (vb as number);
+      return sort.dir === "asc" ? cmp : -cmp;
+    });
+    return out;
+  }, [overview.campaigns, selectedAcct, rowMarkups, defaultMarkup, nicknames.data, search, sort]);
 
   const money = (v: number) => `$${fM(v)}`;
 
@@ -313,12 +353,42 @@ function IssueTab({ month }: { month: string }) {
                 <thead>
                   <tr className="border-border border-b bg-bg text-left text-[11px] font-semibold text-gray-400">
                     <th className="px-3 py-2 md:px-5">No.</th>
-                    <th className="px-2 py-2">狀態</th>
-                    <th className="px-2 py-2">行銷活動名稱</th>
-                    <th className="px-2 py-2 text-right">花費</th>
-                    <th className="px-2 py-2 text-right">月%</th>
-                    <th className="px-2 py-2 text-right">花費+%</th>
-                    <th className="px-2 py-2 text-right">發票金額</th>
+                    <th
+                      className="cursor-pointer select-none px-2 py-2 hover:text-orange"
+                      onClick={() => toggleSort("status")}
+                    >
+                      狀態{arrow("status")}
+                    </th>
+                    <th
+                      className="cursor-pointer select-none px-2 py-2 hover:text-orange"
+                      onClick={() => toggleSort("name")}
+                    >
+                      行銷活動名稱{arrow("name")}
+                    </th>
+                    <th
+                      className="cursor-pointer select-none px-2 py-2 text-right hover:text-orange"
+                      onClick={() => toggleSort("spend")}
+                    >
+                      花費{arrow("spend")}
+                    </th>
+                    <th
+                      className="cursor-pointer select-none px-2 py-2 text-right hover:text-orange"
+                      onClick={() => toggleSort("markup")}
+                    >
+                      月%{arrow("markup")}
+                    </th>
+                    <th
+                      className="cursor-pointer select-none px-2 py-2 text-right hover:text-orange"
+                      onClick={() => toggleSort("plus")}
+                    >
+                      花費+%{arrow("plus")}
+                    </th>
+                    <th
+                      className="cursor-pointer select-none px-2 py-2 text-right hover:text-orange"
+                      onClick={() => toggleSort("invoice")}
+                    >
+                      發票金額{arrow("invoice")}
+                    </th>
                     <th className="px-3 py-2 text-right md:px-5" />
                   </tr>
                 </thead>
@@ -586,7 +656,9 @@ const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
 
 function RecordsTab() {
   const q = useEInvoices();
+  const del = useDeleteEInvoice();
   const rows = q.data?.data ?? [];
+  const [deleting, setDeleting] = useState<EInvoiceRecord | null>(null);
   const money = (v: number) => `$${fM(v)}`;
   const fmtTime = (iso: string | null) => {
     if (!iso) return "—";
@@ -618,7 +690,8 @@ function RecordsTab() {
                   <th className="px-2 py-2">類型</th>
                   <th className="px-2 py-2 text-right">花費</th>
                   <th className="px-2 py-2 text-right">發票金額</th>
-                  <th className="px-3 py-2 md:px-5">狀態</th>
+                  <th className="px-2 py-2">狀態</th>
+                  <th className="px-3 py-2 text-right md:px-5" />
                 </tr>
               </thead>
               <tbody>
@@ -646,7 +719,7 @@ function RecordsTab() {
                       <td className="px-2 py-2 text-right font-bold tabular-nums text-orange">
                         {money(r.total_amt)}
                       </td>
-                      <td className="px-3 py-2 md:px-5">
+                      <td className="px-2 py-2">
                         <span
                           className={cn(
                             "rounded-full px-2 py-[2px] text-[11px] font-semibold",
@@ -656,6 +729,15 @@ function RecordsTab() {
                           {st.label}
                         </span>
                       </td>
+                      <td className="px-3 py-2 text-right md:px-5">
+                        <button
+                          type="button"
+                          onClick={() => setDeleting(r)}
+                          className="rounded border border-border px-2 py-0.5 text-[11px] text-red hover:border-red hover:bg-red-bg"
+                        >
+                          刪除
+                        </button>
+                      </td>
                     </tr>
                   );
                 })}
@@ -664,7 +746,83 @@ function RecordsTab() {
           )}
         </div>
       </div>
+
+      {deleting && (
+        <DeletePasswordModal
+          record={deleting}
+          busy={del.isPending}
+          onClose={() => setDeleting(null)}
+          onConfirm={async () => {
+            try {
+              await del.mutateAsync(deleting.id);
+              toast("已刪除", "success");
+              setDeleting(null);
+            } catch (e) {
+              toast(`刪除失敗:${friendlyApiError(e)}`, "error", 4500);
+            }
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/** Password-gated delete confirm (password = 0000). A soft guard to
+ *  prevent accidental deletion of an 開立紀錄, not real security. */
+function DeletePasswordModal({
+  record,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  record: EInvoiceRecord;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const [pw, setPw] = useState("");
+  const submit = () => {
+    if (pw !== "0000") {
+      toast("密碼錯誤", "error");
+      return;
+    }
+    onConfirm();
+  };
+  return (
+    <Modal
+      open
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+      title="刪除發票紀錄"
+      subtitle={record.invoice_number ?? record.store}
+      width={360}
+    >
+      <div className="flex flex-col gap-3">
+        <div className="text-[13px] text-gray-500">請輸入密碼以確認刪除此筆紀錄。</div>
+        <input
+          type="password"
+          inputMode="numeric"
+          value={pw}
+          // biome-ignore lint/a11y/noAutofocus: focus the password field when the confirm dialog opens
+          autoFocus
+          onChange={(e) => setPw(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit();
+          }}
+          placeholder="密碼"
+          className={inputCls}
+        />
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            取消
+          </Button>
+          <Button variant="primary" size="sm" onClick={submit} disabled={busy}>
+            {busy ? "刪除中..." : "確認刪除"}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

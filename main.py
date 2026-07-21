@@ -4665,6 +4665,19 @@ async def upsert_einvoice_draft(campaign_id: str, payload: EInvoiceDraftPayload)
     return {"ok": True}
 
 
+@app.delete("/api/einvoices/{einvoice_id}")
+async def delete_einvoice(einvoice_id: str):
+    """Hard-delete an 開立紀錄 row. Admin-gated. Used to clear test /
+    mock records (a real issued invoice would be 作廢, added later)."""
+    _require_admin()
+    pool = _require_db()
+    if not _UUID_RE.match(einvoice_id):
+        raise HTTPException(status_code=404, detail="找不到發票紀錄")
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM einvoices WHERE id = $1::uuid", einvoice_id)
+    return {"ok": True}
+
+
 @app.get("/api/einvoices")
 async def list_einvoices(
     store: Optional[str] = Query(None),
