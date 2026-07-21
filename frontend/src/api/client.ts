@@ -59,6 +59,33 @@ export interface InvoiceBuyer extends InvoiceBuyerInput {
   updated_at: string | null;
 }
 
+/** Payload to issue an invoice (開立發票). `total_amt` is 花費+% (含稅);
+ *  B2C 雲端發票 needs no buyer fields, B2B needs tax_id + buyer_name. */
+export interface IssueInvoiceInput {
+  category: InvoiceCategory;
+  total_amt: number;
+  item_name: string;
+  buyer_name?: string;
+  tax_id?: string;
+  email?: string;
+  store?: string;
+  account_id?: string;
+  campaign_id?: string;
+  period?: string;
+  spend?: number;
+  markup_percent?: number;
+}
+
+export interface IssuedInvoiceResult {
+  ok: boolean;
+  id: string;
+  invoice_number: string | null;
+  random_number: string | null;
+  total_amt: number;
+  status: string;
+  mock: boolean;
+}
+
 export interface LinePushConfig {
   id: string;
   campaign_id: string;
@@ -1222,6 +1249,8 @@ export const api = {
       ),
     removeBuyer: (store: string) =>
       request<{ ok: boolean }>("DELETE", `/api/invoice-buyers/${encodeURIComponent(store)}`),
+    issue: (body: IssueInvoiceInput) =>
+      request<IssuedInvoiceResult>("POST", "/api/einvoice/issue", { body }),
   },
 
   nicknames: {

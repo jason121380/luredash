@@ -1,10 +1,13 @@
 import type { InvoiceBuyer, InvoiceBuyerInput, InvoiceCategory } from "@/api/client";
 import { friendlyApiError } from "@/api/client";
+import { useAccounts } from "@/api/hooks/useAccounts";
 import {
   useDeleteInvoiceBuyer,
   useInvoiceBuyers,
+  useIssueInvoice,
   useUpsertInvoiceBuyer,
 } from "@/api/hooks/useEInvoice";
+import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
 import { useNicknames } from "@/api/hooks/useNicknames";
 import { Button } from "@/components/Button";
 import { confirm } from "@/components/ConfirmDialog";
@@ -13,6 +16,12 @@ import { LoadingState } from "@/components/LoadingState";
 import { toast } from "@/components/Toast";
 import { Topbar } from "@/layout/Topbar";
 import { cn } from "@/lib/cn";
+import type { DateConfig } from "@/lib/datePicker";
+import { fM } from "@/lib/format";
+import { spendOf } from "@/lib/insights";
+import { useAccountsStore } from "@/stores/accountsStore";
+import { useFinanceStore } from "@/stores/financeStore";
+import { markupFor, spendPlus } from "@/views/finance/financeData";
 import { useMemo, useState } from "react";
 
 /**
@@ -47,33 +56,81 @@ const CARRIER_OPTIONS: { value: string; label: string }[] = [
 ];
 
 export function EInvoiceView() {
-  const [tab, setTab] = useState<Tab>("buyers");
+  const [tab, setTab] = useState<Tab>("issue");
+  // Month selection (right of the topbar) — drives which month's 費用中心
+  // numbers the 開立發票 tab reads. Defaults to the current month.
+  const [month, setMonth] = useState<string>(currentMonth);
 
   return (
     <>
-      <Topbar title="電子發票" />
+      <Topbar title="電子發票">
+        {tab === "issue" && (
+          <select
+            value={month}
+            onChange={(e) => setMonth(e.currentTarget.value)}
+            aria-label="選擇月份"
+            className="h-10 rounded-lg border border-border bg-white px-2.5 text-[13px] outline-none focus:border-orange md:h-[30px]"
+          >
+            {MONTH_OPTIONS.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        )}
+      </Topbar>
       <div className="min-w-0 flex-1 overflow-y-auto bg-bg px-3 py-3 md:px-5 md:py-5">
-        <div className="mx-auto flex w-full max-w-[900px] flex-col gap-4">
+        <div className="mx-auto flex w-full max-w-[960px] flex-col gap-4">
           {/* Tab bar */}
           <div className="flex gap-1 self-start rounded-xl border border-border bg-white p-1">
-            <TabButton active={tab === "buyers"} onClick={() => setTab("buyers")}>
-              買方資料
-            </TabButton>
             <TabButton active={tab === "issue"} onClick={() => setTab("issue")}>
               開立發票
+            </TabButton>
+            <TabButton active={tab === "buyers"} onClick={() => setTab("buyers")}>
+              買方資料
             </TabButton>
             <TabButton active={tab === "records"} onClick={() => setTab("records")}>
               發票紀錄
             </TabButton>
           </div>
 
+          {tab === "issue" && <IssueTab month={month} />}
           {tab === "buyers" && <BuyersTab />}
-          {tab === "issue" && <ComingSoon title="開立發票" phase="階段 2-3" />}
           {tab === "records" && <ComingSoon title="發票紀錄" phase="階段 4-5" />}
         </div>
       </div>
     </>
   );
+}
+
+// ── Month helpers ─────────────────────────────────────────────────────
+
+/** "YYYY-MM" for today. */
+const currentMonth = (() => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+})();
+
+/** Last 12 months as {value:"YYYY-MM", label:"2026 年 7 月"} options. */
+const MONTH_OPTIONS = (() => {
+  const out: { value: string; label: string }[] = [];
+  const now = new Date();
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const y = d.getFullYear();
+    const m = d.getMonth() + 1;
+    out.push({ value: `${y}-${String(m).padStart(2, "0")}`, label: `${y} 年 ${m} 月` });
+  }
+  return out;
+})();
+
+/** "YYYY-MM" → a custom DateConfig spanning that whole month. */
+function monthToDate(ym: string): DateConfig {
+  const [y, m] = ym.split("-").map((s) => Number.parseInt(s, 10));
+  const from = `${y}-${String(m).padStart(2, "0")}-01`;
+  const last = new Date(y as number, m as number, 0).getDate(); // day 0 of next month = last day
+  const to = `${y}-${String(m).padStart(2, "0")}-${String(last).padStart(2, "0")}`;
+  return { preset: "custom", from, to };
 }
 
 function TabButton({
@@ -103,9 +160,293 @@ function ComingSoon({ title, phase }: { title: string; phase: string }) {
   return (
     <section className="rounded-2xl border border-border bg-white">
       <EmptyState>
-        「{title}」功能將於 {phase} 開放。請先於「買方資料」建立各店家的開票資料。
+        「{title}」功能將於 {phase} 開放。
       </EmptyState>
     </section>
+  );
+}
+
+// ── 開立發票 tab ──────────────────────────────────────────────────────
+
+interface IssueRow {
+  campaignId: string;
+  accountId: string;
+  name: string;
+  store: string;
+  designer: string;
+  spend: number;
+  markup: number;
+  plus: number;
+}
+
+function IssueTab({ month }: { month: string }) {
+  const accountsQuery = useAccounts();
+  const allAccounts = accountsQuery.data ?? [];
+  const visible = useAccountsStore((s) => s.visibleAccounts)(allAccounts);
+  const date = useMemo(() => monthToDate(month), [month]);
+
+  const overview = useMultiAccountOverview(visible, date, {
+    includeArchived: true,
+    source: "finance",
+  });
+  const rowMarkups = useFinanceStore((s) => s.rowMarkups);
+  const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
+  const nicknames = useNicknames();
+  const buyersQuery = useInvoiceBuyers();
+  const issue = useIssueInvoice();
+
+  const [search, setSearch] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Issue form fields.
+  const [itemName, setItemName] = useState("廣告行銷");
+  const [category, setCategory] = useState<InvoiceCategory>("B2C");
+  const [buyerName, setBuyerName] = useState("");
+  const [taxId, setTaxId] = useState("");
+  const [email, setEmail] = useState("");
+  const [issued, setIssued] = useState<{ number: string | null; mock: boolean } | null>(null);
+
+  // Build rows straight from the 費用中心 numbers — same spend/markup/
+  // spend+% the finance table shows (no separate fetch). Only campaigns
+  // that actually spent this month can be invoiced.
+  const rows = useMemo<IssueRow[]>(() => {
+    const out: IssueRow[] = [];
+    for (const c of overview.campaigns) {
+      const spend = spendOf(c);
+      if (spend <= 0) continue;
+      const markup = markupFor(c.id, rowMarkups, defaultMarkup);
+      const nick = nicknames.data?.[c.id];
+      out.push({
+        campaignId: c.id,
+        accountId: c._accountId ?? "",
+        name: c.name,
+        store: (nick?.store ?? "").trim(),
+        designer: (nick?.designer ?? "").trim(),
+        spend,
+        markup,
+        plus: spendPlus(spend, markup),
+      });
+    }
+    const q = search.trim().toLowerCase();
+    const filtered = q
+      ? out.filter(
+          (r) =>
+            r.name.toLowerCase().includes(q) ||
+            r.store.toLowerCase().includes(q) ||
+            r.designer.toLowerCase().includes(q),
+        )
+      : out;
+    return filtered.sort((a, b) => b.plus - a.plus);
+  }, [overview.campaigns, rowMarkups, defaultMarkup, nicknames.data, search]);
+
+  const selected = rows.find((r) => r.campaignId === selectedId) ?? null;
+
+  // When a campaign is picked, prefill buyer info from the store's saved
+  // 買方資料 profile (if any) so B2B 統編/抬頭 don't get retyped monthly.
+  const selectRow = (r: IssueRow) => {
+    setSelectedId(r.campaignId);
+    setIssued(null);
+    const profile = buyersQuery.data?.find((b) => b.store === r.store);
+    if (profile) {
+      setCategory(profile.category);
+      setBuyerName(profile.buyer_name);
+      setTaxId(profile.tax_id);
+      setEmail(profile.email);
+    } else {
+      setCategory("B2C");
+      setBuyerName("");
+      setTaxId("");
+      setEmail("");
+    }
+  };
+
+  const onIssue = async () => {
+    if (!selected) return;
+    if (category === "B2B") {
+      if (!/^\d{8}$/.test(taxId.trim())) {
+        toast("統編需 8 碼數字", "error");
+        return;
+      }
+      if (!buyerName.trim()) {
+        toast("請填寫公司抬頭", "error");
+        return;
+      }
+    }
+    try {
+      const res = await issue.mutateAsync({
+        category,
+        total_amt: selected.plus,
+        item_name: itemName.trim() || "廣告行銷",
+        buyer_name: buyerName.trim(),
+        tax_id: category === "B2B" ? taxId.trim() : "",
+        email: email.trim(),
+        store: selected.store,
+        account_id: selected.accountId,
+        campaign_id: selected.campaignId,
+        period: month,
+        spend: Math.round(selected.spend),
+        markup_percent: selected.markup,
+      });
+      setIssued({ number: res.invoice_number, mock: res.mock });
+      toast(res.mock ? "已開立(測試模式)" : "已開立電子發票", "success", 4000);
+    } catch (e) {
+      toast(`開立失敗:${friendlyApiError(e)}`, "error", 5000);
+    }
+  };
+
+  const money = (v: number) => `$${fM(v)}`;
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* Campaign picker — reuses 費用中心 花費 / % / 花費+% */}
+      <section className="flex flex-col overflow-hidden rounded-2xl border border-border bg-white">
+        <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5 md:px-5">
+          <div className="text-[13px] font-bold text-ink">選擇行銷活動</div>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.currentTarget.value)}
+            placeholder="搜尋活動 / 店家 / 設計師"
+            className="h-9 min-w-0 flex-1 rounded-lg border-[1.5px] border-border px-3 text-[13px] outline-none focus:border-orange"
+          />
+        </div>
+        {overview.isLoading ? (
+          <LoadingState title="載入費用中心資料中..." />
+        ) : rows.length === 0 ? (
+          <EmptyState>此月份沒有有花費的行銷活動</EmptyState>
+        ) : (
+          <div className="max-h-[340px] overflow-y-auto">
+            <table className="w-full text-[13px]">
+              <thead className="sticky top-0 bg-bg">
+                <tr className="text-left text-[11px] font-semibold text-gray-400">
+                  <th className="px-4 py-2 md:px-5">活動 / 店家</th>
+                  <th className="px-2 py-2 text-right">花費</th>
+                  <th className="px-2 py-2 text-right">%</th>
+                  <th className="px-4 py-2 text-right md:px-5">花費+%</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr
+                    key={r.campaignId}
+                    onClick={() => selectRow(r)}
+                    className={cn(
+                      "cursor-pointer border-border border-t transition hover:bg-orange-bg/40",
+                      selectedId === r.campaignId && "bg-orange-bg/60",
+                    )}
+                  >
+                    <td className="px-4 py-2 md:px-5">
+                      <div className="truncate font-semibold text-ink">{r.store || r.name}</div>
+                      <div className="truncate text-[11px] text-gray-400">
+                        {r.store ? r.name : r.designer || "—"}
+                      </div>
+                    </td>
+                    <td className="px-2 py-2 text-right tabular-nums text-gray-500">
+                      {money(r.spend)}
+                    </td>
+                    <td className="px-2 py-2 text-right tabular-nums text-gray-400">{r.markup}%</td>
+                    <td className="px-4 py-2 text-right font-bold text-orange tabular-nums md:px-5">
+                      {money(r.plus)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* Issue form for the selected campaign */}
+      {selected && (
+        <section className="rounded-2xl border border-border bg-white p-4 md:p-5">
+          <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+            <div className="text-[13px] font-bold text-ink">
+              開立:{selected.store || selected.name}
+            </div>
+            <div className="text-[12px] text-gray-500">
+              花費 {money(selected.spend)} · {selected.markup}% ·{" "}
+              <span className="font-bold text-orange">發票金額 {money(selected.plus)}</span>
+              (含稅)
+            </div>
+          </div>
+
+          <div className="mb-3 flex gap-1 self-start rounded-lg border border-border bg-bg p-1">
+            {(["B2C", "B2B"] as InvoiceCategory[]).map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setCategory(c)}
+                className={cn(
+                  "rounded-md px-3 py-1 text-[12px] font-semibold transition",
+                  category === c ? "bg-white text-orange shadow-sm" : "text-gray-500",
+                )}
+              >
+                {c === "B2C" ? "個人(雲端發票)" : "公司(統編)"}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2">
+            <Field label="發票項目">
+              <input
+                value={itemName}
+                onChange={(e) => setItemName(e.currentTarget.value)}
+                placeholder="廣告行銷"
+                className={inputCls}
+              />
+            </Field>
+            {category === "B2B" ? (
+              <>
+                <Field label="公司抬頭" required>
+                  <input
+                    value={buyerName}
+                    onChange={(e) => setBuyerName(e.currentTarget.value)}
+                    placeholder="例: 上越股份有限公司"
+                    className={inputCls}
+                  />
+                </Field>
+                <Field label="統一編號" required>
+                  <input
+                    value={taxId}
+                    onChange={(e) => setTaxId(e.currentTarget.value)}
+                    placeholder="8 碼數字"
+                    inputMode="numeric"
+                    maxLength={8}
+                    className={inputCls}
+                  />
+                </Field>
+                <Field label="發票寄送信箱">
+                  <input
+                    value={email}
+                    onChange={(e) => setEmail(e.currentTarget.value)}
+                    type="email"
+                    placeholder="example@mail.com"
+                    className={inputCls}
+                  />
+                </Field>
+              </>
+            ) : (
+              <div className="flex items-end text-[12px] text-gray-400 md:col-span-1">
+                個人發票開立為雲端發票,無需填寫買方資料。
+              </div>
+            )}
+          </div>
+
+          {issued ? (
+            <div className="mt-3 rounded-xl border border-green/40 bg-green-bg/40 px-4 py-3 text-[13px]">
+              <span className="font-bold text-green">已開立</span> · 發票號碼{" "}
+              <span className="font-mono font-bold">{issued.number ?? "—"}</span>
+              {issued.mock && <span className="ml-2 text-[11px] text-gray-400">(測試模式)</span>}
+            </div>
+          ) : (
+            <div className="mt-3 flex justify-end">
+              <Button variant="primary" size="sm" onClick={onIssue} disabled={issue.isPending}>
+                {issue.isPending ? "開立中..." : "開立發票"}
+              </Button>
+            </div>
+          )}
+        </section>
+      )}
+    </div>
   );
 }
 
