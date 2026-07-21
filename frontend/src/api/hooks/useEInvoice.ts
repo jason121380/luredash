@@ -1,4 +1,5 @@
 import {
+  type EInvoiceDraft,
   type InvoiceBuyer,
   type InvoiceBuyerInput,
   type IssueInvoiceInput,
@@ -62,5 +63,26 @@ export function useEInvoices(params?: { store?: string; status?: string; period?
     queryKey: ["einvoices", params ?? {}],
     queryFn: () => api.einvoice.list(params),
     staleTime: 30_000,
+  });
+}
+
+const DRAFTS_KEY = ["einvoice-drafts"] as const;
+
+export function useEInvoiceDrafts() {
+  return useQuery({
+    queryKey: DRAFTS_KEY,
+    queryFn: () => api.einvoice.drafts(),
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useSaveEInvoiceDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ campaignId, body }: { campaignId: string; body: EInvoiceDraft }) =>
+      api.einvoice.saveDraft(campaignId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: DRAFTS_KEY });
+    },
   });
 }

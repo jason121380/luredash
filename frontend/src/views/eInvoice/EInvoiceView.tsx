@@ -1,7 +1,12 @@
-import type { InvoiceCategory } from "@/api/client";
+import type { EInvoiceDraft, InvoiceCategory } from "@/api/client";
 import { friendlyApiError } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
-import { useEInvoices, useIssueInvoice } from "@/api/hooks/useEInvoice";
+import {
+  useEInvoiceDrafts,
+  useEInvoices,
+  useIssueInvoice,
+  useSaveEInvoiceDraft,
+} from "@/api/hooks/useEInvoice";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
 import { useNicknames } from "@/api/hooks/useNicknames";
 import { Badge } from "@/components/Badge";
@@ -20,7 +25,12 @@ import { useFinanceStore } from "@/stores/financeStore";
 import { useUiStore } from "@/stores/uiStore";
 import type { FbEntityStatus } from "@/types/fb";
 import { FinanceAccountPanel } from "@/views/finance/FinanceAccountPanel";
-import { buildAccountRows, markupFor, spendPlus } from "@/views/finance/financeData";
+import {
+  buildAccountRows,
+  formatNickname,
+  markupFor,
+  spendPlus,
+} from "@/views/finance/financeData";
 import * as Popover from "@radix-ui/react-popover";
 import { useMemo, useState } from "react";
 
@@ -189,6 +199,10 @@ function monthToDate(ym: string): DateConfig {
 
 // ── 開立發票 tab ──────────────────────────────────────────────────────
 
+/** Fixed markup used for the statutory invoice amount — 花費 + 5%,
+ *  independent of the per-campaign 月% (which is the internal store bill). */
+const INVOICE_MARKUP = 5;
+
 interface IssueRow {
   campaignId: string;
   accountId: string;
@@ -199,6 +213,8 @@ interface IssueRow {
   spend: number;
   markup: number;
   plus: number;
+  /** 發票金額 = ceil(花費 × 1.05) — what the invoice is issued for. */
+  invoiceAmt: number;
 }
 
 function IssueTab({ month }: { month: string }) {
@@ -215,6 +231,7 @@ function IssueTab({ month }: { month: string }) {
   const rowMarkups = useFinanceStore((s) => s.rowMarkups);
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
   const nicknames = useNicknames();
+  const draftsQuery = useEInvoiceDrafts();
 
   const [selectedAcct, setSelectedAcct] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -255,6 +272,7 @@ function IssueTab({ month }: { month: string }) {
         spend,
         markup,
         plus: spendPlus(spend, markup),
+        invoiceAmt: spendPlus(spend, INVOICE_MARKUP),
       });
     }
     return out.sort((a, b) => b.plus - a.plus);
@@ -300,6 +318,7 @@ function IssueTab({ month }: { month: string }) {
                     <th className="px-2 py-2 text-right">花費</th>
                     <th className="px-2 py-2 text-right">月%</th>
                     <th className="px-2 py-2 text-right">花費+%</th>
+                    <th className="px-2 py-2 text-right">發票金額</th>
                     <th className="px-3 py-2 text-right md:px-5" />
                   </tr>
                 </thead>
@@ -311,21 +330,35 @@ function IssueTab({ month }: { month: string }) {
                         <Badge status={r.status} />
                       </td>
                       <td className="px-2 py-2">
-                        <div className="max-w-[280px] truncate font-semibold text-ink">
-                          {r.store || r.name}
-                        </div>
-                        <div className="max-w-[280px] truncate text-[11px] text-gray-400">
-                          {r.store ? r.name : r.designer || "—"}
-                        </div>
+                        {(() => {
+                          // 跟費用中心一樣:主標顯示「店家 · 設計師」暱稱,
+                          // 沒暱稱才 fallback 原始活動名;有暱稱時活動名放灰字副標。
+                          const label = formatNickname({ store: r.store, designer: r.designer });
+                          return (
+                            <>
+                              <div className="max-w-[280px] truncate font-semibold text-ink">
+                                {label ?? r.name}
+                              </div>
+                              {label && (
+                                <div className="max-w-[280px] truncate text-[11px] text-gray-400">
+                                  {r.name}
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </td>
-                      <td className="px-2 py-2 text-right tabular-nums text-gray-500">
+                      <td className="px-2 py-2 text-right tabular-nums text-ink">
                         {money(r.spend)}
                       </td>
                       <td className="px-2 py-2 text-right tabular-nums text-gray-400">
                         {r.markup}%
                       </td>
-                      <td className="px-2 py-2 text-right font-bold text-orange tabular-nums">
+                      <td className="px-2 py-2 text-right font-semibold text-orange tabular-nums">
                         {money(r.plus)}
+                      </td>
+                      <td className="px-2 py-2 text-right font-bold text-orange tabular-nums">
+                        {money(r.invoiceAmt)}
                       </td>
                       <td className="px-3 py-2 text-right md:px-5">
                         <Button size="sm" variant="primary" onClick={() => setIssuing(r)}>
@@ -341,7 +374,15 @@ function IssueTab({ month }: { month: string }) {
         </div>
       </div>
 
-      {issuing && <IssueModal row={issuing} month={month} onClose={() => setIssuing(null)} />}
+      {issuing && (
+        <IssueModal
+          key={issuing.campaignId}
+          row={issuing}
+          month={month}
+          draft={draftsQuery.data?.data?.[issuing.campaignId]}
+          onClose={() => setIssuing(null)}
+        />
+      )}
     </div>
   );
 }
@@ -351,21 +392,50 @@ function IssueTab({ month }: { month: string }) {
 function IssueModal({
   row,
   month,
+  draft,
   onClose,
 }: {
   row: IssueRow;
   month: string;
+  draft?: EInvoiceDraft;
   onClose: () => void;
 }) {
   const issue = useIssueInvoice();
-  const [itemName, setItemName] = useState("廣告行銷");
-  const [category, setCategory] = useState<InvoiceCategory>("B2C");
-  const [buyerName, setBuyerName] = useState("");
-  const [taxId, setTaxId] = useState("");
-  const [email, setEmail] = useState("");
+  const saveDraft = useSaveEInvoiceDraft();
+  // Init from the campaign's saved draft (mounted with key=campaignId so
+  // this runs fresh per campaign).
+  const [itemName, setItemName] = useState(draft?.item_name ?? "廣告行銷");
+  const [category, setCategory] = useState<InvoiceCategory>(draft?.category ?? "B2C");
+  const [buyerName, setBuyerName] = useState(draft?.buyer_name ?? "");
+  const [taxId, setTaxId] = useState(draft?.tax_id ?? "");
+  const [email, setEmail] = useState(draft?.email ?? "");
   const [issued, setIssued] = useState<{ number: string | null; mock: boolean } | null>(null);
 
   const money = (v: number) => `$${fM(v)}`;
+
+  // Persist the entered fields per campaign on close, so this 行銷活動
+  // remembers its 統編 / 抬頭 / 品項 next time.
+  const closeAndSave = () => {
+    const changed =
+      category !== (draft?.category ?? "B2C") ||
+      itemName !== (draft?.item_name ?? "廣告行銷") ||
+      buyerName !== (draft?.buyer_name ?? "") ||
+      taxId !== (draft?.tax_id ?? "") ||
+      email !== (draft?.email ?? "");
+    if (changed) {
+      saveDraft.mutate({
+        campaignId: row.campaignId,
+        body: {
+          category,
+          item_name: itemName,
+          buyer_name: buyerName,
+          tax_id: taxId,
+          email,
+        },
+      });
+    }
+    onClose();
+  };
 
   const onIssue = async () => {
     if (category === "B2B") {
@@ -381,7 +451,8 @@ function IssueModal({
     try {
       const res = await issue.mutateAsync({
         category,
-        total_amt: row.plus,
+        // 發票金額 = 花費 + 5% (fixed), NOT the 月% store bill.
+        total_amt: row.invoiceAmt,
         item_name: itemName.trim() || "廣告行銷",
         buyer_name: buyerName.trim(),
         tax_id: category === "B2B" ? taxId.trim() : "",
@@ -391,6 +462,8 @@ function IssueModal({
         campaign_id: row.campaignId,
         period: month,
         spend: Math.round(row.spend),
+        // Store the 月% so 開立紀錄 can show the 花費+月% store amount
+        // alongside the 發票金額.
         markup_percent: row.markup,
       });
       setIssued({ number: res.invoice_number, mock: res.mock });
@@ -404,15 +477,15 @@ function IssueModal({
     <Modal
       open
       onOpenChange={(o) => {
-        if (!o) onClose();
+        if (!o) closeAndSave();
       }}
       title="開立發票"
       subtitle={row.store || row.name}
       width={520}
     >
       <div className="mb-3 rounded-xl border border-border bg-bg px-3.5 py-2.5 text-[12px] text-gray-500">
-        花費 <span className="font-semibold text-ink">{money(row.spend)}</span> · {row.markup}% ·{" "}
-        發票金額 <span className="font-bold text-orange">{money(row.plus)}</span>(含稅)
+        花費 <span className="font-semibold text-ink">{money(row.spend)}</span> · 發票金額{" "}
+        <span className="font-bold text-orange">{money(row.invoiceAmt)}</span>(花費+5%,含稅)
       </div>
 
       {issued ? (
@@ -423,7 +496,7 @@ function IssueModal({
             {issued.mock && <span className="ml-2 text-[11px] text-gray-400">(測試模式)</span>}
           </div>
           <div className="flex justify-end">
-            <Button variant="primary" size="sm" onClick={onClose}>
+            <Button variant="primary" size="sm" onClick={closeAndSave}>
               完成
             </Button>
           </div>
@@ -544,6 +617,7 @@ function RecordsTab() {
                   <th className="px-2 py-2">買方 / 店家</th>
                   <th className="px-2 py-2">類型</th>
                   <th className="px-2 py-2 text-right">金額</th>
+                  <th className="px-2 py-2 text-right">發票金額</th>
                   <th className="px-3 py-2 md:px-5">狀態</th>
                 </tr>
               </thead>
@@ -566,6 +640,11 @@ function RecordsTab() {
                         )}
                       </td>
                       <td className="px-2 py-2 text-gray-500">{r.category}</td>
+                      <td className="px-2 py-2 text-right tabular-nums text-ink">
+                        {r.spend != null && r.markup_percent != null
+                          ? money(spendPlus(r.spend, r.markup_percent))
+                          : "—"}
+                      </td>
                       <td className="px-2 py-2 text-right font-bold tabular-nums text-orange">
                         {money(r.total_amt)}
                       </td>
