@@ -1280,6 +1280,15 @@ function FbCallsPanel() {
     if (!aid) return null;
     return nameByActId.get(aid) ?? null;
   };
+  // 使用者顯示:優先後端解析的暱稱/FB 名,退回原始 fb_user_id,都沒有回 null。
+  const userLabel = (
+    name: string | null | undefined,
+    id: string | null | undefined,
+  ): string | null => {
+    if (name) return name;
+    if (id) return id;
+    return null;
+  };
 
   // Default ON — cache hits are noise(同帳戶連看 3 筆綠色「快取」),
   // operator 大部分時候想看的是「真的打 FB 的」。
@@ -1582,6 +1591,7 @@ function FbCallsPanel() {
                   <thead className="bg-bg text-left text-gray-500">
                     <tr>
                       <th className="px-2 py-1 font-semibold">來源</th>
+                      <th className="px-2 py-1 font-semibold">使用者</th>
                       <th className="px-2 py-1 font-semibold">原因</th>
                       <th className="px-2 py-1 text-right font-semibold">真打</th>
                       <th className="px-2 py-1 text-right font-semibold">Cache</th>
@@ -1593,71 +1603,135 @@ function FbCallsPanel() {
                     </tr>
                   </thead>
                   <tbody>
-                    {data.top_sources_5m.map((s) => (
-                      <tr key={s.source} className="border-t border-border">
-                        <td className="px-2 py-1">{formatSourceBadge(s.source)}</td>
-                        <td className="px-2 py-1 text-gray-600">{sourceReason(s.source)}</td>
-                        <td className="px-2 py-1 text-right font-mono text-ink">{s.live}</td>
-                        <td className="px-2 py-1 text-right font-mono text-emerald-700">
-                          {s.cache_hits}
-                        </td>
-                        <td className="px-2 py-1 text-right font-mono text-amber-700">
-                          {s.blocked}
-                        </td>
-                        <td
-                          className={cn(
-                            "px-2 py-1 text-right font-mono",
-                            s.errors > 0 ? "text-red-600" : "text-gray-500",
-                          )}
-                        >
-                          {s.errors}
-                        </td>
-                        <td className="px-2 py-1 text-right font-mono text-gray-500">
-                          {s.retried}
-                        </td>
-                        <td className="px-2 py-1 font-mono text-gray-600">
-                          {s.last_status || "—"}
-                        </td>
-                        <td
-                          className="max-w-[320px] truncate px-2 py-1 font-mono text-gray-500"
-                          title={s.last_path}
-                        >
-                          {s.last_path || "—"}
-                        </td>
-                      </tr>
-                    ))}
+                    {data.top_sources_5m.map((s) => {
+                      const who = userLabel(s.top_user_name, s.top_user_id);
+                      return (
+                        <tr key={s.source} className="border-t border-border">
+                          <td className="px-2 py-1">{formatSourceBadge(s.source)}</td>
+                          <td
+                            className="px-2 py-1 text-gray-600"
+                            title={s.top_user_id || undefined}
+                          >
+                            {who ?? <span className="text-gray-300">系統</span>}
+                          </td>
+                          <td className="px-2 py-1 text-gray-600">{sourceReason(s.source)}</td>
+                          <td className="px-2 py-1 text-right font-mono text-ink">{s.live}</td>
+                          <td className="px-2 py-1 text-right font-mono text-emerald-700">
+                            {s.cache_hits}
+                          </td>
+                          <td className="px-2 py-1 text-right font-mono text-amber-700">
+                            {s.blocked}
+                          </td>
+                          <td
+                            className={cn(
+                              "px-2 py-1 text-right font-mono",
+                              s.errors > 0 ? "text-red-600" : "text-gray-500",
+                            )}
+                          >
+                            {s.errors}
+                          </td>
+                          <td className="px-2 py-1 text-right font-mono text-gray-500">
+                            {s.retried}
+                          </td>
+                          <td className="px-2 py-1 font-mono text-gray-600">
+                            {s.last_status || "—"}
+                          </td>
+                          <td
+                            className="max-w-[320px] truncate px-2 py-1 font-mono text-gray-500"
+                            title={s.last_path}
+                          >
+                            {s.last_path || "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             )}
           </div>
 
-          {/* Recent throttle events */}
+          {/* Throttle 事件全紀錄 (durable, 不只 5 分鐘) */}
           {data.throttle_events.length > 0 && (
             <div className="mt-3">
-              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
-                最近節流事件
-              </h3>
-              <ul className="flex flex-col gap-0.5 text-[12px]">
-                {data.throttle_events.slice(0, 8).map((ev, idx) => {
+              <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="text-xs font-semibold uppercase tracking-[0.6px] text-gray-400">
+                  限流事件全紀錄
+                </h3>
+                <span className="text-[11px] text-gray-400">
+                  共 {data.throttle_total} 筆(顯示最新 {data.throttle_events.length} 筆,含歷史)
+                </span>
+              </div>
+              <ul className="flex max-h-[360px] flex-col gap-0.5 overflow-y-auto text-[12px]">
+                {data.throttle_events.map((ev, idx) => {
                   const nm = nameFor(ev.account_id);
+                  const who = userLabel(ev.fb_user_name, ev.fb_user_id);
+                  // idx 0 = 最新一次爆 rate limit → 標成最強紅色
+                  const isLatest = idx === 0;
                   return (
                     <li
                       key={`${ev.ts}-${ev.account_id}-${idx}`}
-                      className="flex items-center gap-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-red-700"
+                      className={cn(
+                        "flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded border px-2 py-1",
+                        isLatest
+                          ? "border-red-600 bg-red-600 font-semibold text-white"
+                          : "border-red-200 bg-red-50 text-red-700",
+                      )}
                     >
+                      {isLatest && (
+                        <span className="rounded bg-white/25 px-1 text-[10px]">最後爆</span>
+                      )}
                       <span className="font-mono">{formatTs(ev.ts)}</span>
-                      <span className="rounded bg-red-100 px-1 font-mono text-[10px]">
-                        code={ev.code}
+                      <span
+                        className={cn(
+                          "rounded px-1 text-[10px]",
+                          ev.scope === "global"
+                            ? isLatest
+                              ? "bg-white/25"
+                              : "bg-red-200 text-red-800"
+                            : isLatest
+                              ? "bg-white/20"
+                              : "bg-red-100",
+                        )}
+                      >
+                        {ev.scope === "global" ? "全域" : "帳戶"}
                       </span>
+                      <span
+                        className={cn(
+                          "rounded px-1 font-mono text-[10px]",
+                          isLatest ? "bg-white/25" : "bg-red-100",
+                        )}
+                      >
+                        code={ev.code ?? "?"}
+                      </span>
+                      {who && (
+                        <span
+                          className={cn(
+                            "rounded px-1 text-[10px]",
+                            isLatest ? "bg-white/25" : "bg-red-100",
+                          )}
+                          title={ev.fb_user_id || undefined}
+                        >
+                          {who}
+                        </span>
+                      )}
                       <span className="truncate font-mono" title={ev.path}>
-                        {nm ? <span className="not-italic">{nm} · </span> : null}
-                        {nm ? (
-                          <span className="text-[10px] opacity-60">{ev.account_id}</span>
+                        {ev.scope === "global" ? (
+                          <span className={isLatest ? "" : "opacity-70"}>(全域)</span>
+                        ) : nm ? (
+                          <>
+                            <span className="not-italic">{nm} · </span>
+                            <span className="text-[10px] opacity-60">{ev.account_id}</span>
+                          </>
                         ) : (
                           ev.account_id || "?"
                         )}{" "}
-                        · {ev.path}
+                        · {ev.path || "—"}
+                        {ev.bucu_pct != null && (
+                          <span className={cn("ml-1 text-[10px]", isLatest ? "" : "opacity-60")}>
+                            BUCU {ev.bucu_pct}%
+                          </span>
+                        )}
                       </span>
                     </li>
                   );
@@ -1690,6 +1764,7 @@ function FbCallsPanel() {
                 <div className="flex flex-col gap-1.5 md:hidden">
                   {recent.map((e, idx) => {
                     const nm = nameFor(e.account_id);
+                    const who = userLabel(e.fb_user_name, e.fb_user_id);
                     return (
                       <div
                         key={`${e.ts}-${idx}-m`}
@@ -1701,6 +1776,14 @@ function FbCallsPanel() {
                           </span>
                           {formatStatusBadge(e)}
                           {formatSourceBadge(e.source)}
+                          {who && (
+                            <span
+                              className="rounded bg-gray-100 px-1 text-[10px] text-gray-600"
+                              title={e.fb_user_id || undefined}
+                            >
+                              {who}
+                            </span>
+                          )}
                           <span className="ml-auto font-mono text-[10px] text-gray-500">
                             {e.ms}ms · BUCU {e.bucu_peak_pct}%
                           </span>
@@ -1760,6 +1843,12 @@ function FbCallsPanel() {
                         </th>
                         <th
                           className="px-2 py-1 font-semibold"
+                          title="觸發這次呼叫的登入使用者(背景任務可能為空)"
+                        >
+                          使用者
+                        </th>
+                        <th
+                          className="px-2 py-1 font-semibold"
                           title="本次呼叫耗時(毫秒)。cache hit 為 0"
                         >
                           ms
@@ -1781,11 +1870,18 @@ function FbCallsPanel() {
                     <tbody className="font-mono">
                       {recent.map((e, idx) => {
                         const nm = nameFor(e.account_id);
+                        const who = userLabel(e.fb_user_name, e.fb_user_id);
                         return (
                           <tr key={`${e.ts}-${idx}`} className="border-t border-border">
                             <td className="px-2 py-1 text-gray-500">{formatTs(e.ts)}</td>
                             <td className="px-2 py-1">{formatStatusBadge(e)}</td>
                             <td className="px-2 py-1">{formatSourceBadge(e.source)}</td>
+                            <td
+                              className="max-w-[120px] truncate px-2 py-1 font-sans text-gray-600"
+                              title={e.fb_user_id || undefined}
+                            >
+                              {who ?? <span className="text-gray-300">—</span>}
+                            </td>
                             <td className="px-2 py-1 text-right text-gray-600">{e.ms}</td>
                             <td className="px-2 py-1 text-right text-gray-600">
                               {e.bucu_peak_pct}

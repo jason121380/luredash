@@ -1100,6 +1100,33 @@ async def lifespan(app: FastAPI):
                 await conn.execute(
                     "ALTER TABLE fb_user_profiles ADD COLUMN IF NOT EXISTS page_perms JSONB"
                 )
+                # `fb_throttle_events`: durable log of every FB rate-limit
+                # / throttle hit (per-account 80000-80014 + global
+                # 4/17/32/613). The in-memory ring buffers are lost on
+                # restart and only keep the last 20/5-min window; this
+                # table keeps the FULL history so 工程模式「FB 限流戰情室」
+                # can answer「上週是誰、哪個頁面把我們打爆的」. Rows record
+                # who (fb_user_id) + what (source) + which account/path +
+                # the BUCU% at the moment of the hit.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS fb_throttle_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        scope TEXT NOT NULL,
+                        account_id TEXT,
+                        path TEXT,
+                        error_code INTEGER,
+                        source TEXT,
+                        fb_user_id TEXT,
+                        bucu_pct INTEGER
+                    )
+                    """
+                )
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_fb_throttle_events_ts "
+                    "ON fb_throttle_events (ts DESC)"
+                )
                 # ── Billing / Subscription (Polar.sh) ─────────────
                 # `subscriptions`: one row per fb_user_id. Tracks Polar
                 # state + denormalized quota limits so per-request
@@ -2132,8 +2159,61 @@ def _log_fb_call(
                 "error_code": error_code,
                 "retried": retried,
                 "source": _fb_call_source.get(),
+                "fb_user_id": _current_fb_user_id.get() or "",
             }
         )
+    except Exception:
+        pass
+
+
+def _spawn_bg(coro) -> None:
+    """Fire-and-forget an awaitable, holding a strong ref so the event
+    loop doesn't gc it mid-run. Safe to call from sync code that runs
+    inside the running loop (the throttle recorders do). No-op if there
+    is no running loop."""
+    try:
+        task = asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:
+        # No running loop — close the coroutine so we don't leak a
+        # "coroutine was never awaited" warning.
+        try:
+            coro.close()
+        except Exception:
+            pass
+        return
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+async def _persist_throttle_event(
+    *,
+    scope: str,
+    account_id: str,
+    path: str,
+    error_code: int,
+    source: str,
+    fb_user_id: str,
+    bucu: int,
+) -> None:
+    """Durably record a rate-limit / throttle hit to `fb_throttle_events`
+    so the 工程模式 panel keeps the FULL history (survives restarts and
+    the 5-minute ring-buffer window). Best-effort — never raises."""
+    if _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO fb_throttle_events
+                     (scope, account_id, path, error_code, source, fb_user_id, bucu_pct)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                scope,
+                account_id or None,
+                path or None,
+                int(error_code),
+                source or None,
+                fb_user_id or None,
+                int(bucu),
+            )
     except Exception:
         pass
 
@@ -2152,6 +2232,9 @@ def _record_account_throttle(account_id: Optional[str], path: str, error_code: i
     # account again.
     cooldown_s = max(600.0, float(regain_min) * 60.0)
     now = time.monotonic()
+    uid = _current_fb_user_id.get() or ""
+    source = _fb_call_source.get()
+    bucu = _peak_bucu_pct()
     global _last_ads_throttle_at
     _last_ads_throttle_at = now
     if aid:
@@ -2160,7 +2243,27 @@ def _record_account_throttle(account_id: Optional[str], path: str, error_code: i
         if events is None:
             events = deque(maxlen=20)
             _account_throttle_events[aid] = events
-        events.append({"ts": time.time(), "path": path, "code": error_code})
+        events.append(
+            {
+                "ts": time.time(),
+                "path": path,
+                "code": error_code,
+                "fb_user_id": uid,
+                "source": source,
+                "bucu": bucu,
+            }
+        )
+    _spawn_bg(
+        _persist_throttle_event(
+            scope="account",
+            account_id=aid,
+            path=path,
+            error_code=error_code,
+            source=source,
+            fb_user_id=uid,
+            bucu=bucu,
+        )
+    )
     print(
         f"[fb throttle {error_code}] account={aid or '?'} path={path} "
         f"regain_min={regain_min} cooldown_s={int(cooldown_s)}",
@@ -2218,11 +2321,32 @@ def _record_global_throttle(path: str, error_code: int) -> None:
     regain_min = _peak_regain_minutes()
     cooldown_s = max(600.0, float(regain_min) * 60.0)
     deadline = time.monotonic() + cooldown_s
+    uid = _current_fb_user_id.get() or ""
+    source = _fb_call_source.get()
+    bucu = _peak_bucu_pct()
     global _global_fb_throttle_until, _last_ads_throttle_at
     _global_fb_throttle_until = max(_global_fb_throttle_until, deadline)
     _last_ads_throttle_at = time.monotonic()
     _global_throttle_events.append(
-        {"ts": time.time(), "path": path, "code": error_code}
+        {
+            "ts": time.time(),
+            "path": path,
+            "code": error_code,
+            "fb_user_id": uid,
+            "source": source,
+            "bucu": bucu,
+        }
+    )
+    _spawn_bg(
+        _persist_throttle_event(
+            scope="global",
+            account_id="",
+            path=path,
+            error_code=error_code,
+            source=source,
+            fb_user_id=uid,
+            bucu=bucu,
+        )
     )
     print(
         f"[fb global throttle {error_code}] path={path} "
@@ -5442,6 +5566,30 @@ async def _fb_user_display_name(uid: Optional[str]) -> Optional[str]:
     return None
 
 
+async def _fb_user_display_names(uids: "set[str]") -> "dict[str, str]":
+    """Batch-resolve many fb_user_ids to display names (暱稱 → FB name)
+    in one query. Used by the 工程模式 panel so every table can show WHO
+    triggered each call. Returns {} on no DB / empty input."""
+    clean = {u for u in uids if u}
+    if not clean or _db_pool is None:
+        return {}
+    try:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT fb_user_id, nickname, name FROM fb_user_profiles "
+                "WHERE fb_user_id = ANY($1)",
+                list(clean),
+            )
+        out: dict[str, str] = {}
+        for r in rows:
+            nm = r["nickname"] or r["name"]
+            if nm:
+                out[str(r["fb_user_id"])] = nm
+        return out
+    except Exception:
+        return {}
+
+
 def _tier_limit_error(resource: str, limit: int, tier: str, message: str) -> HTTPException:
     """Build the 403 we raise on every tier-limit miss. Frontend reads
     `code` to switch into the upgrade modal flow rather than a plain
@@ -6184,7 +6332,13 @@ async def get_engineering_fb_calls():
       - `top_accounts_5m`: account ids sorted by call count in last 5 min
       - `top_sources_5m`: source tags sorted by live/gated call volume
       - `status_counts_5m`: HTTP status distribution in last 5 min
-      - `throttle_events`: recent 80000-80014 events per account
+      - `throttle_events`: DURABLE full throttle log (newest-first, up to
+        200) from `fb_throttle_events` — account (80000-80014) + global
+        (4/17/32/613) hits, each with scope/source/fb_user_id/bucu.
+        Falls back to in-memory ring buffers if DB is unavailable.
+      - `throttle_total`: total rows in the durable throttle log
+      - Every table (`recent`, `top_*`, `throttle_events`) carries the
+        triggering fb_user_id + resolved fb_user_name / top_user_name
       - `cache_hit_rate_5m`: fraction of calls served from cache (0-1)
       - `account_throttle_until`: per-account cooldown deadlines (epoch seconds)
       - `global_throttle_until`: process-wide cooldown deadline, if active
@@ -6210,6 +6364,9 @@ async def get_engineering_fb_calls():
     status_counts: "Counter[str]" = Counter()
     source_stats: dict[str, dict] = {}
     path_stats: dict[str, dict] = {}
+    # account_id → Counter of fb_user_ids, so 帳戶表格 can show WHO drove
+    # the calls to that account in the last 5 min.
+    account_users: dict[str, "Counter[str]"] = {}
     cache_hits = 0
     error_count = 0
     live_total = 0
@@ -6221,13 +6378,17 @@ async def get_engineering_fb_calls():
         status = int(e.get("status") or 0)
         ms = int(e.get("ms") or 0)
         cache_hit = bool(e.get("cache_hit"))
+        uid = str(e.get("fb_user_id") or "")
         is_error = status >= 400
         is_blocked = status == 429 and ms == 0
         is_live = not cache_hit and not is_blocked
 
         path_counts[path] += 1
         if e.get("account_id"):
-            account_counts[str(e["account_id"])] += 1
+            aid_key = str(e["account_id"])
+            account_counts[aid_key] += 1
+            if uid:
+                account_users.setdefault(aid_key, Counter())[uid] += 1
         status_counts[str(status)] += 1
         if cache_hit:
             cache_hits += 1
@@ -6254,6 +6415,7 @@ async def get_engineering_fb_calls():
                 "last_ts": 0.0,
                 "last_status": 0,
                 "last_path": "",
+                "users": Counter(),
             },
         )
         ss["count"] += 1
@@ -6263,6 +6425,8 @@ async def get_engineering_fb_calls():
         ss["errors"] += 1 if is_error else 0
         ss["retried"] += 1 if e.get("retried") else 0
         ss["ms_total"] += ms
+        if uid:
+            ss["users"][uid] += 1
         if float(e.get("ts") or 0) >= float(ss["last_ts"] or 0):
             ss["last_ts"] = float(e.get("ts") or 0)
             ss["last_status"] = status
@@ -6278,6 +6442,7 @@ async def get_engineering_fb_calls():
                 "blocked": 0,
                 "errors": 0,
                 "sources": Counter(),
+                "users": Counter(),
             },
         )
         ps["count"] += 1
@@ -6286,22 +6451,79 @@ async def get_engineering_fb_calls():
         ps["blocked"] += 1 if is_blocked else 0
         ps["errors"] += 1 if is_error else 0
         ps["sources"][source] += 1
+        if uid:
+            ps["users"][uid] += 1
     total = len(recent_window)
     cache_hit_rate = (cache_hits / total) if total else 0.0
 
+    # Throttle log — prefer the DURABLE DB table (full history, survives
+    # restarts) so「保留限流事件，完整的、不只 5 分鐘」holds. Fall back to
+    # the in-memory ring buffers if DB is unavailable.
     throttle_events: list[dict] = []
-    for aid, events in _account_throttle_events.items():
-        for ev in events:
+    throttle_total = 0
+    if _db_pool is not None:
+        try:
+            async with _db_pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT scope, account_id, path, error_code, source,
+                           fb_user_id, bucu_pct,
+                           EXTRACT(EPOCH FROM ts) AS ts_epoch
+                    FROM fb_throttle_events
+                    ORDER BY ts DESC
+                    LIMIT 200
+                    """
+                )
+                throttle_total = await conn.fetchval(
+                    "SELECT COUNT(*) FROM fb_throttle_events"
+                )
+            for r in rows:
+                throttle_events.append(
+                    {
+                        "ts": float(r["ts_epoch"] or 0),
+                        "scope": r["scope"] or "account",
+                        "account_id": r["account_id"] or "",
+                        "path": r["path"] or "",
+                        "code": r["error_code"],
+                        "source": r["source"] or "",
+                        "fb_user_id": r["fb_user_id"] or "",
+                        "bucu_pct": r["bucu_pct"],
+                    }
+                )
+        except Exception:
+            throttle_events = []
+    if not throttle_events:
+        # In-memory fallback (DB down / not yet migrated).
+        for aid, events in _account_throttle_events.items():
+            for ev in events:
+                throttle_events.append(
+                    {
+                        "ts": ev["ts"],
+                        "scope": "account",
+                        "account_id": aid,
+                        "path": ev.get("path") or "",
+                        "code": ev.get("code"),
+                        "source": ev.get("source") or "",
+                        "fb_user_id": ev.get("fb_user_id") or "",
+                        "bucu_pct": ev.get("bucu"),
+                    }
+                )
+        for ev in _global_throttle_events:
             throttle_events.append(
                 {
                     "ts": ev["ts"],
-                    "account_id": aid,
-                    "path": ev["path"],
-                    "code": ev["code"],
+                    "scope": "global",
+                    "account_id": "",
+                    "path": ev.get("path") or "",
+                    "code": ev.get("code"),
+                    "source": ev.get("source") or "",
+                    "fb_user_id": ev.get("fb_user_id") or "",
+                    "bucu_pct": ev.get("bucu"),
                 }
             )
-    throttle_events.sort(key=lambda x: x["ts"], reverse=True)
-    throttle_events = throttle_events[:50]
+        throttle_events.sort(key=lambda x: x["ts"], reverse=True)
+        throttle_total = len(throttle_events)
+        throttle_events = throttle_events[:200]
 
     # Snapshot per-account cooldowns + convert monotonic → wall clock
     # so the frontend can render a real countdown. Drop expired entries
@@ -6320,48 +6542,85 @@ async def get_engineering_fb_calls():
     # less to keep the panel payload small).
     recent_slice = snapshot[-200:]
 
+    def _top_uid(counter: "Counter[str]") -> str:
+        return counter.most_common(1)[0][0] if counter else ""
+
+    top_paths = [
+        {
+            "path": p,
+            "count": c,
+            "live": int(path_stats[p]["live"]),
+            "cache_hits": int(path_stats[p]["cache_hits"]),
+            "blocked": int(path_stats[p]["blocked"]),
+            "errors": int(path_stats[p]["errors"]),
+            "top_source": path_stats[p]["sources"].most_common(1)[0][0]
+            if path_stats[p]["sources"]
+            else "unknown",
+            "top_user_id": _top_uid(path_stats[p]["users"]),
+        }
+        for p, c in path_counts.most_common(15)
+    ]
+    top_accounts = [
+        {"account_id": a, "count": c, "top_user_id": _top_uid(account_users.get(a, Counter()))}
+        for a, c in account_counts.most_common(15)
+    ]
+    top_sources = [
+        {
+            "source": s["source"],
+            "count": int(s["count"]),
+            "live": int(s["live"]),
+            "cache_hits": int(s["cache_hits"]),
+            "blocked": int(s["blocked"]),
+            "errors": int(s["errors"]),
+            "retried": int(s["retried"]),
+            "avg_ms": round(float(s["ms_total"]) / max(1, int(s["count"]))),
+            "last_status": int(s["last_status"]),
+            "last_path": s["last_path"],
+            "top_user_id": _top_uid(s["users"]),
+        }
+        for s in sorted(
+            source_stats.values(),
+            key=lambda x: (int(x["live"]) + int(x["blocked"]), int(x["errors"]), int(x["count"])),
+            reverse=True,
+        )[:15]
+    ]
+
+    # Batch-resolve every fb_user_id that appears anywhere in the payload
+    # to a display name, so ALL tables can show WHO. One query total.
+    uid_set: "set[str]" = set()
+    for e in recent_slice:
+        if e.get("fb_user_id"):
+            uid_set.add(str(e["fb_user_id"]))
+    for ev in throttle_events:
+        if ev.get("fb_user_id"):
+            uid_set.add(str(ev["fb_user_id"]))
+    for row in (*top_paths, *top_accounts, *top_sources):
+        if row.get("top_user_id"):
+            uid_set.add(str(row["top_user_id"]))
+    name_map = await _fb_user_display_names(uid_set)
+
+    def _name(uid: object) -> str:
+        u = str(uid or "")
+        return name_map.get(u, "") if u else ""
+
+    # Attach resolved names in place (recent is a raw dict list → copy so
+    # we don't mutate the ring buffer's shared dicts).
+    recent_out = [{**e, "fb_user_name": _name(e.get("fb_user_id"))} for e in recent_slice]
+    for ev in throttle_events:
+        ev["fb_user_name"] = _name(ev.get("fb_user_id"))
+    for row in (*top_paths, *top_accounts, *top_sources):
+        row["top_user_name"] = _name(row.get("top_user_id"))
+
     return {
-        "recent": recent_slice,
-        "top_paths_5m": [
-            {
-                "path": p,
-                "count": c,
-                "live": int(path_stats[p]["live"]),
-                "cache_hits": int(path_stats[p]["cache_hits"]),
-                "blocked": int(path_stats[p]["blocked"]),
-                "errors": int(path_stats[p]["errors"]),
-                "top_source": path_stats[p]["sources"].most_common(1)[0][0]
-                if path_stats[p]["sources"]
-                else "unknown",
-            }
-            for p, c in path_counts.most_common(15)
-        ],
-        "top_accounts_5m": [
-            {"account_id": a, "count": c} for a, c in account_counts.most_common(15)
-        ],
-        "top_sources_5m": [
-            {
-                "source": s["source"],
-                "count": int(s["count"]),
-                "live": int(s["live"]),
-                "cache_hits": int(s["cache_hits"]),
-                "blocked": int(s["blocked"]),
-                "errors": int(s["errors"]),
-                "retried": int(s["retried"]),
-                "avg_ms": round(float(s["ms_total"]) / max(1, int(s["count"]))),
-                "last_status": int(s["last_status"]),
-                "last_path": s["last_path"],
-            }
-            for s in sorted(
-                source_stats.values(),
-                key=lambda x: (int(x["live"]) + int(x["blocked"]), int(x["errors"]), int(x["count"])),
-                reverse=True,
-            )[:15]
-        ],
+        "recent": recent_out,
+        "top_paths_5m": top_paths,
+        "top_accounts_5m": top_accounts,
+        "top_sources_5m": top_sources,
         "status_counts_5m": [
             {"status": status, "count": count} for status, count in status_counts.most_common()
         ],
         "throttle_events": throttle_events,
+        "throttle_total": int(throttle_total or 0),
         "global_throttle_events": list(_global_throttle_events),
         "cache_hit_rate_5m": round(cache_hit_rate, 3),
         "account_throttle_until": cooldowns,

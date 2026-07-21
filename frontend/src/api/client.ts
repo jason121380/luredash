@@ -1157,6 +1157,8 @@ export const api = {
           error_code: number | null;
           retried: boolean;
           source: string;
+          fb_user_id: string;
+          fb_user_name: string;
         }>;
         top_paths_5m: Array<{
           path: string;
@@ -1166,8 +1168,15 @@ export const api = {
           blocked: number;
           errors: number;
           top_source: string;
+          top_user_id: string;
+          top_user_name: string;
         }>;
-        top_accounts_5m: Array<{ account_id: string; count: number }>;
+        top_accounts_5m: Array<{
+          account_id: string;
+          count: number;
+          top_user_id: string;
+          top_user_name: string;
+        }>;
         top_sources_5m: Array<{
           source: string;
           count: number;
@@ -1179,14 +1188,22 @@ export const api = {
           avg_ms: number;
           last_status: number;
           last_path: string;
+          top_user_id: string;
+          top_user_name: string;
         }>;
         status_counts_5m: Array<{ status: string; count: number }>;
         throttle_events: Array<{
           ts: number;
+          scope: string;
           account_id: string;
           path: string;
-          code: number;
+          code: number | null;
+          source: string;
+          fb_user_id: string;
+          fb_user_name: string;
+          bucu_pct: number | null;
         }>;
+        throttle_total: number;
         cache_hit_rate_5m: number;
         account_throttle_until: Record<string, number>;
         global_throttle_until: number | null;
