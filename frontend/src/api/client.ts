@@ -86,7 +86,9 @@ export interface IssuedInvoiceResult {
   mock: boolean;
 }
 
-/** A row in 開立紀錄 (list view — no raw PII payloads). */
+/** A row in 開立紀錄 (list view — no raw PII payloads). `total_amt` is
+ *  the 發票金額 (花費+5%); `spend` + `markup_percent` reconstruct the
+ *  花費+月% store amount ("金額"). */
 export interface EInvoiceRecord {
   id: string;
   store: string;
@@ -94,12 +96,23 @@ export interface EInvoiceRecord {
   buyer_name: string;
   buyer_tax_id: string;
   total_amt: number;
+  spend: number | null;
+  markup_percent: number | null;
   invoice_number: string | null;
   random_number: string | null;
   status: "issued" | "void" | "allowance";
   period: string | null;
   campaign_id: string | null;
   created_at: string | null;
+}
+
+/** Per-campaign remembered issue-form inputs. */
+export interface EInvoiceDraft {
+  category: InvoiceCategory;
+  item_name: string;
+  buyer_name: string;
+  tax_id: string;
+  email: string;
 }
 
 export interface LinePushConfig {
@@ -1275,6 +1288,12 @@ export const api = {
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
       return request<{ total: number; data: EInvoiceRecord[] }>("GET", `/api/einvoices${suffix}`);
     },
+    /** Per-campaign remembered issue inputs (category / item / buyer). */
+    drafts: () => request<{ data: Record<string, EInvoiceDraft> }>("GET", "/api/einvoice/drafts"),
+    saveDraft: (campaignId: string, body: EInvoiceDraft) =>
+      request<{ ok: boolean }>("POST", `/api/einvoice/drafts/${encodeURIComponent(campaignId)}`, {
+        body,
+      }),
   },
 
   nicknames: {

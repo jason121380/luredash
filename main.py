@@ -1320,6 +1320,23 @@ async def lifespan(app: FastAPI):
                 await conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_einvoices_status ON einvoices (status, created_at DESC)"
                 )
+                # `einvoice_campaign_drafts`: per-campaign remembered
+                # invoice inputs (category / item / buyer 統編-抬頭-email)
+                # so the 開立發票 modal prefills each 行銷活動 with what was
+                # entered last time. Keyed by campaign_id, team-wide.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS einvoice_campaign_drafts (
+                        campaign_id TEXT PRIMARY KEY,
+                        category    TEXT NOT NULL DEFAULT 'B2C',
+                        item_name   TEXT NOT NULL DEFAULT '廣告行銷',
+                        buyer_name  TEXT NOT NULL DEFAULT '',
+                        tax_id      TEXT NOT NULL DEFAULT '',
+                        email       TEXT NOT NULL DEFAULT '',
+                        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
                 # user_settings is keyed (fb_user_id, key) — the PK
                 # already covers fb_user_id-leading queries, but bare
                 # WHERE fb_user_id=$1 fan-outs benefit from being able
@@ -4588,6 +4605,66 @@ async def issue_einvoice(payload: IssueInvoicePayload):
     }
 
 
+class EInvoiceDraftPayload(BaseModel):
+    category: str = "B2C"
+    item_name: str = "廣告行銷"
+    buyer_name: str = ""
+    tax_id: str = ""
+    email: str = ""
+
+
+@app.get("/api/einvoice/drafts")
+async def list_einvoice_drafts():
+    """Per-campaign remembered issue inputs → {data: {campaign_id: {...}}}."""
+    _require_admin()
+    pool = _require_db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT campaign_id, category, item_name, buyer_name, tax_id, email FROM einvoice_campaign_drafts"
+        )
+    return {
+        "data": {
+            r["campaign_id"]: {
+                "category": r["category"],
+                "item_name": r["item_name"],
+                "buyer_name": r["buyer_name"],
+                "tax_id": r["tax_id"],
+                "email": r["email"],
+            }
+            for r in rows
+        }
+    }
+
+
+@app.post("/api/einvoice/drafts/{campaign_id}")
+async def upsert_einvoice_draft(campaign_id: str, payload: EInvoiceDraftPayload):
+    _require_admin()
+    pool = _require_db()
+    cid = (campaign_id or "").strip()
+    if not cid:
+        raise HTTPException(status_code=400, detail="缺少 campaign_id")
+    category = "B2B" if (payload.category or "").upper() == "B2B" else "B2C"
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO einvoice_campaign_drafts
+                (campaign_id, category, item_name, buyer_name, tax_id, email, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6, NOW())
+            ON CONFLICT (campaign_id) DO UPDATE SET
+                category = EXCLUDED.category,
+                item_name = EXCLUDED.item_name,
+                buyer_name = EXCLUDED.buyer_name,
+                tax_id = EXCLUDED.tax_id,
+                email = EXCLUDED.email,
+                updated_at = NOW()
+            """,
+            cid, category, (payload.item_name or "").strip() or "廣告行銷",
+            (payload.buyer_name or "").strip(), (payload.tax_id or "").strip(),
+            (payload.email or "").strip(),
+        )
+    return {"ok": True}
+
+
 @app.get("/api/einvoices")
 async def list_einvoices(
     store: Optional[str] = Query(None),
@@ -4620,6 +4697,7 @@ async def list_einvoices(
         rows = await conn.fetch(
             f"""
             SELECT id, store, category, buyer_name, buyer_tax_id, total_amt,
+                   spend, markup_percent,
                    invoice_number, random_number, status, period, campaign_id,
                    created_at
             FROM einvoices
@@ -4639,6 +4717,8 @@ async def list_einvoices(
                 "buyer_name": r["buyer_name"],
                 "buyer_tax_id": r["buyer_tax_id"],
                 "total_amt": r["total_amt"],
+                "spend": r["spend"],
+                "markup_percent": float(r["markup_percent"]) if r["markup_percent"] is not None else None,
                 "invoice_number": r["invoice_number"],
                 "random_number": r["random_number"],
                 "status": r["status"],
