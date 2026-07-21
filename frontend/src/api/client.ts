@@ -1288,6 +1288,8 @@ export const api = {
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
       return request<{ total: number; data: EInvoiceRecord[] }>("GET", `/api/einvoices${suffix}`);
     },
+    remove: (id: string) =>
+      request<{ ok: boolean }>("DELETE", `/api/einvoices/${encodeURIComponent(id)}`),
     /** Per-campaign remembered issue inputs (category / item / buyer). */
     drafts: () => request<{ data: Record<string, EInvoiceDraft> }>("GET", "/api/einvoice/drafts"),
     saveDraft: (campaignId: string, body: EInvoiceDraft) =>
