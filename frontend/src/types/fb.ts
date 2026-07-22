@@ -120,6 +120,9 @@ export interface FbVideoData {
 export interface FbChildAttachment {
   picture?: string;
   image_hash?: string;
+  /** Present when this carousel card is a video — resolve a playable
+   * source via `useVideoSource`; `picture` is then the poster frame. */
+  video_id?: string;
   link?: string;
   name?: string;
   description?: string;
