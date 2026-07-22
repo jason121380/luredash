@@ -1,6 +1,7 @@
 import { useAccounts } from "@/api/hooks/useAccounts";
 import { useAdsets } from "@/api/hooks/useAdsets";
 import { mutationErrorMessage, useEntityStatusMutation } from "@/api/hooks/useEntityMutations";
+import { useNicknames } from "@/api/hooks/useNicknames";
 import { Badge } from "@/components/Badge";
 import { confirm } from "@/components/ConfirmDialog";
 import { FbCampaignLink } from "@/components/FbCampaignLink";
@@ -13,7 +14,7 @@ import { getIns, getMsgCount } from "@/lib/insights";
 import { useFinanceStore } from "@/stores/financeStore";
 import { useUiStore } from "@/stores/uiStore";
 import type { FbCampaign, FbEntityStatus } from "@/types/fb";
-import { markupFor } from "@/views/finance/financeData";
+import { formatNickname, markupFor } from "@/views/finance/financeData";
 import { memo, useEffect, useState } from "react";
 import { AdsetRow } from "./AdsetRow";
 import type { BudgetModalTarget } from "./BudgetModal";
@@ -72,6 +73,12 @@ function CampaignRowInner({
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
   const markupPercent = markupFor(campaign.id, rowMarkups, defaultMarkup);
   const showSpendPlus = extras.includes("spend_plus");
+  // 店家 · 設計師 nickname (falls back to raw campaign name) — threaded to
+  // the creative preview so downloads are named「暱稱 廣告名稱」not the FB
+  // CDN gibberish filename.
+  const nicknames = useNicknames();
+  const campaignLabel =
+    campaign.nickname?.trim() || formatNickname(nicknames.data?.[campaign.id]) || campaign.name;
 
   const ins = getIns(campaign);
   const msgs = getMsgCount(campaign);
@@ -218,7 +225,7 @@ function CampaignRowInner({
           multiAcct={multiAcct}
           date={date}
           onOpenBudget={onOpenBudget}
-          campaignName={campaign.name}
+          campaignName={campaignLabel}
           extras={extras}
           campaignMarkup={markupPercent}
         />

@@ -6,7 +6,7 @@ import { Modal } from "@/components/Modal";
 import { Spinner } from "@/components/Spinner";
 import { fbPostLinkFromStoryId, isFrontPostCreative, pageIdFromStoryId } from "@/lib/fbLinks";
 import type { FbCreativeEntity } from "@/types/fb";
-import { useEffect, useState } from "react";
+import { type MouseEvent, useEffect, useState } from "react";
 
 /**
  * Preview modal for a 3rd-level ad creative. Rendered from the
@@ -262,6 +262,15 @@ export function CreativePreviewModal({
     .filter((c) => c.picture || c.videoId);
   const isCarousel = !videoId && carouselCards.length > 1;
 
+  // Download filename root =「行銷活動暱稱 廣告名稱」. `campaignName` is the
+  // parent campaign's 店家·設計師 nickname (resolved by CampaignRow); the
+  // creative's own name is the 廣告名稱. Falls back gracefully when either
+  // is missing. buildDownloadName strips unsafe chars + appends the ext.
+  const downloadBase =
+    [campaignName?.trim(), creative?.name?.trim()].filter(Boolean).join(" ") ||
+    creative?.name ||
+    "creative";
+
   // "View original post" URL resolution.
   //
   // We used to pass `instagram_permalink_url` straight through for
@@ -444,7 +453,11 @@ export function CreativePreviewModal({
         ) : (
           <div className="flex flex-col gap-3">
             {isCarousel ? (
-              <CarouselBlock cards={carouselCards} creativeName={creative.name} />
+              <CarouselBlock
+                cards={carouselCards}
+                creativeName={creative.name}
+                downloadBase={downloadBase}
+              />
             ) : (
               <MediaBlock
                 creativeName={creative.name}
@@ -467,14 +480,16 @@ export function CreativePreviewModal({
               />
             )}
 
-            <DownloadAssetButton
-              creativeName={campaignName?.trim() || creative.name}
-              videoSource={videoQuery.data?.source ?? null}
-              postVideoSource={postVideoSource}
-              previewImage={
-                (isCarousel ? (carouselCards[0]?.picture ?? null) : previewImage) ?? null
-              }
-            />
+            {/* Carousel cards each carry their own 下載 button (per-card
+                media differs), so the single bottom button is hidden there. */}
+            {!isCarousel && (
+              <DownloadAssetButton
+                creativeName={downloadBase}
+                videoSource={videoQuery.data?.source ?? null}
+                postVideoSource={postVideoSource}
+                previewImage={previewImage ?? null}
+              />
+            )}
 
             {creativeBody && (
               <p className="w-full whitespace-pre-wrap text-[13px] leading-relaxed text-ink">
@@ -758,9 +773,13 @@ interface CarouselCardData {
 function CarouselBlock({
   cards,
   creativeName,
+  downloadBase,
 }: {
   cards: CarouselCardData[];
   creativeName: string;
+  /** Filename root「暱稱 廣告名稱」for the per-card 下載 button. Omitted in
+   *  minimal (report) mode → no download button. */
+  downloadBase?: string;
 }) {
   return (
     <div className="relative">
@@ -773,6 +792,9 @@ function CarouselBlock({
             key={card.videoId ?? card.picture ?? i}
             card={card}
             label={`${creativeName} - ${i + 1}`}
+            // Multi-card downloads get a「-N」suffix so saving several
+            // cards doesn't overwrite one file.
+            downloadName={downloadBase ? `${downloadBase}-${i + 1}` : undefined}
           />
         ))}
       </div>
@@ -784,61 +806,138 @@ function CarouselBlock({
  * One carousel card. When the card carries a `videoId` we resolve a
  * playable source (poster = its `picture`) and render a `<video>`; while
  * that resolves — or if it fails / the viewer isn't authed — we fall back
- * to the poster image. A dead image URL hides just this card.
+ * to the poster image. A dead image URL hides just this card. When
+ * `downloadName` is set, an overlaid 下載 button saves this card's media
+ * (video preferred) under「暱稱 廣告名稱-N」instead of the FB CDN filename.
  */
-function CarouselCard({ card, label }: { card: CarouselCardData; label: string }) {
+function CarouselCard({
+  card,
+  label,
+  downloadName,
+}: {
+  card: CarouselCardData;
+  label: string;
+  downloadName?: string;
+}) {
   const [broken, setBroken] = useState(false);
   const vid = useVideoSource(card.videoId, !!card.videoId);
   const videoSource = vid.data?.source ?? null;
   const poster = vid.data?.picture ?? card.picture ?? null;
-  const cls =
-    "max-h-[70vh] w-[86%] shrink-0 snap-center rounded-lg border border-border object-contain last:mr-0";
+  const wrapCls = "relative w-[86%] shrink-0 snap-center last:mr-0";
+  const mediaCls = "max-h-[70vh] w-full rounded-lg border border-border object-contain";
 
-  if (card.videoId) {
-    if (vid.isLoading || vid.isPending) {
-      return (
-        <div
-          className={`flex ${cls.replace("object-contain", "")} min-h-[240px] items-center justify-center bg-bg`}
-        >
-          <Spinner size={22} />
-        </div>
-      );
-    }
-    if (videoSource) {
-      return (
-        // biome-ignore lint/a11y/useMediaCaption: FB ad videos have no caption track available via the Graph API.
+  if (card.videoId && (vid.isLoading || vid.isPending)) {
+    return (
+      <div
+        className={`${wrapCls} flex min-h-[240px] items-center justify-center rounded-lg border border-border bg-bg`}
+      >
+        <Spinner size={22} />
+      </div>
+    );
+  }
+
+  const downloadUrl = videoSource ?? poster;
+  const isVideo = !!videoSource;
+  const overlay =
+    downloadName && downloadUrl ? (
+      <CardDownloadButton url={downloadUrl} name={downloadName} isVideo={isVideo} />
+    ) : null;
+
+  if (card.videoId && videoSource) {
+    return (
+      <div className={wrapCls}>
+        {/* biome-ignore lint/a11y/useMediaCaption: FB ad videos have no caption track available via the Graph API. */}
         <video
           controls
           playsInline
           src={videoSource}
           poster={poster ?? undefined}
-          className={`${cls} bg-black`}
+          className={`${mediaCls} bg-black`}
         >
           您的瀏覽器不支援 HTML5 video。
         </video>
-      );
-    }
-    // Video source unavailable (not authed / resolve failed) → poster.
+        {overlay}
+      </div>
+    );
   }
 
   if (poster && !broken) {
     return (
-      <img
-        src={poster}
-        alt={label}
-        loading="lazy"
-        decoding="async"
-        onError={() => setBroken(true)}
-        className={cls}
-      />
+      <div className={wrapCls}>
+        <img
+          src={poster}
+          alt={label}
+          loading="lazy"
+          decoding="async"
+          onError={() => setBroken(true)}
+          className={mediaCls}
+        />
+        {overlay}
+      </div>
     );
   }
   return (
     <div
-      className={`flex ${cls} min-h-[200px] items-center justify-center bg-bg text-xs text-gray-300`}
+      className={`${wrapCls} flex min-h-[200px] items-center justify-center rounded-lg border border-border bg-bg text-xs text-gray-300`}
     >
       無法載入
     </div>
+  );
+}
+
+/** Small download button overlaid on a carousel card (bottom-left) so
+ *  each card can be saved as「暱稱 廣告名稱-N」rather than the FB CDN
+ *  filename you'd get from the browser's native video/image save. */
+function CardDownloadButton({
+  url,
+  name,
+  isVideo,
+}: {
+  url: string;
+  name: string;
+  isVideo: boolean;
+}) {
+  const [busy, setBusy] = useState(false);
+  const onClick = async (e: MouseEvent) => {
+    e.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    try {
+      await downloadAsset(url, buildDownloadName(name, url, isVideo));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={(e) => void onClick(e)}
+      disabled={busy}
+      title="下載"
+      aria-label="下載"
+      className="absolute bottom-2 left-2 inline-flex items-center gap-1 rounded-pill bg-white/95 px-2.5 py-1 text-[12px] font-semibold text-ink shadow-md backdrop-blur hover:bg-white active:scale-[0.98] disabled:opacity-60"
+    >
+      {busy ? (
+        <Spinner size={13} />
+      ) : (
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+      )}
+      {busy ? "下載中" : "下載"}
+    </button>
   );
 }
 
