@@ -115,12 +115,33 @@ export interface FbVideoData {
   message?: string;
 }
 
+/** One card of a carousel ad (`link_data.child_attachments[]`). `picture`
+ * is a display-size image URL (much larger than the 120px row thumbnail). */
+export interface FbChildAttachment {
+  picture?: string;
+  image_hash?: string;
+  link?: string;
+  name?: string;
+  description?: string;
+}
+
+export interface FbLinkData {
+  message?: string;
+  name?: string;
+  description?: string;
+  /** Single-card image URL (non-carousel link ads). */
+  picture?: string;
+  /** Present on CAROUSEL ads — one entry per card. */
+  child_attachments?: FbChildAttachment[];
+}
+
 export interface FbObjectStorySpec {
   video_data?: FbVideoData;
-  /** Present when the creative was authored inline as an image ad in
-   * Ads Manager. Opaque shape — we only check presence to tell
-   * inline-authored dark posts apart from front-stage boosted posts. */
-  link_data?: Record<string, unknown>;
+  /** Present when the creative was authored inline as an image/link ad in
+   * Ads Manager. `child_attachments` carries the carousel cards; a bare
+   * `link_data` (no children) is a single-image dark post. Presence alone
+   * still classifies inline-authored dark posts vs front-stage posts. */
+  link_data?: FbLinkData;
   photo_data?: Record<string, unknown>;
   template_data?: Record<string, unknown>;
 }

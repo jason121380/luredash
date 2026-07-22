@@ -7348,8 +7348,17 @@ async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Opti
     # post (``object_story_spec`` absent or empty). Without these
     # fields the "前台貼文" badge misfires on every ad because FB
     # returns ``effective_object_story_id`` for everything.
+    # ``link_data`` is expanded to include ``child_attachments`` so the
+    # preview modal can render a CAROUSEL ad's multiple cards (each card's
+    # ``picture`` is a proper display-size image, unlike the 120px row
+    # ``thumbnail_url``). ``picture`` on the parent link_data is the single
+    # non-carousel card image. If an account rejects this deeper expansion
+    # the fetch falls through to tier 2 (object_story_spec dropped).
     oss_expanded = (
-        "object_story_spec{video_data,link_data,photo_data,template_data}"
+        "object_story_spec{video_data,"
+        "link_data{message,name,description,picture,"
+        "child_attachments{picture,image_hash,link,name,description}},"
+        "photo_data,template_data}"
     )
     # Note: ``creative{id,...}`` — we explicitly request the creative
     # id so the frontend can hit /api/creatives/{id}/hires-thumbnail
