@@ -7354,10 +7354,13 @@ async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Opti
     # ``thumbnail_url``). ``picture`` on the parent link_data is the single
     # non-carousel card image. If an account rejects this deeper expansion
     # the fetch falls through to tier 2 (object_story_spec dropped).
+    # Each carousel card may itself be a VIDEO — ``video_id`` on the child
+    # attachment lets the preview resolve a playable source per card
+    # (``picture`` is then only that card's poster frame).
     oss_expanded = (
         "object_story_spec{video_data,"
         "link_data{message,name,description,picture,"
-        "child_attachments{picture,image_hash,link,name,description}},"
+        "child_attachments{picture,image_hash,video_id,link,name,description}},"
         "photo_data,template_data}"
     )
     # Note: ``creative{id,...}`` — we explicitly request the creative
