@@ -249,6 +249,19 @@ export function CreativePreviewModal({
   const videoPoster = creative?.creative?.object_story_spec?.video_data?.image_url ?? previewImage;
   const creativeBody = creative?.creative?.body;
 
+  // Carousel (輪播) ads: link_data.child_attachments holds one card per
+  // slide, each with a display-size `picture` (far sharper than the 120px
+  // row thumbnail). child_attachments is the RELIABLE carousel signal —
+  // asset_feed_spec.images can also hold >1 entry but those are Advantage+
+  // creative *variants* (FB picks one), not carousel cards, so we don't
+  // treat them as a carousel. A carousel takes precedence over the single
+  // image/hires chain (but never over a video ad).
+  const carouselImages =
+    creative?.creative?.object_story_spec?.link_data?.child_attachments
+      ?.map((c) => c.picture)
+      .filter((u): u is string => !!u) ?? [];
+  const isCarousel = !videoId && carouselImages.length > 1;
+
   // "View original post" URL resolution.
   //
   // We used to pass `instagram_permalink_url` straight through for
@@ -403,28 +416,11 @@ export function CreativePreviewModal({
       {creative &&
         (minimal ? (
           // 報告 creative card: bare media only — no header, download, or
-          // body. Video autoplays; image just shows.
-          <MediaBlock
-            creativeName={creative.name}
-            videoId={videoId}
-            videoQueryLoading={videoQuery.isLoading || videoQuery.isPending}
-            videoSource={videoQuery.data?.source ?? null}
-            videoPicture={videoQuery.data?.picture ?? null}
-            videoPoster={videoPoster ?? null}
-            isFrontPost={isFrontPost}
-            postMediaLoading={postMediaQuery.isLoading || postMediaQuery.isPending}
-            hiresLoading={hiresQuery.isLoading || hiresQuery.isFetching}
-            needsHires={needsHires}
-            postVideoSource={postVideoSource}
-            previewImage={previewImage ?? null}
-            hiResFailed={hiResFailed}
-            thumb={thumb ?? null}
-            imgError={imgError}
-            onImgError={() => setImgError(true)}
-            postUrl={postUrl}
-          />
-        ) : (
-          <div className="flex flex-col gap-3">
+          // body. Video autoplays; image just shows. Carousels show the
+          // multi-card strip.
+          isCarousel ? (
+            <CarouselBlock images={carouselImages} creativeName={creative.name} />
+          ) : (
             <MediaBlock
               creativeName={creative.name}
               videoId={videoId}
@@ -444,12 +440,38 @@ export function CreativePreviewModal({
               onImgError={() => setImgError(true)}
               postUrl={postUrl}
             />
+          )
+        ) : (
+          <div className="flex flex-col gap-3">
+            {isCarousel ? (
+              <CarouselBlock images={carouselImages} creativeName={creative.name} />
+            ) : (
+              <MediaBlock
+                creativeName={creative.name}
+                videoId={videoId}
+                videoQueryLoading={videoQuery.isLoading || videoQuery.isPending}
+                videoSource={videoQuery.data?.source ?? null}
+                videoPicture={videoQuery.data?.picture ?? null}
+                videoPoster={videoPoster ?? null}
+                isFrontPost={isFrontPost}
+                postMediaLoading={postMediaQuery.isLoading || postMediaQuery.isPending}
+                hiresLoading={hiresQuery.isLoading || hiresQuery.isFetching}
+                needsHires={needsHires}
+                postVideoSource={postVideoSource}
+                previewImage={previewImage ?? null}
+                hiResFailed={hiResFailed}
+                thumb={thumb ?? null}
+                imgError={imgError}
+                onImgError={() => setImgError(true)}
+                postUrl={postUrl}
+              />
+            )}
 
             <DownloadAssetButton
               creativeName={campaignName?.trim() || creative.name}
               videoSource={videoQuery.data?.source ?? null}
               postVideoSource={postVideoSource}
-              previewImage={previewImage ?? null}
+              previewImage={(isCarousel ? carouselImages[0] : previewImage) ?? null}
             />
 
             {creativeBody && (
@@ -716,6 +738,48 @@ function MediaBlock(props: MediaBlockProps) {
   return (
     <div className="flex min-h-[200px] w-full items-center justify-center rounded-lg border border-border bg-bg text-xs text-gray-300">
       無預覽素材
+    </div>
+  );
+}
+
+/**
+ * Carousel (輪播) ad — horizontal scroll-snap strip of the card images.
+ * Each card's `picture` is a display-size image (sharp at modal scale,
+ * unlike the 120px row thumbnail the single-image path fell back to).
+ * A count chip tells the user how many cards there are; individual
+ * `<img onError>` failures hide just that card so one dead CDN URL
+ * doesn't blank the whole strip.
+ */
+function CarouselBlock({ images, creativeName }: { images: string[]; creativeName: string }) {
+  const [broken, setBroken] = useState<Record<number, boolean>>({});
+  const visible = images.filter((_, i) => !broken[i]);
+  if (visible.length === 0) {
+    return (
+      <div className="flex min-h-[200px] w-full items-center justify-center rounded-lg border border-border bg-bg text-xs text-gray-300">
+        無預覽素材
+      </div>
+    );
+  }
+  return (
+    <div className="relative">
+      <div className="absolute right-2 top-2 z-[1] rounded-pill bg-black/55 px-2 py-0.5 text-[11px] font-semibold text-white">
+        輪播 · {images.length} 張
+      </div>
+      <div className="flex snap-x snap-mandatory gap-2 overflow-x-auto rounded-lg [scrollbar-width:thin]">
+        {images.map((src, i) =>
+          broken[i] ? null : (
+            <img
+              key={src}
+              src={src}
+              alt={`${creativeName} - ${i + 1}`}
+              loading="lazy"
+              decoding="async"
+              onError={() => setBroken((b) => ({ ...b, [i]: true }))}
+              className="max-h-[70vh] w-[86%] shrink-0 snap-center rounded-lg border border-border object-contain last:mr-0"
+            />
+          ),
+        )}
+      </div>
     </div>
   );
 }
