@@ -53,7 +53,11 @@ export function useIssueInvoice() {
   return useMutation({
     mutationFn: (body: IssueInvoiceInput) => api.einvoice.issue(body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["einvoices"] });
+      // refetchType: "all" — the 開立紀錄 tab is unmounted while the user
+      // is on the 開立 tab, so the default "active" refetch would only mark
+      // it stale (showing the pre-issue list on switch). "all" refetches the
+      // inactive query immediately so the new invoice is there right away.
+      qc.invalidateQueries({ queryKey: ["einvoices"], refetchType: "all" });
     },
   });
 }
@@ -71,7 +75,7 @@ export function useDeleteEInvoice() {
   return useMutation({
     mutationFn: (id: string) => api.einvoice.remove(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["einvoices"] });
+      qc.invalidateQueries({ queryKey: ["einvoices"], refetchType: "all" });
     },
   });
 }
