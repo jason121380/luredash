@@ -1319,6 +1319,12 @@ function FbCallsPanel() {
     const d = new Date(ts * 1000);
     return d.toLocaleTimeString("zh-TW", { hour12: false });
   };
+  // 限流事件全紀錄是持久化歷史(可跨天),所以要帶日期,不能只有時間。
+  const formatDateTime = (ts: number) => {
+    const d = new Date(ts * 1000);
+    const date = d.toLocaleDateString("zh-TW", { month: "numeric", day: "numeric" });
+    return `${date} ${d.toLocaleTimeString("zh-TW", { hour12: false })}`;
+  };
   const formatStatusBadge = (e: NonNullable<typeof recent>[number]) => {
     if (e.cache_hit) {
       return (
@@ -1689,7 +1695,7 @@ function FbCallsPanel() {
                       {isLatest && (
                         <span className="rounded bg-white/25 px-1 text-[10px]">最後爆</span>
                       )}
-                      <span className="font-mono">{formatTs(ev.ts)}</span>
+                      <span className="font-mono">{formatDateTime(ev.ts)}</span>
                       <span
                         className={cn(
                           "rounded px-1 text-[10px]",
