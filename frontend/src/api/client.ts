@@ -132,6 +132,8 @@ export interface EInvoiceMerchant {
   is_test: boolean;
   has_key: boolean;
   has_iv: boolean;
+  /** Default invoice email, prefilled into the 開立 form. */
+  default_email: string;
   updated_at: string | null;
 }
 
@@ -141,6 +143,7 @@ export interface EInvoiceMerchantInput {
   hash_key: string;
   hash_iv: string;
   is_test: boolean;
+  default_email: string;
 }
 
 export interface LinePushConfig {
@@ -1335,6 +1338,13 @@ export const api = {
     },
     remove: (id: string) =>
       request<{ ok: boolean }>("DELETE", `/api/einvoices/${encodeURIComponent(id)}`),
+    /** 作廢 an issued invoice via ezPay, then mark the row void. */
+    void: (id: string, reason: string) =>
+      request<{ ok: boolean; invoice_number: string; mock: boolean }>(
+        "POST",
+        `/api/einvoice/${encodeURIComponent(id)}/void`,
+        { body: { reason } },
+      ),
     /** Per-campaign remembered issue inputs (category / item / buyer). */
     drafts: () => request<{ data: Record<string, EInvoiceDraft> }>("GET", "/api/einvoice/drafts"),
     saveDraft: (campaignId: string, body: EInvoiceDraft) =>

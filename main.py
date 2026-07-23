@@ -1395,6 +1395,13 @@ async def lifespan(app: FastAPI):
                     )
                     """
                 )
+                # Default invoice email — prefilled into the 開立 form for
+                # 個人 (cloud carrier) + 公司 invoices when a campaign has no
+                # remembered email. Not a secret; returned by the GET.
+                await conn.execute(
+                    "ALTER TABLE einvoice_merchants "
+                    "ADD COLUMN IF NOT EXISTS default_email TEXT NOT NULL DEFAULT ''"
+                )
                 # user_settings is keyed (fb_user_id, key) — the PK
                 # already covers fb_user_id-leading queries, but bare
                 # WHERE fb_user_id=$1 fan-outs benefit from being able
@@ -4854,6 +4861,7 @@ class EInvoiceMerchantPayload(BaseModel):
     hash_key: str = ""
     hash_iv: str = ""
     is_test: bool = True
+    default_email: str = ""
 
 
 @app.get("/api/einvoice/merchant")
@@ -4865,7 +4873,7 @@ async def get_einvoice_merchant():
     pool = _require_db()
     async with pool.acquire() as conn:
         r = await conn.fetchrow(
-            "SELECT merchant_id, is_test, hash_key, hash_iv, updated_at "
+            "SELECT merchant_id, is_test, hash_key, hash_iv, default_email, updated_at "
             "FROM einvoice_merchants WHERE account_id = $1",
             _EZPAY_GLOBAL_KEY,
         )
@@ -4877,6 +4885,7 @@ async def get_einvoice_merchant():
             "is_test": bool(r["is_test"]),
             "has_key": len(r["hash_key"] or "") == 32,
             "has_iv": len(r["hash_iv"] or "") == 16,
+            "default_email": r["default_email"] or "",
             "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
         }
     }
@@ -4909,17 +4918,20 @@ async def upsert_einvoice_merchant(payload: EInvoiceMerchantPayload):
             raise HTTPException(status_code=400, detail="HashIV 需 16 碼")
         await conn.execute(
             """
-            INSERT INTO einvoice_merchants (account_id, merchant_id, hash_key, hash_iv, is_test, updated_by, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            INSERT INTO einvoice_merchants
+                (account_id, merchant_id, hash_key, hash_iv, is_test, default_email, updated_by, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
             ON CONFLICT (account_id) DO UPDATE
             SET merchant_id = EXCLUDED.merchant_id,
                 hash_key = EXCLUDED.hash_key,
                 hash_iv = EXCLUDED.hash_iv,
                 is_test = EXCLUDED.is_test,
+                default_email = EXCLUDED.default_email,
                 updated_by = EXCLUDED.updated_by,
                 updated_at = NOW()
             """,
-            _EZPAY_GLOBAL_KEY, merchant_id, hash_key, hash_iv, bool(payload.is_test), uid,
+            _EZPAY_GLOBAL_KEY, merchant_id, hash_key, hash_iv, bool(payload.is_test),
+            (payload.default_email or "").strip(), uid,
         )
     return {"ok": True}
 
@@ -5013,8 +5025,9 @@ async def upsert_einvoice_draft(campaign_id: str, payload: EInvoiceDraftPayload)
 
 @app.delete("/api/einvoices/{einvoice_id}")
 async def delete_einvoice(einvoice_id: str):
-    """Hard-delete an 開立紀錄 row. Admin-gated. Used to clear test /
-    mock records (a real issued invoice would be 作廢, added later)."""
+    """Hard-delete an 開立紀錄 row. Admin-gated. Retained for internal
+    cleanup, but the operator-facing action is 作廢 (void) below — a real
+    issued invoice must be voided at ezPay, not silently deleted."""
     _require_admin()
     pool = _require_db()
     if not _UUID_RE.match(einvoice_id):
@@ -5022,6 +5035,66 @@ async def delete_einvoice(einvoice_id: str):
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM einvoices WHERE id = $1::uuid", einvoice_id)
     return {"ok": True}
+
+
+class VoidInvoicePayload(BaseModel):
+    reason: str = "開立錯誤"
+
+
+@app.post("/api/einvoice/{einvoice_id}/void")
+async def void_einvoice(einvoice_id: str, payload: VoidInvoicePayload):
+    """作廢 an issued invoice via ezPay ``/Api/invoice_invalid``, then mark
+    the row status='void'. Admin-gated."""
+    _require_admin()
+    pool = _require_db()
+    if _http_client is None:
+        raise HTTPException(status_code=503, detail="HTTP client 尚未就緒")
+    if not _UUID_RE.match(einvoice_id):
+        raise HTTPException(status_code=404, detail="找不到發票紀錄")
+    reason = (payload.reason or "").strip() or "開立錯誤"
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT invoice_number, status FROM einvoices WHERE id = $1::uuid", einvoice_id
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="找不到發票紀錄")
+    if row["status"] == "void":
+        raise HTTPException(status_code=400, detail="此發票已作廢")
+    invoice_number = (row["invoice_number"] or "").strip()
+    if not invoice_number:
+        raise HTTPException(status_code=400, detail="此紀錄沒有發票號碼,無法作廢")
+
+    creds = await _resolve_ezpay_creds()
+    ts = int(time.time())
+    print(
+        f"[einvoice] void → host={creds['base']} merchant={creds['merchant_id']} "
+        f"invoice={invoice_number} reason={reason}",
+        flush=True,
+    )
+    try:
+        result = await ezpay_client.invalidate_invoice(
+            _http_client,
+            base=creds["base"],
+            merchant_id=creds["merchant_id"],
+            hash_key=creds["hash_key"],
+            hash_iv=creds["hash_iv"],
+            invoice_number=invoice_number,
+            reason=reason,
+            timestamp=ts,
+            mock=creds["mock"],
+        )
+    except ezpay_client.EzpayError as e:
+        print(f"[einvoice] void FAILED invoice={invoice_number}: {e.friendly_message}", flush=True)
+        raise HTTPException(status_code=400, detail=e.friendly_message) from e
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE einvoices SET status='void', void_reason=$2, void_at=NOW() "
+            "WHERE id = $1::uuid",
+            einvoice_id, reason,
+        )
+    return {"ok": True, "invoice_number": invoice_number, "mock": bool(result.get("_mock"))}
 
 
 @app.get("/api/einvoices")
