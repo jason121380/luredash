@@ -4618,10 +4618,17 @@ class IssueInvoicePayload(BaseModel):
     category: str                      # B2B | B2C
     total_amt: int                     # 花費+% 含稅總額
     item_name: str = "廣告行銷"
-    # buyer (B2B only; B2C 雲端發票 needs nothing)
+    # buyer (B2B only)
     buyer_name: str = ""
     tax_id: str = ""
     email: str = ""
+    # B2C 載具 (ezPay requires a carrier OR a donation code when PrintFlag=N):
+    #   carrier = 'mobile'  → 手機條碼載具 (CarrierType=0, CarrierNum=barcode)
+    #           | 'cloud'   → ezPay 會員載具/雲端 (CarrierType=2, CarrierNum=email)
+    #           | 'donation'→ 捐贈 (LoveCode, no carrier)
+    carrier: str = "cloud"
+    carrier_num: str = ""              # 手機條碼 (mobile)
+    love_code: str = ""                # 捐贈碼 (donation)
     # provenance (for the record + the cost-center hook)
     store: str = ""
     account_id: str = ""
@@ -4696,6 +4703,9 @@ async def issue_einvoice(payload: IssueInvoicePayload):
     tax_id = (payload.tax_id or "").strip()
     buyer_name = (payload.buyer_name or "").strip()
     email = (payload.email or "").strip()
+    # B2C carrier fields — ezPay INV10013 rejects PrintFlag=N with no
+    # carrier / no 捐贈碼, so 個人 MUST pick one.
+    carrier_params: dict = {}
     if category == "B2B":
         if not _valid_tw_tax_id(tax_id):
             raise HTTPException(status_code=400, detail="統一編號格式錯誤(需 8 碼且通過檢查碼)")
@@ -4703,10 +4713,30 @@ async def issue_einvoice(payload: IssueInvoicePayload):
             raise HTTPException(status_code=400, detail="B2B 需填寫公司抬頭")
         print_flag = "Y"
     else:
-        # B2C 雲端發票 — no carrier / no 統編; ezPay stores it in the
-        # cloud (買方載具 = the merchant's default). PrintFlag N.
+        # B2C — not printed (cloud), so a carrier or a donation code is
+        # mandatory. 'cloud' = ezPay 會員載具 keyed by email (simplest);
+        # 'mobile' = 手機條碼載具; 'donation' = 捐贈碼.
         tax_id = ""
         print_flag = "N"
+        carrier = (payload.carrier or "cloud").strip().lower()
+        if carrier == "mobile":
+            barcode = (payload.carrier_num or "").strip().upper()
+            if not re.match(r"^/[0-9A-Z.\-+]{7}$", barcode):
+                raise HTTPException(
+                    status_code=400, detail="手機條碼載具格式錯誤(需 8 碼,以 / 開頭)"
+                )
+            carrier_params = {"CarrierType": "0", "CarrierNum": barcode}
+        elif carrier == "donation":
+            love_code = (payload.love_code or "").strip()
+            if not (love_code.isdigit() and 3 <= len(love_code) <= 7):
+                raise HTTPException(status_code=400, detail="愛心捐贈碼格式錯誤(3-7 碼數字)")
+            carrier_params = {"LoveCode": love_code}
+        else:  # cloud (ezPay 會員載具, CarrierNum = email)
+            if not email:
+                raise HTTPException(
+                    status_code=400, detail="個人(雲端發票)需填寫 Email 作為載具"
+                )
+            carrier_params = {"CarrierType": "2", "CarrierNum": email}
 
     # 應稅 5%: derive TaxAmt by subtraction.
     amt = round(total / 1.05)
@@ -4737,6 +4767,7 @@ async def issue_einvoice(payload: IssueInvoicePayload):
         "ItemUnit": "式",
         "ItemPrice": str(item_amt),
         "ItemAmt": str(item_amt),
+        **carrier_params,
     }
 
     creds = await _resolve_ezpay_creds()

@@ -1,4 +1,4 @@
-import type { EInvoiceDraft, EInvoiceRecord, InvoiceCategory } from "@/api/client";
+import type { EInvoiceDraft, EInvoiceRecord, InvoiceCarrier, InvoiceCategory } from "@/api/client";
 import { friendlyApiError } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import {
@@ -507,6 +507,10 @@ function IssueModal({
   const [buyerName, setBuyerName] = useState(draft?.buyer_name ?? "");
   const [taxId, setTaxId] = useState(draft?.tax_id ?? "");
   const [email, setEmail] = useState(draft?.email ?? "");
+  // B2C 載具 — ezPay requires one (免填 is rejected as INV10013).
+  const [carrier, setCarrier] = useState<InvoiceCarrier>("cloud");
+  const [carrierNum, setCarrierNum] = useState("");
+  const [loveCode, setLoveCode] = useState("");
   const [issued, setIssued] = useState<{ number: string | null; mock: boolean } | null>(null);
 
   const money = (v: number) => `$${fM(v)}`;
@@ -545,6 +549,20 @@ function IssueModal({
         toast("請填寫公司抬頭", "error");
         return;
       }
+    } else {
+      // B2C carrier validation (mirrors the backend).
+      if (carrier === "cloud" && !email.trim()) {
+        toast("雲端發票需填寫 Email 作為載具", "error");
+        return;
+      }
+      if (carrier === "mobile" && !/^\/[0-9A-Z.\-+]{7}$/.test(carrierNum.trim().toUpperCase())) {
+        toast("手機條碼需 8 碼、以 / 開頭", "error");
+        return;
+      }
+      if (carrier === "donation" && !/^\d{3,7}$/.test(loveCode.trim())) {
+        toast("愛心捐贈碼需 3-7 碼數字", "error");
+        return;
+      }
     }
     try {
       const res = await issue.mutateAsync({
@@ -555,6 +573,9 @@ function IssueModal({
         buyer_name: buyerName.trim(),
         tax_id: category === "B2B" ? taxId.trim() : "",
         email: email.trim(),
+        carrier: category === "B2C" ? carrier : undefined,
+        carrier_num: category === "B2C" && carrier === "mobile" ? carrierNum.trim() : undefined,
+        love_code: category === "B2C" && carrier === "donation" ? loveCode.trim() : undefined,
         store: row.store,
         account_id: row.accountId,
         campaign_id: row.campaignId,
@@ -657,9 +678,65 @@ function IssueModal({
                 </Field>
               </>
             ) : (
-              <div className="flex items-center text-[12px] text-gray-400">
-                個人發票開立為雲端發票,無需填寫買方資料。
-              </div>
+              <>
+                <Field label="載具類別">
+                  <div className="flex flex-wrap gap-1 self-start rounded-lg border border-border bg-bg p-1">
+                    {(
+                      [
+                        { v: "cloud", label: "雲端(Email)" },
+                        { v: "mobile", label: "手機條碼" },
+                        { v: "donation", label: "捐贈" },
+                      ] as { v: InvoiceCarrier; label: string }[]
+                    ).map((o) => (
+                      <button
+                        key={o.v}
+                        type="button"
+                        onClick={() => setCarrier(o.v)}
+                        className={cn(
+                          "rounded-md px-3 py-1 text-[12px] font-semibold transition",
+                          carrier === o.v ? "bg-white text-orange shadow-sm" : "text-gray-500",
+                        )}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                </Field>
+                {carrier === "cloud" && (
+                  <Field label="發票寄送 Email" required>
+                    <input
+                      value={email}
+                      onChange={(e) => setEmail(e.currentTarget.value)}
+                      type="email"
+                      placeholder="example@mail.com"
+                      className={inputCls}
+                    />
+                  </Field>
+                )}
+                {carrier === "mobile" && (
+                  <Field label="手機條碼載具" required>
+                    <input
+                      value={carrierNum}
+                      onChange={(e) => setCarrierNum(e.currentTarget.value.toUpperCase())}
+                      placeholder="/ABC1234"
+                      maxLength={8}
+                      className={cn(inputCls, "font-mono")}
+                    />
+                  </Field>
+                )}
+                {carrier === "donation" && (
+                  <Field label="愛心捐贈碼" required>
+                    <input
+                      value={loveCode}
+                      onChange={(e) => setLoveCode(e.currentTarget.value)}
+                      placeholder="3-7 碼數字"
+                      inputMode="numeric"
+                      maxLength={7}
+                      className={inputCls}
+                    />
+                  </Field>
+                )}
+              </>
             )}
           </div>
 
@@ -1011,7 +1088,12 @@ function MerchantSettingsModal({ onClose }: { onClose: () => void }) {
           ) : (
             <span />
           )}
-          <Button variant="primary" size="sm" disabled={save.isPending} onClick={() => void onSave()}>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={save.isPending}
+            onClick={() => void onSave()}
+          >
             {save.isPending ? "儲存中…" : "儲存"}
           </Button>
         </div>

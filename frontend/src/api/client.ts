@@ -61,6 +61,10 @@ export interface InvoiceBuyer extends InvoiceBuyerInput {
 
 /** Payload to issue an invoice (開立發票). `total_amt` is 花費+% (含稅);
  *  B2C 雲端發票 needs no buyer fields, B2B needs tax_id + buyer_name. */
+/** B2C 載具類別:cloud = ezPay 會員載具(email);mobile = 手機條碼;
+ * donation = 捐贈. B2B 不需要。 */
+export type InvoiceCarrier = "cloud" | "mobile" | "donation";
+
 export interface IssueInvoiceInput {
   category: InvoiceCategory;
   total_amt: number;
@@ -68,6 +72,9 @@ export interface IssueInvoiceInput {
   buyer_name?: string;
   tax_id?: string;
   email?: string;
+  carrier?: InvoiceCarrier;
+  carrier_num?: string;
+  love_code?: string;
   store?: string;
   account_id?: string;
   campaign_id?: string;
