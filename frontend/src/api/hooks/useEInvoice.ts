@@ -102,12 +102,12 @@ export function useSaveEInvoiceDraft() {
   });
 }
 
-const MERCHANTS_KEY = ["einvoice-merchants"] as const;
+const MERCHANT_KEY = ["einvoice-merchant"] as const;
 
-export function useEInvoiceMerchants() {
+export function useEInvoiceMerchant() {
   return useQuery({
-    queryKey: MERCHANTS_KEY,
-    queryFn: async () => (await api.einvoice.merchants()).data,
+    queryKey: MERCHANT_KEY,
+    queryFn: async () => (await api.einvoice.merchant()).data,
     staleTime: 60_000,
   });
 }
@@ -115,10 +115,9 @@ export function useEInvoiceMerchants() {
 export function useSaveEInvoiceMerchant() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ accountId, body }: { accountId: string; body: EInvoiceMerchantInput }) =>
-      api.einvoice.saveMerchant(accountId, body),
+    mutationFn: (body: EInvoiceMerchantInput) => api.einvoice.saveMerchant(body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: MERCHANTS_KEY });
+      qc.invalidateQueries({ queryKey: MERCHANT_KEY });
     },
   });
 }
@@ -126,9 +125,9 @@ export function useSaveEInvoiceMerchant() {
 export function useDeleteEInvoiceMerchant() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (accountId: string) => api.einvoice.removeMerchant(accountId),
+    mutationFn: () => api.einvoice.removeMerchant(),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: MERCHANTS_KEY });
+      qc.invalidateQueries({ queryKey: MERCHANT_KEY });
     },
   });
 }
