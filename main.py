@@ -1551,6 +1551,8 @@ async def lifespan(app: FastAPI):
         _warm_task = None
         print("[startup] cache-warm: DISABLED (set CACHE_WARM_ENABLED=1 to enable)", flush=True)
 
+    print(_ezpay_status_line(), flush=True)
+
     yield
 
     if _scheduler_task is not None:
@@ -5115,6 +5117,28 @@ EZPAY_HASH_KEY = os.getenv("EZPAY_HASH_KEY", "")
 EZPAY_HASH_IV = os.getenv("EZPAY_HASH_IV", "")
 EZPAY_API_BASE = os.getenv("EZPAY_API_BASE", "https://cinv.ezpay.com.tw")
 EZPAY_MOCK = os.getenv("EZPAY_MOCK", "0")
+
+
+def _ezpay_status_line() -> str:
+    """One-line startup diagnostic for the ezPay config — never prints the
+    actual keys, only whether they're set + the right length + which host.
+    Lets operators confirm from Zeabur logs that env vars were picked up."""
+    if str(EZPAY_MOCK).strip() in ("1", "true", "True"):
+        return "[startup] ezPay: MOCK mode (不打 ezPay,回假發票號碼)"
+    host = "TEST" if "cinv." in EZPAY_API_BASE else "PROD"
+    have_id = bool(EZPAY_MERCHANT_ID)
+    key_ok = len(EZPAY_HASH_KEY) == 32
+    iv_ok = len(EZPAY_HASH_IV) == 16
+    if have_id and key_ok and iv_ok:
+        return f"[startup] ezPay: {host} host, creds OK (merchant={EZPAY_MERCHANT_ID})"
+    problems = []
+    if not have_id:
+        problems.append("MERCHANT_ID 未設")
+    if not key_ok:
+        problems.append(f"HASH_KEY 長度={len(EZPAY_HASH_KEY)}(需32)")
+    if not iv_ok:
+        problems.append(f"HASH_IV 長度={len(EZPAY_HASH_IV)}(需16)")
+    return f"[startup] ezPay: {host} host, 設定不完整 → 會退回 MOCK — {', '.join(problems)}"
 
 POLAR_API_KEY = os.getenv("POLAR_API_KEY", "")
 POLAR_WEBHOOK_SECRET = os.getenv("POLAR_WEBHOOK_SECRET", "")
