@@ -4740,6 +4740,11 @@ async def issue_einvoice(payload: IssueInvoicePayload):
     }
 
     creds = await _resolve_ezpay_creds()
+    print(
+        f"[einvoice] issue → source={creds['source']} host={creds['base']} "
+        f"merchant={creds['merchant_id']} order={order_no} total={total}",
+        flush=True,
+    )
     try:
         result = await ezpay_client.issue_invoice(
             _http_client,
@@ -4752,7 +4757,11 @@ async def issue_einvoice(payload: IssueInvoicePayload):
             mock=creds["mock"],
         )
     except ezpay_client.EzpayError as e:
-        raise HTTPException(status_code=502, detail=e.friendly_message) from e
+        # Log the real reason server-side (Zeabur), and surface it to the
+        # operator with a 400 so the frontend shows the ezPay message
+        # instead of the generic「伺服器暫時無法回應」(the >=500 fallback).
+        print(f"[einvoice] issue FAILED order={order_no}: {e.friendly_message}", flush=True)
+        raise HTTPException(status_code=400, detail=e.friendly_message) from e
 
     invoice_number = str(result.get("InvoiceNumber") or "") or None
     random_number = str(result.get("RandomNum") or "") or None
