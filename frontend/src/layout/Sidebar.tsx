@@ -318,7 +318,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: "/finance", label: "費用中心", icon: ICON_DOLLAR },
       { to: "/store-expenses", label: "店家花費", icon: ICON_STORE },
       { to: "/history", label: "歷史花費", icon: ICON_HISTORY },
-      { to: "/e-invoice", label: "電子發票", icon: ICON_INVOICE },
+      { to: "/e-invoice", label: "電子發票", icon: ICON_INVOICE, beta: true },
     ],
   },
   {

@@ -32,6 +32,7 @@ VOID_PATH = "/Api/invoice_invalid"
 ALLOWANCE_PATH = "/Api/allowance_issue"
 
 ISSUE_VERSION = "1.5"
+VOID_VERSION = "1.0"
 
 
 class EzpayError(RuntimeError):
@@ -193,5 +194,34 @@ async def issue_invoice(
         params=params,
         timestamp=timestamp,
         version=ISSUE_VERSION,
+        mock=mock,
+    )
+
+
+async def invalidate_invoice(
+    client: httpx.AsyncClient,
+    *,
+    base: str,
+    merchant_id: str,
+    hash_key: str,
+    hash_iv: str,
+    invoice_number: str,
+    reason: str,
+    timestamp: int,
+    mock: Any = "0",
+) -> dict:
+    """作廢 an already-issued invoice (``/Api/invoice_invalid``, Version 1.0).
+    ``invoice_number`` is the ezPay 發票號碼; ``reason`` the 作廢原因. Returns
+    the decoded Result (InvoiceNumber, CreateTime)."""
+    return await _post(
+        client,
+        base=base,
+        path=VOID_PATH,
+        merchant_id=merchant_id,
+        hash_key=hash_key,
+        hash_iv=hash_iv,
+        params={"InvoiceNumber": invoice_number, "InvalidReason": reason},
+        timestamp=timestamp,
+        version=VOID_VERSION,
         mock=mock,
     )

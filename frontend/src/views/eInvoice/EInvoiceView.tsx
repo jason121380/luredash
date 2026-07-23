@@ -2,7 +2,6 @@ import type { EInvoiceDraft, EInvoiceRecord, InvoiceCarrier, InvoiceCategory } f
 import { friendlyApiError } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import {
-  useDeleteEInvoice,
   useDeleteEInvoiceMerchant,
   useEInvoiceDrafts,
   useEInvoiceMerchant,
@@ -10,6 +9,7 @@ import {
   useIssueInvoice,
   useSaveEInvoiceDraft,
   useSaveEInvoiceMerchant,
+  useVoidEInvoice,
 } from "@/api/hooks/useEInvoice";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
 import { useNicknames } from "@/api/hooks/useNicknames";
@@ -263,6 +263,7 @@ function IssueTab({ month }: { month: string }) {
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
   const nicknames = useNicknames();
   const draftsQuery = useEInvoiceDrafts();
+  const merchantQuery = useEInvoiceMerchant();
 
   const [selectedAcct, setSelectedAcct] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -478,6 +479,7 @@ function IssueTab({ month }: { month: string }) {
           row={issuing}
           month={month}
           draft={draftsQuery.data?.data?.[issuing.campaignId]}
+          defaultEmail={merchantQuery.data?.default_email ?? ""}
           onClose={() => setIssuing(null)}
         />
       )}
@@ -491,11 +493,15 @@ function IssueModal({
   row,
   month,
   draft,
+  defaultEmail,
   onClose,
 }: {
   row: IssueRow;
   month: string;
   draft?: EInvoiceDraft;
+  /** Team default invoice email (merchant setting) — used when this
+   *  campaign has no remembered email. */
+  defaultEmail?: string;
   onClose: () => void;
 }) {
   const issue = useIssueInvoice();
@@ -506,7 +512,9 @@ function IssueModal({
   const [category, setCategory] = useState<InvoiceCategory>(draft?.category ?? "B2C");
   const [buyerName, setBuyerName] = useState(draft?.buyer_name ?? "");
   const [taxId, setTaxId] = useState(draft?.tax_id ?? "");
-  const [email, setEmail] = useState(draft?.email ?? "");
+  // Email: the campaign's remembered value wins; otherwise fall back to the
+  // team default from the merchant setting.
+  const [email, setEmail] = useState(draft?.email || defaultEmail || "");
   // B2C 載具 — ezPay requires one (免填 is rejected as INV10013). Remembered
   // per campaign via the draft.
   const [carrier, setCarrier] = useState<InvoiceCarrier>(draft?.carrier ?? "cloud");
@@ -771,9 +779,9 @@ const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
 
 function RecordsTab() {
   const q = useEInvoices();
-  const del = useDeleteEInvoice();
+  const voidInvoice = useVoidEInvoice();
   const rows = q.data?.data ?? [];
-  const [deleting, setDeleting] = useState<EInvoiceRecord | null>(null);
+  const [voiding, setVoiding] = useState<EInvoiceRecord | null>(null);
   const money = (v: number) => `$${fM(v)}`;
   const fmtTime = (iso: string | null) => {
     if (!iso) return "—";
@@ -845,13 +853,17 @@ function RecordsTab() {
                         </span>
                       </td>
                       <td className="px-3 py-2 text-right md:px-5">
-                        <button
-                          type="button"
-                          onClick={() => setDeleting(r)}
-                          className="rounded border border-border px-2 py-0.5 text-[11px] text-red hover:border-red hover:bg-red-bg"
-                        >
-                          刪除
-                        </button>
+                        {r.status === "issued" ? (
+                          <button
+                            type="button"
+                            onClick={() => setVoiding(r)}
+                            className="rounded border border-border px-2 py-0.5 text-[11px] text-red hover:border-red hover:bg-red-bg"
+                          >
+                            作廢
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-gray-300">—</span>
+                        )}
                       </td>
                     </tr>
                   );
@@ -862,18 +874,18 @@ function RecordsTab() {
         </div>
       </div>
 
-      {deleting && (
-        <DeletePasswordModal
-          record={deleting}
-          busy={del.isPending}
-          onClose={() => setDeleting(null)}
-          onConfirm={async () => {
+      {voiding && (
+        <VoidModal
+          record={voiding}
+          busy={voidInvoice.isPending}
+          onClose={() => setVoiding(null)}
+          onConfirm={async (reason) => {
             try {
-              await del.mutateAsync(deleting.id);
-              toast("已刪除", "success");
-              setDeleting(null);
+              const res = await voidInvoice.mutateAsync({ id: voiding.id, reason });
+              toast(res.mock ? "已作廢(測試模式)" : "已作廢", "success");
+              setVoiding(null);
             } catch (e) {
-              toast(`刪除失敗:${friendlyApiError(e)}`, "error", 4500);
+              toast(`作廢失敗:${friendlyApiError(e)}`, "error", 5000);
             }
           }}
         />
@@ -882,9 +894,9 @@ function RecordsTab() {
   );
 }
 
-/** Password-gated delete confirm (password = 0000). A soft guard to
- *  prevent accidental deletion of an 開立紀錄, not real security. */
-function DeletePasswordModal({
+/** 作廢 confirm — asks for a 作廢原因 (ezPay requires one), then voids the
+ *  invoice at ezPay and marks the row void. */
+function VoidModal({
   record,
   busy,
   onClose,
@@ -893,15 +905,15 @@ function DeletePasswordModal({
   record: EInvoiceRecord;
   busy: boolean;
   onClose: () => void;
-  onConfirm: () => void;
+  onConfirm: (reason: string) => void;
 }) {
-  const [pw, setPw] = useState("");
+  const [reason, setReason] = useState("開立錯誤");
   const submit = () => {
-    if (pw !== "0000") {
-      toast("密碼錯誤", "error");
+    if (!reason.trim()) {
+      toast("請填寫作廢原因", "error");
       return;
     }
-    onConfirm();
+    onConfirm(reason.trim());
   };
   return (
     <Modal
@@ -909,31 +921,32 @@ function DeletePasswordModal({
       onOpenChange={(o) => {
         if (!o) onClose();
       }}
-      title="刪除發票紀錄"
+      title="作廢發票"
       subtitle={record.invoice_number ?? record.store}
-      width={360}
+      width={380}
     >
       <div className="flex flex-col gap-3">
-        <div className="text-[13px] text-gray-500">請輸入密碼以確認刪除此筆紀錄。</div>
-        <input
-          type="password"
-          inputMode="numeric"
-          value={pw}
-          // biome-ignore lint/a11y/noAutofocus: focus the password field when the confirm dialog opens
-          autoFocus
-          onChange={(e) => setPw(e.currentTarget.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
-          }}
-          placeholder="密碼"
-          className={inputCls}
-        />
+        <div className="text-[13px] text-gray-500">
+          作廢後將同步至 ezPay,發票號碼 {record.invoice_number ?? "—"} 不可再使用。
+        </div>
+        <Field label="作廢原因" required>
+          <input
+            value={reason}
+            onChange={(e) => setReason(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+            }}
+            placeholder="例:開立錯誤"
+            maxLength={20}
+            className={inputCls}
+          />
+        </Field>
         <div className="flex justify-end gap-2">
           <Button variant="ghost" size="sm" onClick={onClose}>
             取消
           </Button>
           <Button variant="primary" size="sm" onClick={submit} disabled={busy}>
-            {busy ? "刪除中..." : "確認刪除"}
+            {busy ? "作廢中..." : "確認作廢"}
           </Button>
         </div>
       </div>
@@ -981,6 +994,7 @@ function MerchantSettingsModal({ onClose }: { onClose: () => void }) {
   const [hashKey, setHashKey] = useState("");
   const [hashIv, setHashIv] = useState("");
   const [isTest, setIsTest] = useState(true);
+  const [defaultEmail, setDefaultEmail] = useState("");
 
   // Prefill once the stored config loads. Keys stay blank (write-only) — the
   // 「已設定」placeholder tells the operator they exist. Keyed on the loaded
@@ -991,6 +1005,7 @@ function MerchantSettingsModal({ onClose }: { onClose: () => void }) {
     setHashKey("");
     setHashIv("");
     setIsTest(current?.is_test ?? true);
+    setDefaultEmail(current?.default_email ?? "");
   }, [current?.merchant_id, current?.is_test, merchantQuery.isSuccess]);
 
   const onSave = async () => {
@@ -1016,6 +1031,7 @@ function MerchantSettingsModal({ onClose }: { onClose: () => void }) {
         hash_key: hashKey.trim(),
         hash_iv: hashIv.trim(),
         is_test: isTest,
+        default_email: defaultEmail.trim(),
       });
       toast("已儲存", "success");
       setHashKey("");
@@ -1089,6 +1105,15 @@ function MerchantSettingsModal({ onClose }: { onClose: () => void }) {
               </button>
             ))}
           </div>
+        </Field>
+        <Field label="預設發票 Email">
+          <input
+            value={defaultEmail}
+            onChange={(e) => setDefaultEmail(e.target.value)}
+            type="email"
+            placeholder="開立時自動帶入(個人/公司皆適用)"
+            className={inputCls}
+          />
         </Field>
         <div className="mt-1 flex items-center justify-between gap-2">
           {current ? (
