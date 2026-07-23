@@ -507,10 +507,11 @@ function IssueModal({
   const [buyerName, setBuyerName] = useState(draft?.buyer_name ?? "");
   const [taxId, setTaxId] = useState(draft?.tax_id ?? "");
   const [email, setEmail] = useState(draft?.email ?? "");
-  // B2C 載具 — ezPay requires one (免填 is rejected as INV10013).
-  const [carrier, setCarrier] = useState<InvoiceCarrier>("cloud");
-  const [carrierNum, setCarrierNum] = useState("");
-  const [loveCode, setLoveCode] = useState("");
+  // B2C 載具 — ezPay requires one (免填 is rejected as INV10013). Remembered
+  // per campaign via the draft.
+  const [carrier, setCarrier] = useState<InvoiceCarrier>(draft?.carrier ?? "cloud");
+  const [carrierNum, setCarrierNum] = useState(draft?.carrier_num ?? "");
+  const [loveCode, setLoveCode] = useState(draft?.love_code ?? "");
   const [issued, setIssued] = useState<{ number: string | null; mock: boolean } | null>(null);
 
   const money = (v: number) => `$${fM(v)}`;
@@ -523,7 +524,10 @@ function IssueModal({
       itemName !== (draft?.item_name ?? "廣告行銷") ||
       buyerName !== (draft?.buyer_name ?? "") ||
       taxId !== (draft?.tax_id ?? "") ||
-      email !== (draft?.email ?? "");
+      email !== (draft?.email ?? "") ||
+      carrier !== (draft?.carrier ?? "cloud") ||
+      carrierNum !== (draft?.carrier_num ?? "") ||
+      loveCode !== (draft?.love_code ?? "");
     if (changed) {
       saveDraft.mutate({
         campaignId: row.campaignId,
@@ -533,6 +537,9 @@ function IssueModal({
           buyer_name: buyerName,
           tax_id: taxId,
           email,
+          carrier,
+          carrier_num: carrierNum,
+          love_code: loveCode,
         },
       });
     }
@@ -647,7 +654,7 @@ function IssueModal({
                 className={inputCls}
               />
             </Field>
-            {category === "B2B" ? (
+            {category === "B2B" && (
               <>
                 <Field label="公司抬頭" required>
                   <input
@@ -677,68 +684,71 @@ function IssueModal({
                   />
                 </Field>
               </>
-            ) : (
-              <>
-                <Field label="載具類別">
-                  <div className="flex flex-wrap gap-1 self-start rounded-lg border border-border bg-bg p-1">
-                    {(
-                      [
-                        { v: "cloud", label: "雲端(Email)" },
-                        { v: "mobile", label: "手機條碼" },
-                        { v: "donation", label: "捐贈" },
-                      ] as { v: InvoiceCarrier; label: string }[]
-                    ).map((o) => (
-                      <button
-                        key={o.v}
-                        type="button"
-                        onClick={() => setCarrier(o.v)}
-                        className={cn(
-                          "rounded-md px-3 py-1 text-[12px] font-semibold transition",
-                          carrier === o.v ? "bg-white text-orange shadow-sm" : "text-gray-500",
-                        )}
-                      >
-                        {o.label}
-                      </button>
-                    ))}
-                  </div>
-                </Field>
-                {carrier === "cloud" && (
-                  <Field label="發票寄送 Email" required>
-                    <input
-                      value={email}
-                      onChange={(e) => setEmail(e.currentTarget.value)}
-                      type="email"
-                      placeholder="example@mail.com"
-                      className={inputCls}
-                    />
-                  </Field>
-                )}
-                {carrier === "mobile" && (
-                  <Field label="手機條碼載具" required>
-                    <input
-                      value={carrierNum}
-                      onChange={(e) => setCarrierNum(e.currentTarget.value.toUpperCase())}
-                      placeholder="/ABC1234"
-                      maxLength={8}
-                      className={cn(inputCls, "font-mono")}
-                    />
-                  </Field>
-                )}
-                {carrier === "donation" && (
-                  <Field label="愛心捐贈碼" required>
-                    <input
-                      value={loveCode}
-                      onChange={(e) => setLoveCode(e.currentTarget.value)}
-                      placeholder="3-7 碼數字"
-                      inputMode="numeric"
-                      maxLength={7}
-                      className={inputCls}
-                    />
-                  </Field>
-                )}
-              </>
             )}
           </div>
+
+          {/* B2C 載具:類別在上、輸入框在下(全寬堆疊) */}
+          {category === "B2C" && (
+            <div className="mt-2.5 flex flex-col gap-2.5">
+              <Field label="載具類別">
+                <div className="flex flex-wrap gap-1 self-start rounded-lg border border-border bg-bg p-1">
+                  {(
+                    [
+                      { v: "cloud", label: "雲端(Email)" },
+                      { v: "mobile", label: "手機條碼" },
+                      { v: "donation", label: "捐贈" },
+                    ] as { v: InvoiceCarrier; label: string }[]
+                  ).map((o) => (
+                    <button
+                      key={o.v}
+                      type="button"
+                      onClick={() => setCarrier(o.v)}
+                      className={cn(
+                        "rounded-md px-3 py-1 text-[12px] font-semibold transition",
+                        carrier === o.v ? "bg-white text-orange shadow-sm" : "text-gray-500",
+                      )}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+              {carrier === "cloud" && (
+                <Field label="發票寄送 Email" required>
+                  <input
+                    value={email}
+                    onChange={(e) => setEmail(e.currentTarget.value)}
+                    type="email"
+                    placeholder="example@mail.com"
+                    className={inputCls}
+                  />
+                </Field>
+              )}
+              {carrier === "mobile" && (
+                <Field label="手機條碼載具" required>
+                  <input
+                    value={carrierNum}
+                    onChange={(e) => setCarrierNum(e.currentTarget.value.toUpperCase())}
+                    placeholder="/ABC1234"
+                    maxLength={8}
+                    className={cn(inputCls, "font-mono")}
+                  />
+                </Field>
+              )}
+              {carrier === "donation" && (
+                <Field label="愛心捐贈碼" required>
+                  <input
+                    value={loveCode}
+                    onChange={(e) => setLoveCode(e.currentTarget.value)}
+                    placeholder="3-7 碼數字"
+                    inputMode="numeric"
+                    maxLength={7}
+                    className={inputCls}
+                  />
+                </Field>
+              )}
+            </div>
+          )}
 
           <div className="mt-4 flex justify-end">
             <Button variant="primary" size="sm" onClick={onIssue} disabled={issue.isPending}>

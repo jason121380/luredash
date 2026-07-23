@@ -120,6 +120,9 @@ export interface EInvoiceDraft {
   buyer_name: string;
   tax_id: string;
   email: string;
+  carrier?: InvoiceCarrier;
+  carrier_num?: string;
+  love_code?: string;
 }
 
 /** Team-wide ezPay merchant config — secret keys are never sent back,

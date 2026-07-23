@@ -1364,6 +1364,17 @@ async def lifespan(app: FastAPI):
                     )
                     """
                 )
+                # B2C 載具 remembered per campaign (carrier = cloud/mobile/
+                # donation; carrier_num = 手機條碼; love_code = 捐贈碼).
+                for _col, _default in (
+                    ("carrier", "'cloud'"),
+                    ("carrier_num", "''"),
+                    ("love_code", "''"),
+                ):
+                    await conn.execute(
+                        f"ALTER TABLE einvoice_campaign_drafts "
+                        f"ADD COLUMN IF NOT EXISTS {_col} TEXT NOT NULL DEFAULT {_default}"
+                    )
                 # Per-ad-account ezPay 商店金鑰. Each 廣告帳號 can bill under
                 # its own ezPay merchant (different selling entities), so
                 # credentials live here keyed by account_id (act_ prefix)
@@ -4931,6 +4942,9 @@ class EInvoiceDraftPayload(BaseModel):
     buyer_name: str = ""
     tax_id: str = ""
     email: str = ""
+    carrier: str = "cloud"
+    carrier_num: str = ""
+    love_code: str = ""
 
 
 @app.get("/api/einvoice/drafts")
@@ -4940,7 +4954,8 @@ async def list_einvoice_drafts():
     pool = _require_db()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT campaign_id, category, item_name, buyer_name, tax_id, email FROM einvoice_campaign_drafts"
+            "SELECT campaign_id, category, item_name, buyer_name, tax_id, email, "
+            "carrier, carrier_num, love_code FROM einvoice_campaign_drafts"
         )
     return {
         "data": {
@@ -4950,6 +4965,9 @@ async def list_einvoice_drafts():
                 "buyer_name": r["buyer_name"],
                 "tax_id": r["tax_id"],
                 "email": r["email"],
+                "carrier": r["carrier"] or "cloud",
+                "carrier_num": r["carrier_num"] or "",
+                "love_code": r["love_code"] or "",
             }
             for r in rows
         }
@@ -4964,23 +4982,31 @@ async def upsert_einvoice_draft(campaign_id: str, payload: EInvoiceDraftPayload)
     if not cid:
         raise HTTPException(status_code=400, detail="缺少 campaign_id")
     category = "B2B" if (payload.category or "").upper() == "B2B" else "B2C"
+    carrier = (payload.carrier or "cloud").strip().lower()
+    if carrier not in ("cloud", "mobile", "donation"):
+        carrier = "cloud"
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO einvoice_campaign_drafts
-                (campaign_id, category, item_name, buyer_name, tax_id, email, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6, NOW())
+                (campaign_id, category, item_name, buyer_name, tax_id, email,
+                 carrier, carrier_num, love_code, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, NOW())
             ON CONFLICT (campaign_id) DO UPDATE SET
                 category = EXCLUDED.category,
                 item_name = EXCLUDED.item_name,
                 buyer_name = EXCLUDED.buyer_name,
                 tax_id = EXCLUDED.tax_id,
                 email = EXCLUDED.email,
+                carrier = EXCLUDED.carrier,
+                carrier_num = EXCLUDED.carrier_num,
+                love_code = EXCLUDED.love_code,
                 updated_at = NOW()
             """,
             cid, category, (payload.item_name or "").strip() or "廣告行銷",
             (payload.buyer_name or "").strip(), (payload.tax_id or "").strip(),
             (payload.email or "").strip(),
+            carrier, (payload.carrier_num or "").strip(), (payload.love_code or "").strip(),
         )
     return {"ok": True}
 
