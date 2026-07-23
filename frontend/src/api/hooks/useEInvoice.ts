@@ -1,5 +1,6 @@
 import {
   type EInvoiceDraft,
+  type EInvoiceMerchantInput,
   type InvoiceBuyer,
   type InvoiceBuyerInput,
   type IssueInvoiceInput,
@@ -97,6 +98,37 @@ export function useSaveEInvoiceDraft() {
       api.einvoice.saveDraft(campaignId, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: DRAFTS_KEY });
+    },
+  });
+}
+
+const MERCHANTS_KEY = ["einvoice-merchants"] as const;
+
+export function useEInvoiceMerchants() {
+  return useQuery({
+    queryKey: MERCHANTS_KEY,
+    queryFn: async () => (await api.einvoice.merchants()).data,
+    staleTime: 60_000,
+  });
+}
+
+export function useSaveEInvoiceMerchant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ accountId, body }: { accountId: string; body: EInvoiceMerchantInput }) =>
+      api.einvoice.saveMerchant(accountId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: MERCHANTS_KEY });
+    },
+  });
+}
+
+export function useDeleteEInvoiceMerchant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (accountId: string) => api.einvoice.removeMerchant(accountId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: MERCHANTS_KEY });
     },
   });
 }

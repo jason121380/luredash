@@ -115,6 +115,25 @@ export interface EInvoiceDraft {
   email: string;
 }
 
+/** Per-account ezPay merchant config as returned by the list endpoint —
+ * secret keys are never sent back, only whether they're set. */
+export interface EInvoiceMerchant {
+  account_id: string;
+  merchant_id: string;
+  is_test: boolean;
+  has_key: boolean;
+  has_iv: boolean;
+  updated_at: string | null;
+}
+
+/** Upsert body. hash_key / hash_iv blank = keep the stored secret. */
+export interface EInvoiceMerchantInput {
+  merchant_id: string;
+  hash_key: string;
+  hash_iv: string;
+  is_test: boolean;
+}
+
 export interface LinePushConfig {
   id: string;
   campaign_id: string;
@@ -1313,6 +1332,18 @@ export const api = {
       request<{ ok: boolean }>("POST", `/api/einvoice/drafts/${encodeURIComponent(campaignId)}`, {
         body,
       }),
+    /** Per-account ezPay 商店金鑰. The list never returns the secret keys —
+     * only `has_key`/`has_iv` flags so the UI shows「已設定」. */
+    merchants: () => request<{ data: EInvoiceMerchant[] }>("GET", "/api/einvoice/merchants"),
+    saveMerchant: (accountId: string, body: EInvoiceMerchantInput) =>
+      request<{ ok: boolean }>("POST", `/api/einvoice/merchants/${encodeURIComponent(accountId)}`, {
+        body,
+      }),
+    removeMerchant: (accountId: string) =>
+      request<{ ok: boolean }>(
+        "DELETE",
+        `/api/einvoice/merchants/${encodeURIComponent(accountId)}`,
+      ),
   },
 
   nicknames: {
