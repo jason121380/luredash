@@ -1,16 +1,11 @@
-import type {
-  EInvoiceDraft,
-  EInvoiceMerchant,
-  EInvoiceRecord,
-  InvoiceCategory,
-} from "@/api/client";
+import type { EInvoiceDraft, EInvoiceRecord, InvoiceCategory } from "@/api/client";
 import { friendlyApiError } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
 import {
   useDeleteEInvoice,
   useDeleteEInvoiceMerchant,
   useEInvoiceDrafts,
-  useEInvoiceMerchants,
+  useEInvoiceMerchant,
   useEInvoices,
   useIssueInvoice,
   useSaveEInvoiceDraft,
@@ -884,61 +879,34 @@ function Field({
 }
 
 /**
- * ezPay 商店金鑰設定 — per-ad-account credentials. Left: searchable account
- * list with a 未設定 / 測試 / 正式 status chip. Right: the selected account's
- * form. Secret keys are write-only (the list only knows they're set); leaving
- * HashKey / HashIV blank on an already-configured account keeps them.
+ * ezPay 商店金鑰設定 — a SINGLE team-wide config (all ad accounts bill under
+ * the same merchant). Secret keys are write-only: the GET only reports
+ * whether they're set, and leaving HashKey / HashIV blank on an already-
+ * configured merchant keeps the stored values (edit merchant_id / 環境 only).
  */
 function MerchantSettingsModal({ onClose }: { onClose: () => void }) {
-  const accountsQuery = useAccounts();
-  const merchantsQuery = useEInvoiceMerchants();
+  const merchantQuery = useEInvoiceMerchant();
   const save = useSaveEInvoiceMerchant();
   const del = useDeleteEInvoiceMerchant();
+  const current = merchantQuery.data ?? null;
 
-  const byAccount = useMemo(() => {
-    const m = new Map<string, EInvoiceMerchant>();
-    for (const row of merchantsQuery.data ?? []) m.set(row.account_id, row);
-    return m;
-  }, [merchantsQuery.data]);
-
-  const [search, setSearch] = useState("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [merchantId, setMerchantId] = useState("");
   const [hashKey, setHashKey] = useState("");
   const [hashIv, setHashIv] = useState("");
   const [isTest, setIsTest] = useState(true);
 
-  const current = selectedId ? byAccount.get(selectedId) : undefined;
-  // Prefill the form when the selected account changes. Keys stay blank
-  // (write-only) — the「已設定」placeholder tells the operator they exist.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset form only when the selected account changes
+  // Prefill once the stored config loads. Keys stay blank (write-only) — the
+  // 「已設定」placeholder tells the operator they exist. Keyed on the loaded
+  // merchant_id/is_test so a background refetch doesn't clobber edits.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sync form only when the loaded config identity changes
   useEffect(() => {
-    const cfg = selectedId ? byAccount.get(selectedId) : undefined;
-    setMerchantId(cfg?.merchant_id ?? "");
+    setMerchantId(current?.merchant_id ?? "");
     setHashKey("");
     setHashIv("");
-    setIsTest(cfg?.is_test ?? true);
-  }, [selectedId]);
-
-  const accounts = accountsQuery.data ?? [];
-  const filtered = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    const list = term
-      ? accounts.filter(
-          (a) => a.name.toLowerCase().includes(term) || a.id.toLowerCase().includes(term),
-        )
-      : accounts;
-    // Configured accounts first, then by name.
-    return [...list].sort((a, b) => {
-      const ca = byAccount.has(a.id) ? 0 : 1;
-      const cb = byAccount.has(b.id) ? 0 : 1;
-      if (ca !== cb) return ca - cb;
-      return a.name.localeCompare(b.name, "zh-Hant");
-    });
-  }, [accounts, search, byAccount]);
+    setIsTest(current?.is_test ?? true);
+  }, [current?.merchant_id, current?.is_test, merchantQuery.isSuccess]);
 
   const onSave = async () => {
-    if (!selectedId) return;
     if (!merchantId.trim()) {
       toast("請填寫商店代號", "error");
       return;
@@ -957,13 +925,10 @@ function MerchantSettingsModal({ onClose }: { onClose: () => void }) {
     }
     try {
       await save.mutateAsync({
-        accountId: selectedId,
-        body: {
-          merchant_id: merchantId.trim(),
-          hash_key: hashKey.trim(),
-          hash_iv: hashIv.trim(),
-          is_test: isTest,
-        },
+        merchant_id: merchantId.trim(),
+        hash_key: hashKey.trim(),
+        hash_iv: hashIv.trim(),
+        is_test: isTest,
       });
       toast("已儲存", "success");
       setHashKey("");
@@ -974,16 +939,14 @@ function MerchantSettingsModal({ onClose }: { onClose: () => void }) {
   };
 
   const onDelete = async () => {
-    if (!selectedId || !current) return;
+    if (!current) return;
     try {
-      await del.mutateAsync(selectedId);
+      await del.mutateAsync();
       toast("已移除設定(改用系統預設)", "success");
     } catch (e) {
       toast(`移除失敗:${friendlyApiError(e)}`, "error", 5000);
     }
   };
-
-  const selectedName = accounts.find((a) => a.id === selectedId)?.name ?? "";
 
   return (
     <Modal
@@ -992,142 +955,65 @@ function MerchantSettingsModal({ onClose }: { onClose: () => void }) {
         if (!o) onClose();
       }}
       title="ezPay 商店金鑰設定"
-      subtitle="每個廣告帳號各自獨立;未設定的帳號沿用系統預設金鑰"
-      width={680}
+      subtitle="全部廣告帳號共用同一組;未設定則沿用系統預設金鑰"
+      width={480}
     >
-      <div className="flex flex-col gap-3 md:flex-row">
-        {/* Account list */}
-        <div className="flex min-w-0 flex-col gap-2 md:w-[46%]">
+      <div className="flex flex-col gap-2.5">
+        <Field label="商店代號 MerchantID" required>
           <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="搜尋廣告帳號…"
+            value={merchantId}
+            onChange={(e) => setMerchantId(e.target.value)}
+            placeholder="例如 311299349"
             className={inputCls}
           />
-          <div className="max-h-[320px] min-h-[160px] overflow-y-auto rounded-lg border border-border">
-            {filtered.length === 0 ? (
-              <div className="p-4 text-center text-[12px] text-gray-300">無帳號</div>
-            ) : (
-              filtered.map((a) => {
-                const cfg = byAccount.get(a.id);
-                const active = a.id === selectedId;
-                return (
-                  <button
-                    key={a.id}
-                    type="button"
-                    onClick={() => setSelectedId(a.id)}
-                    className={cn(
-                      "flex w-full items-center gap-2 border-border border-b px-3 py-2 text-left last:border-b-0",
-                      active ? "bg-orange-bg" : "hover:bg-bg",
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "min-w-0 flex-1 truncate text-[13px]",
-                        active ? "font-semibold text-orange" : "text-ink",
-                      )}
-                      title={a.name}
-                    >
-                      {a.name}
-                    </span>
-                    {cfg ? (
-                      <span
-                        className={cn(
-                          "shrink-0 rounded-pill px-1.5 py-0.5 text-[10px] font-semibold",
-                          cfg.is_test
-                            ? "bg-amber-100 text-amber-700"
-                            : "bg-emerald-100 text-emerald-700",
-                        )}
-                      >
-                        {cfg.is_test ? "測試" : "正式"}
-                      </span>
-                    ) : (
-                      <span className="shrink-0 rounded-pill bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-400">
-                        未設定
-                      </span>
-                    )}
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </div>
-
-        {/* Form */}
-        <div className="flex min-w-0 flex-1 flex-col gap-2.5">
-          {selectedId ? (
-            <>
-              <div className="truncate text-[13px] font-semibold text-ink" title={selectedName}>
-                {selectedName}
-              </div>
-              <Field label="商店代號 MerchantID" required>
-                <input
-                  value={merchantId}
-                  onChange={(e) => setMerchantId(e.target.value)}
-                  placeholder="例如 311299349"
-                  className={inputCls}
-                />
-              </Field>
-              <Field label="HashKey(32 碼)" required={!current}>
-                <input
-                  value={hashKey}
-                  onChange={(e) => setHashKey(e.target.value)}
-                  placeholder={current?.has_key ? "已設定,留空不變更" : "貼上 HashKey"}
-                  className={cn(inputCls, "font-mono")}
-                />
-              </Field>
-              <Field label="HashIV(16 碼)" required={!current}>
-                <input
-                  value={hashIv}
-                  onChange={(e) => setHashIv(e.target.value)}
-                  placeholder={current?.has_iv ? "已設定,留空不變更" : "貼上 HashIV"}
-                  className={cn(inputCls, "font-mono")}
-                />
-              </Field>
-              <Field label="環境">
-                <div className="flex gap-1 self-start rounded-lg border border-border bg-bg p-1">
-                  {[
-                    { v: true, label: "測試站" },
-                    { v: false, label: "正式站" },
-                  ].map((o) => (
-                    <button
-                      key={o.label}
-                      type="button"
-                      onClick={() => setIsTest(o.v)}
-                      className={cn(
-                        "rounded-md px-3 py-1 text-[12px] font-semibold",
-                        isTest === o.v ? "bg-white text-orange shadow-sm" : "text-gray-500",
-                      )}
-                    >
-                      {o.label}
-                    </button>
-                  ))}
-                </div>
-              </Field>
-              <div className="mt-1 flex items-center justify-between gap-2">
-                {current ? (
-                  <Button variant="ghost" size="sm" onClick={() => void onDelete()}>
-                    移除設定
-                  </Button>
-                ) : (
-                  <span />
+        </Field>
+        <Field label="HashKey(32 碼)" required={!current}>
+          <input
+            value={hashKey}
+            onChange={(e) => setHashKey(e.target.value)}
+            placeholder={current?.has_key ? "已設定,留空不變更" : "貼上 HashKey"}
+            className={cn(inputCls, "font-mono")}
+          />
+        </Field>
+        <Field label="HashIV(16 碼)" required={!current}>
+          <input
+            value={hashIv}
+            onChange={(e) => setHashIv(e.target.value)}
+            placeholder={current?.has_iv ? "已設定,留空不變更" : "貼上 HashIV"}
+            className={cn(inputCls, "font-mono")}
+          />
+        </Field>
+        <Field label="環境">
+          <div className="flex gap-1 self-start rounded-lg border border-border bg-bg p-1">
+            {[
+              { v: true, label: "測試站" },
+              { v: false, label: "正式站" },
+            ].map((o) => (
+              <button
+                key={o.label}
+                type="button"
+                onClick={() => setIsTest(o.v)}
+                className={cn(
+                  "rounded-md px-3 py-1 text-[12px] font-semibold",
+                  isTest === o.v ? "bg-white text-orange shadow-sm" : "text-gray-500",
                 )}
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={save.isPending}
-                  onClick={() => void onSave()}
-                >
-                  {save.isPending ? "儲存中…" : "儲存"}
-                </Button>
-              </div>
-            </>
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </Field>
+        <div className="mt-1 flex items-center justify-between gap-2">
+          {current ? (
+            <Button variant="ghost" size="sm" onClick={() => void onDelete()}>
+              移除設定
+            </Button>
           ) : (
-            <div className="flex min-h-[200px] items-center justify-center text-center text-[13px] text-gray-300">
-              從左側選一個廣告帳號來設定它的 ezPay 商店金鑰
-            </div>
+            <span />
           )}
+          <Button variant="primary" size="sm" disabled={save.isPending} onClick={() => void onSave()}>
+            {save.isPending ? "儲存中…" : "儲存"}
+          </Button>
         </div>
       </div>
     </Modal>
