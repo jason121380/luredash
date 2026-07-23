@@ -1364,6 +1364,26 @@ async def lifespan(app: FastAPI):
                     )
                     """
                 )
+                # Per-ad-account ezPay 商店金鑰. Each 廣告帳號 can bill under
+                # its own ezPay merchant (different selling entities), so
+                # credentials live here keyed by account_id (act_ prefix)
+                # instead of the single global env vars. `is_test` selects
+                # the cinv (test) vs inv (prod) host. Falls back to the env
+                # globals when an account has no row. Admin-gated CRUD; the
+                # secret hash_key/hash_iv are NEVER returned to the client.
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS einvoice_merchants (
+                        account_id  TEXT PRIMARY KEY,
+                        merchant_id TEXT NOT NULL,
+                        hash_key    TEXT NOT NULL,
+                        hash_iv     TEXT NOT NULL,
+                        is_test     BOOLEAN NOT NULL DEFAULT TRUE,
+                        updated_by  TEXT,
+                        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
                 # user_settings is keyed (fb_user_id, key) — the PK
                 # already covers fb_user_id-leading queries, but bare
                 # WHERE fb_user_id=$1 fan-outs benefit from being able
@@ -4617,6 +4637,44 @@ def _gen_merchant_order_no() -> str:
     return f"EI{uuid.uuid4().hex[:16]}"
 
 
+async def _resolve_ezpay_creds(account_id: Optional[str]) -> dict:
+    """Per-account ezPay credentials (`einvoice_merchants`), falling back to
+    the env globals when the account has no configured row. `is_test`
+    selects the cinv (test) vs inv (prod) host. Returns
+    {base, merchant_id, hash_key, hash_iv, mock, source}."""
+    aid = (account_id or "").strip()
+    if aid and _db_pool is not None:
+        try:
+            async with _db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT merchant_id, hash_key, hash_iv, is_test "
+                    "FROM einvoice_merchants WHERE account_id = $1",
+                    aid,
+                )
+            if row and row["merchant_id"] and row["hash_key"] and row["hash_iv"]:
+                base = (
+                    "https://cinv.ezpay.com.tw" if row["is_test"] else "https://inv.ezpay.com.tw"
+                )
+                return {
+                    "base": base,
+                    "merchant_id": row["merchant_id"],
+                    "hash_key": row["hash_key"],
+                    "hash_iv": row["hash_iv"],
+                    "mock": "0",
+                    "source": "account",
+                }
+        except Exception as exc:
+            print(f"[einvoice] merchant lookup failed for {aid}: {exc!r}", flush=True)
+    return {
+        "base": EZPAY_API_BASE,
+        "merchant_id": EZPAY_MERCHANT_ID,
+        "hash_key": EZPAY_HASH_KEY,
+        "hash_iv": EZPAY_HASH_IV,
+        "mock": EZPAY_MOCK,
+        "source": "env",
+    }
+
+
 @app.post("/api/einvoice/issue")
 async def issue_einvoice(payload: IssueInvoicePayload):
     uid = _require_admin()
@@ -4676,16 +4734,17 @@ async def issue_einvoice(payload: IssueInvoicePayload):
         "ItemAmt": str(item_amt),
     }
 
+    creds = await _resolve_ezpay_creds(payload.account_id)
     try:
         result = await ezpay_client.issue_invoice(
             _http_client,
-            base=EZPAY_API_BASE,
-            merchant_id=EZPAY_MERCHANT_ID,
-            hash_key=EZPAY_HASH_KEY,
-            hash_iv=EZPAY_HASH_IV,
+            base=creds["base"],
+            merchant_id=creds["merchant_id"],
+            hash_key=creds["hash_key"],
+            hash_iv=creds["hash_iv"],
             params=ezpay_params,
             timestamp=ts,
-            mock=EZPAY_MOCK,
+            mock=creds["mock"],
         )
     except ezpay_client.EzpayError as e:
         raise HTTPException(status_code=502, detail=e.friendly_message) from e
@@ -4729,6 +4788,98 @@ async def issue_einvoice(payload: IssueInvoicePayload):
         "status": row["status"],
         "mock": bool(result.get("_mock")),
     }
+
+
+class EInvoiceMerchantPayload(BaseModel):
+    merchant_id: str = ""
+    # hash_key / hash_iv optional on update — blank keeps the stored value
+    # so the operator can change merchant_id / is_test without re-typing
+    # the secrets. Required (non-blank) on first-time create.
+    hash_key: str = ""
+    hash_iv: str = ""
+    is_test: bool = True
+
+
+@app.get("/api/einvoice/merchants")
+async def list_einvoice_merchants():
+    """Per-account ezPay merchant config for the 設定 modal. NEVER returns
+    the secret hash_key / hash_iv — only whether they're set (+ length ok)
+    so the UI can show「已設定」without leaking. → {data: [...]}"""
+    _require_admin()
+    pool = _require_db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT account_id, merchant_id, is_test, hash_key, hash_iv, updated_at "
+            "FROM einvoice_merchants ORDER BY account_id"
+        )
+    return {
+        "data": [
+            {
+                "account_id": r["account_id"],
+                "merchant_id": r["merchant_id"],
+                "is_test": bool(r["is_test"]),
+                "has_key": len(r["hash_key"] or "") == 32,
+                "has_iv": len(r["hash_iv"] or "") == 16,
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post("/api/einvoice/merchants/{account_id}")
+async def upsert_einvoice_merchant(account_id: str, payload: EInvoiceMerchantPayload):
+    """Create/update one account's ezPay 商店金鑰. hash_key/hash_iv left blank
+    keep the existing stored secret (edit merchant_id / is_test without
+    re-typing); on first create they are required + length-validated."""
+    uid = _require_admin()
+    pool = _require_db()
+    aid = (account_id or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="缺少廣告帳號")
+    merchant_id = (payload.merchant_id or "").strip()
+    if not merchant_id:
+        raise HTTPException(status_code=400, detail="請填寫商店代號 MerchantID")
+    new_key = (payload.hash_key or "").strip()
+    new_iv = (payload.hash_iv or "").strip()
+
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT hash_key, hash_iv FROM einvoice_merchants WHERE account_id = $1", aid
+        )
+        hash_key = new_key or (existing["hash_key"] if existing else "")
+        hash_iv = new_iv or (existing["hash_iv"] if existing else "")
+        if len(hash_key) != 32:
+            raise HTTPException(status_code=400, detail="HashKey 需 32 碼")
+        if len(hash_iv) != 16:
+            raise HTTPException(status_code=400, detail="HashIV 需 16 碼")
+        await conn.execute(
+            """
+            INSERT INTO einvoice_merchants (account_id, merchant_id, hash_key, hash_iv, is_test, updated_by, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            ON CONFLICT (account_id) DO UPDATE
+            SET merchant_id = EXCLUDED.merchant_id,
+                hash_key = EXCLUDED.hash_key,
+                hash_iv = EXCLUDED.hash_iv,
+                is_test = EXCLUDED.is_test,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = NOW()
+            """,
+            aid, merchant_id, hash_key, hash_iv, bool(payload.is_test), uid,
+        )
+    return {"ok": True}
+
+
+@app.delete("/api/einvoice/merchants/{account_id}")
+async def delete_einvoice_merchant(account_id: str):
+    """Remove an account's ezPay config → it falls back to the env globals."""
+    _require_admin()
+    pool = _require_db()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM einvoice_merchants WHERE account_id = $1", (account_id or "").strip()
+        )
+    return {"ok": True}
 
 
 class EInvoiceDraftPayload(BaseModel):
