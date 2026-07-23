@@ -140,8 +140,13 @@ async def _post(
             f"{base}{path}",
             data={"MerchantID_": merchant_id, "PostData_": post_data},
             headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=30.0,
+            # 15s: return our own error before the platform gateway 504s a
+            # slow/unreachable ezPay host (which the UI shows as a generic
+            # 「伺服器暫時無法回應」instead of the real reason).
+            timeout=15.0,
         )
+    except httpx.TimeoutException as exc:
+        raise EzpayError("TIMEOUT", "ezPay 逾時未回應,請稍後重試") from exc
     except httpx.HTTPError as exc:
         raise EzpayError("HTTP", f"連線 ezPay 失敗:{exc!r}") from exc
 
