@@ -24,7 +24,7 @@ import { isTrafficObjective } from "@/lib/recommendations";
 import { CREATIVE_FIELDS, DEFAULT_CREATIVE_FIELDS } from "@/lib/reportFields";
 import type { FbAdset, FbCampaign, FbCreativeEntity } from "@/types/fb";
 import { formatNickname } from "@/views/finance/financeData";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { KpiTable, buildKpiCells, pickCells } from "./ReportContent";
 
@@ -43,9 +43,9 @@ import { KpiTable, buildKpiCells, pickCells } from "./ReportContent";
  * sheet's IG 追蹤 / 收藏 / 觀看率 are NOT in the Marketing API and are
  * intentionally omitted.
  *
- * Ads are fetched per-adset (reusing the same `["report-ads", ...]`
- * query cache as the standard report) via `useQueries`, then flattened
- * and ranked across the whole campaign.
+ * Ads are fetched for the WHOLE campaign in one call
+ * (`/api/campaigns/{id}/report-ads`), then ranked by CTR — a public share
+ * open used to fan out one call per adset and trip FB's global rate limit.
  */
 
 const num = (v: string | number | null | undefined): number => {
@@ -89,7 +89,6 @@ export interface PerformanceReportContentProps {
 
 export function PerformanceReportContent({
   campaign,
-  adsets,
   adsetsLoading,
   adsetsError,
   hideMoney,
@@ -137,30 +136,25 @@ export function PerformanceReportContent({
       )
     : null;
 
-  // Fetch ads for every adset that spent, reusing the shared report-ads
-  // cache. Ranking across the whole campaign needs all of them.
-  const spendingAdsetIds = (adsets ?? []).filter((a) => num(getIns(a).spend) > 0).map((a) => a.id);
-
-  const adQueries = useQueries({
-    queries: spendingAdsetIds.map((adsetId) => ({
-      queryKey: ["report-ads", adsetId, date] as const,
-      queryFn: async (): Promise<FbCreativeEntity[]> =>
-        (await api.adsets.creatives(adsetId, date)).data ?? [],
-      staleTime: 5 * 60_000,
-      enabled: !!adsetId,
-    })),
+  // Fetch ALL ads under the campaign in ONE call (campaign-level) instead of
+  // one call per adset. Public share-page opens used to fan out 2+N FB calls
+  // (campaign + adsets + one per spending adset) which tripped FB's global
+  // (app-level) rate limit; ranking by CTR needs every ad anyway, so pull
+  // them together via `/api/campaigns/{id}/report-ads`.
+  const adsQuery = useQuery({
+    queryKey: ["report-campaign-ads", campaign.id, date] as const,
+    queryFn: async (): Promise<FbCreativeEntity[]> =>
+      (await api.campaigns.reportAds(campaign.id, date)).data ?? [],
+    staleTime: 5 * 60_000,
+    enabled: !!campaign.id,
   });
 
-  const adsLoading = adsetsLoading || adQueries.some((q) => q.isLoading);
-  const adsError =
-    adsetsError ??
-    (adQueries.find((q) => q.isError)?.error instanceof Error
-      ? (adQueries.find((q) => q.isError)?.error as Error).message
-      : null);
+  const adsLoading = adsetsLoading || adsQuery.isLoading;
+  const adsError = adsetsError ?? (adsQuery.error instanceof Error ? adsQuery.error.message : null);
 
-  // Flatten → keep every ad that spent → rank by CTR desc (zero-CTR
-  // ads keep their slot at the bottom; zero-spend ads are dropped).
-  const allAds = adQueries.flatMap((q) => q.data ?? []);
+  // Keep every ad that spent → rank by CTR desc (zero-CTR ads keep their
+  // slot at the bottom; zero-spend ads are dropped).
+  const allAds = adsQuery.data ?? [];
   const rankedAds = allAds
     .map((ad) => ({ ad, ctr: num(getIns(ad).ctr), spend: num(getIns(ad).spend) }))
     .filter((s) => s.spend > 0)

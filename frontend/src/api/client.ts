@@ -949,6 +949,15 @@ export const api = {
         `/api/campaigns/${campaignId}/ads`,
         { source: "line-push-ad-picker" },
       ),
+    /** ALL ads under a campaign WITH insights + creative, in ONE call —
+     *  powers the 成效報告 (素材成效) so a share-page open fetches every
+     *  creative in ~1 call instead of one per adset (which tripped FB's
+     *  global rate limit). */
+    reportAds: (campaignId: string, date: DateConfig) =>
+      request<{ data: FbCreativeEntity[] }>("GET", `/api/campaigns/${campaignId}/report-ads`, {
+        query: dateParams(date),
+        source: "report",
+      }),
     setStatus: (campaignId: string, status: string) =>
       request<FbBaseEntity>("POST", `/api/campaigns/${campaignId}/status`, {
         query: { status },
