@@ -11674,7 +11674,7 @@ def _sec_push_row_to_dict(r) -> dict:
     }
 
 
-_VALID_SECURITY_PUSH_INTERVALS = (1, 2, 6, 12, 24)
+_VALID_SECURITY_PUSH_INTERVALS = (1, 2, 3, 6, 12, 24)
 
 
 def _next_security_push_run_at(
@@ -11706,7 +11706,7 @@ def _next_security_push_run_at(
     # re-fire at the same boundary).
     next_hour = ((local.hour // interval) + 1) * interval
     if next_hour >= 24:
-        # Roll into the next day at hour 0; works for 1/2/6/12/24
+        # Roll into the next day at hour 0; works for 1/2/3/6/12/24
         # (the only valid intervals) because all of them divide 24.
         days_forward = next_hour // 24
         next_local = local.replace(hour=0) + timedelta(days=days_forward)
