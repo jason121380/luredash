@@ -157,6 +157,7 @@ export function SecurityPushSettingsModal({
               <option value={0}>停用</option>
               <option value={1}>每小時整點 (0點, 1點, 2點…)</option>
               <option value={2}>每 2 小時整點 (0點, 2點, 4點…)</option>
+              <option value={3}>每 3 小時整點 (0點, 3點, 6點…)</option>
               <option value={6}>每 6 小時整點 (0點, 6點, 12點…)</option>
               <option value={12}>每 12 小時整點 (0點, 12點)</option>
               <option value={24}>每 24 小時整點 (0點)</option>
