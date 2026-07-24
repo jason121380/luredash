@@ -7618,10 +7618,17 @@ async def update_adset_budget(adset_id: str, daily_budget: int = Query(None)):
 
 # ── 廣告 ─────────────────────────────────────────────────────────────
 
-@app.get("/api/adsets/{adset_id}/ads")
-async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Optional[str] = None):
+async def _fetch_ads_for_parent(
+    parent_id: str, date_preset: str = "last_30d", time_range: Optional[str] = None
+) -> dict:
+    """Fetch all ads under a parent (adset OR campaign) with insights, in
+    the minimum FB calls: ONE `{parent}/ads` metadata fetch + ONE
+    `{parent}/insights?level=ad` bulk. `{campaign_id}/ads` returns every ad
+    under the campaign, so the 成效報告 can pull all creatives in ~2 calls
+    instead of fanning out one call per adset (which was tripping the FB
+    global rate limit on public share-page opens)."""
     # Metadata (creative fields) and insights are fetched SEPARATELY:
-    # numbers come from the adset's `/insights?level=ad` bulk EDGE
+    # numbers come from the parent's `/insights?level=ad` bulk EDGE
     # (`_fetch_child_insights_bulk`, one FB call for all ads, includes
     # the video metrics 成效報告 needs) and are stitched under
     # `ad["insights"]["data"][0]`. Nested field-expansion returned
@@ -7630,7 +7637,7 @@ async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Opti
     async def _ins_map() -> dict:
         try:
             return await _fetch_child_insights_bulk(
-                adset_id, "ad", date_preset, time_range
+                parent_id, "ad", date_preset, time_range
             )
         except HTTPException as e:
             if _is_rate_limit_exception(e):
@@ -7714,7 +7721,7 @@ async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Opti
                 # bytes.
                 params["thumbnail_width"] = "120"
                 params["thumbnail_height"] = "120"
-            data = await fb_get(f"{adset_id}/ads", params)
+            data = await fb_get(f"{parent_id}/ads", params)
             break
         except HTTPException as e:
             last_error = e
@@ -7742,6 +7749,24 @@ async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Opti
             stitched.append(ad_copy)
         data["data"] = stitched
     return data
+
+
+@app.get("/api/adsets/{adset_id}/ads")
+async def get_ads(adset_id: str, date_preset: str = "last_30d", time_range: Optional[str] = None):
+    """Ads under one adset (Dashboard tree 3rd level)."""
+    return await _fetch_ads_for_parent(adset_id, date_preset, time_range)
+
+
+@app.get("/api/campaigns/{campaign_id}/report-ads")
+async def get_campaign_report_ads(
+    campaign_id: str, date_preset: str = "last_30d", time_range: Optional[str] = None
+):
+    """ALL ads under a campaign WITH insights + creative, in ~2 FB calls (vs
+    one call per adset). Powers the 成效報告 (素材成效) so opening a public
+    share report doesn't fan out N calls and trip FB's global (app-level)
+    rate limit. (Distinct from `/ads` which is the flat no-insights list for
+    the LINE-push 以廣告播報 picker.)"""
+    return await _fetch_ads_for_parent(campaign_id, date_preset, time_range)
 
 
 # ── Insights breakdowns (for the share / dashboard report) ────
