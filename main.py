@@ -9805,39 +9805,45 @@ async def _build_flex_for_config(cfg: dict) -> dict:
     # Per-member carousel: one bubble per selected adset / ad. Title =
     # member name (campaign name moves into the subtitle as context).
     # Each bubble re-derives KPI from that member's own insights so the
-    # numbers are scoped, not pro-rated. Members are fetched in
-    # parallel because FB rate-limits per-edge, not per-account.
-    # `updated_time` feeds the per-member status chip's「M/D 已暫停」.
+    # numbers are scoped, not pro-rated.
     #
-    # Metadata + insights are fetched SEPARATELY, with the numbers coming
-    # from the member's `/insights` EDGE (same as the campaign-level path
-    # above) rather than field-expanding `insights` on the adset/ad node —
-    # node-level expansion has the same empty-row failure mode that showed
-    # 花費 $0 at campaign level. The edge is level-agnostic, so this keeps
-    # adset / ad pushes in lock-step with the dashboard too.
+    # BULK FETCH (2026-07-24): instead of 2 FB calls PER member (metadata +
+    # insights), pull ALL members under the campaign in TWO calls —
+    # `{campaign}/{kind}s` metadata + `{campaign}/insights?level={kind}` bulk
+    # — then filter to the selected member_ids. A 5-bubble carousel drops
+    # from ~10 FB calls to 2; the per-member fan-out was the top source of
+    # the FB global (code 4) rate limit. Numbers still come from the
+    # `/insights` EDGE (same empty-row-safe path as before), just batched.
+    # `updated_time` feeds the per-member status chip's「M/D 已暫停」.
     member_meta_fields = "id,name,status,updated_time"
-
-    async def _fetch_member(mid: str) -> dict:
-        meta, ins_row = await asyncio.gather(
-            fb_get(mid, {"fields": member_meta_fields}),
-            _fetch_single_entity_insights(mid, date_preset, time_range),
+    member_edge = f"{campaign_id}/{member_kind}s"  # adsets | ads
+    try:
+        meta_page, ins_by_member = await asyncio.gather(
+            fb_get(member_edge, {"fields": member_meta_fields, "limit": "500"}),
+            _fetch_child_insights_bulk(campaign_id, member_kind, date_preset, time_range),
         )
-        m = dict(meta) if isinstance(meta, dict) else {}
-        m["insights"] = {"data": [ins_row]} if ins_row else {"data": []}
-        return m
+    except HTTPException as exc:
+        # Rate-limit must bubble up so the scheduler backs off; other
+        # errors → empty maps so we fall back to the campaign-level bubble.
+        if _is_rate_limit_exception(exc):
+            raise
+        meta_page, ins_by_member = {"data": []}, {}
+    meta_by_id: dict = {}
+    if isinstance(meta_page, dict):
+        for m in meta_page.get("data") or []:
+            if isinstance(m, dict) and m.get("id"):
+                meta_by_id[m["id"]] = m
 
-    member_results = await asyncio.gather(
-        *[_fetch_member(mid) for mid in member_ids], return_exceptions=True
-    )
     bubbles: list[dict] = []
-    for mid, res in zip(member_ids, member_results):
-        if isinstance(res, BaseException):
-            # Skip members that FB can't return — better to ship a
-            # partial carousel than to fail the entire push because
-            # one adset / ad got archived.
-            print(f"[flex] skip {member_kind} {mid}: {res}", flush=True)
+    for mid in member_ids:
+        member_data = dict(meta_by_id.get(mid) or {})
+        if not member_data:
+            # Member not in the campaign's current member list (archived /
+            # moved) — skip rather than fail the whole carousel.
+            print(f"[flex] skip {member_kind} {mid}: not in campaign member list", flush=True)
             continue
-        member_data = res if isinstance(res, dict) else {}
+        ins_row = ins_by_member.get(mid)
+        member_data["insights"] = {"data": [ins_row]} if ins_row else {"data": []}
         member_name = member_data.get("name") or mid
         member_ins_list = (member_data.get("insights") or {}).get("data") or []
         member_ins = member_ins_list[0] if member_ins_list else {}
