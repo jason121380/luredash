@@ -79,6 +79,9 @@ export function TreeTable({
   const totalLinkClicks = sorted.reduce((s, c) => s + getLinkClicks(c), 0);
   const totalAtc = sorted.reduce((s, c) => s + getAtcCount(c), 0);
   const totalPurchases = sorted.reduce((s, c) => s + getPurchaseCount(c), 0);
+  // Reach summed across campaigns overcounts people seen in more than one
+  // campaign, but matches the common "total reach" convention operators expect.
+  const totalReach = sorted.reduce((s, c) => s + (Number(getIns(c).reach) || 0), 0);
   // 花費+% total — sum each campaign's spend+markup individually so the
   // per-campaign markup overrides are respected (matches 費用中心).
   const totalSpendPlus = sorted.reduce(
@@ -132,7 +135,7 @@ export function TreeTable({
           {extraTreeCols.map((code) =>
             code === "spend_plus" ? null : (
               <td key={code} className="num text-[13px] font-bold">
-                {totalsCellFor(code, { totalLinkClicks, totalAtc, totalPurchases })}
+                {totalsCellFor(code, { totalLinkClicks, totalAtc, totalPurchases, totalReach })}
               </td>
             ),
           )}
@@ -145,12 +148,19 @@ export function TreeTable({
 
 function totalsCellFor(
   code: string,
-  totals: { totalLinkClicks: number; totalAtc: number; totalPurchases: number },
+  totals: {
+    totalLinkClicks: number;
+    totalAtc: number;
+    totalPurchases: number;
+    totalReach: number;
+  },
 ): string {
   // Aggregate count-based extras only. Per-action costs and ROAS
   // depend on per-row spend / value relationships that don't sum
   // meaningfully across campaigns — leave those blank.
   switch (code) {
+    case "reach":
+      return totals.totalReach > 0 ? fN(totals.totalReach) : "—";
     case "link_clicks":
       return totals.totalLinkClicks > 0 ? fN(totals.totalLinkClicks) : "—";
     case "add_to_cart":

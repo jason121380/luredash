@@ -70,6 +70,7 @@ export type TreeColKey =
   | "status"
   | "spend"
   | "spend_plus"
+  | "reach"
   | "impressions"
   | "clicks"
   | "ctr"
@@ -105,6 +106,7 @@ export const EXTRA_TREE_COLS: { key: TreeColKey; label: string }[] = [
   // %, so buildTreeCols / the row components handle it out-of-band.
   // Listed here only so it appears as a checkbox in the column picker.
   { key: "spend_plus", label: "花費+%" },
+  { key: "reach", label: "觸及" },
   { key: "link_clicks", label: "連結點擊" },
   { key: "cost_per_link_click", label: "連結點擊成本" },
   { key: "add_to_cart", label: "加入購物車" },
@@ -115,6 +117,7 @@ export const EXTRA_TREE_COLS: { key: TreeColKey; label: string }[] = [
 ];
 
 const EXTRA_SORT_KEYS: Partial<Record<TreeColKey, (i: FbBaseEntity) => number>> = {
+  reach: (i) => Number(getIns(i).reach) || 0,
   link_clicks: (i) => getLinkClicks(i),
   cost_per_link_click: (i) => {
     const v = getCostPerLinkClick(i);
