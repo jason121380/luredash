@@ -162,6 +162,14 @@ export function getCostPerLinkClick(item: FbBaseEntity): number {
   return Number(getIns(item).cost_per_inline_link_click || 0);
 }
 
+/** 觸及成本 (CPR) = 花費 / 觸及. FB has no direct field, so derive it. */
+export function getCostPerReach(item: FbBaseEntity): number {
+  const ins = getIns(item);
+  const reach = Number(ins.reach) || 0;
+  if (reach <= 0) return 0;
+  return (Number(ins.spend) || 0) / reach;
+}
+
 export function getRoas(item: FbBaseEntity): number {
   const ins = getIns(item);
   return firstActionValue(ins.purchase_roas ?? ins.website_purchase_roas, PURCHASE_TYPES);

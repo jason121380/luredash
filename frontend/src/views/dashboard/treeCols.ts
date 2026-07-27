@@ -3,6 +3,7 @@ import {
   getCostPerAtc,
   getCostPerLinkClick,
   getCostPerPurchase,
+  getCostPerReach,
   getIns,
   getLinkClicks,
   getMsgCount,
@@ -71,6 +72,7 @@ export type TreeColKey =
   | "spend"
   | "spend_plus"
   | "reach"
+  | "cost_per_reach"
   | "impressions"
   | "clicks"
   | "ctr"
@@ -107,6 +109,7 @@ export const EXTRA_TREE_COLS: { key: TreeColKey; label: string }[] = [
   // Listed here only so it appears as a checkbox in the column picker.
   { key: "spend_plus", label: "花費+%" },
   { key: "reach", label: "觸及" },
+  { key: "cost_per_reach", label: "觸及成本" },
   { key: "link_clicks", label: "連結點擊" },
   { key: "cost_per_link_click", label: "連結點擊成本" },
   { key: "add_to_cart", label: "加入購物車" },
@@ -118,6 +121,10 @@ export const EXTRA_TREE_COLS: { key: TreeColKey; label: string }[] = [
 
 const EXTRA_SORT_KEYS: Partial<Record<TreeColKey, (i: FbBaseEntity) => number>> = {
   reach: (i) => Number(getIns(i).reach) || 0,
+  cost_per_reach: (i) => {
+    const v = getCostPerReach(i);
+    return v > 0 ? v : Number.POSITIVE_INFINITY;
+  },
   link_clicks: (i) => getLinkClicks(i),
   cost_per_link_click: (i) => {
     const v = getCostPerLinkClick(i);

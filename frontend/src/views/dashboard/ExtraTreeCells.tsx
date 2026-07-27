@@ -4,6 +4,7 @@ import {
   getCostPerAtc,
   getCostPerLinkClick,
   getCostPerPurchase,
+  getCostPerReach,
   getIns,
   getLinkClicks,
   getPurchaseCount,
@@ -73,6 +74,10 @@ function renderCell(code: TreeColKey, entity: FbBaseEntity) {
     case "reach": {
       const v = Number(getIns(entity).reach) || 0;
       return <td className="num">{v > 0 ? fN(v) : "—"}</td>;
+    }
+    case "cost_per_reach": {
+      const v = getCostPerReach(entity);
+      return <td className="num">{v > 0 ? `$${fM(v)}` : "—"}</td>;
     }
     case "link_clicks": {
       const v = getLinkClicks(entity);
