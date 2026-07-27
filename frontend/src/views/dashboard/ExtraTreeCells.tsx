@@ -76,8 +76,10 @@ function renderCell(code: TreeColKey, entity: FbBaseEntity) {
       return <td className="num">{v > 0 ? fN(v) : "—"}</td>;
     }
     case "cost_per_reach": {
+      // CPR is usually sub-dollar (幾毛錢/人), so 2 decimals — the 0-decimal
+      // money format `fM` would round every row to $0.
       const v = getCostPerReach(entity);
-      return <td className="num">{v > 0 ? `$${fM(v)}` : "—"}</td>;
+      return <td className="num">{v > 0 ? `$${fN(v, 2)}` : "—"}</td>;
     }
     case "link_clicks": {
       const v = getLinkClicks(entity);
