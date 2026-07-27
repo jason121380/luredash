@@ -4,6 +4,7 @@ import {
   getCostPerAtc,
   getCostPerLinkClick,
   getCostPerPurchase,
+  getIns,
   getLinkClicks,
   getPurchaseCount,
   getRoas,
@@ -69,6 +70,10 @@ function renderCell(code: TreeColKey, entity: FbBaseEntity) {
     // here so it isn't duplicated in the trailing extras block.
     case "spend_plus":
       return null;
+    case "reach": {
+      const v = Number(getIns(entity).reach) || 0;
+      return <td className="num">{v > 0 ? fN(v) : "—"}</td>;
+    }
     case "link_clicks": {
       const v = getLinkClicks(entity);
       return <td className="num">{v > 0 ? fN(v) : "—"}</td>;
