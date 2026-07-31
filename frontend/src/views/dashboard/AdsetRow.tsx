@@ -25,6 +25,7 @@ export interface AdsetRowProps {
   /** Forwarded down to each CreativeRow → CreativePreviewModal so
    *  downloaded files inherit the parent campaign's name. */
   campaignName?: string;
+  accountId?: string;
   extras: string[];
 }
 
@@ -48,6 +49,7 @@ function AdsetRowInner({
   date,
   onOpenBudget,
   campaignName,
+  accountId,
   extras,
 }: AdsetRowProps) {
   const expanded = useUiStore((s) => s.expandedAdsets.includes(adset.id));
@@ -74,7 +76,7 @@ function AdsetRowInner({
     if (!ok) return;
     setPendingStatus(status);
     try {
-      await mutation.mutateAsync({ kind: "adset", id: adset.id, status });
+      await mutation.mutateAsync({ kind: "adset", id: adset.id, status, accountId });
       toast(`已${action}廣告組合`, "success");
     } catch (e) {
       setPendingStatus(null);
@@ -137,7 +139,9 @@ function AdsetRowInner({
               title="調整預算"
               aria-label="調整預算"
               className="cursor-pointer border-0 bg-transparent p-1 text-gray-400 hover:text-orange outline-none"
-              onClick={() => onOpenBudget({ kind: "adset", id: adset.id, name: adset.name })}
+              onClick={() =>
+                onOpenBudget({ kind: "adset", id: adset.id, name: adset.name, accountId })
+              }
             >
               <svg
                 width="14"
@@ -163,6 +167,7 @@ function AdsetRowInner({
           colCount={colCount}
           multiAcct={multiAcct}
           campaignName={campaignName}
+          accountId={accountId}
           extras={extras}
         />
       )}
@@ -177,12 +182,14 @@ function AdsetCreatives({
   colCount,
   multiAcct,
   campaignName,
+  accountId,
   extras,
 }: {
   query: ReturnType<typeof useCreatives>;
   colCount: number;
   multiAcct: boolean;
   campaignName?: string;
+  accountId?: string;
   extras: string[];
 }) {
   if (query.isLoading || query.isPending) {
@@ -237,6 +244,7 @@ function AdsetCreatives({
           creative={creative}
           multiAcct={multiAcct}
           campaignName={campaignName}
+          accountId={accountId}
           extras={extras}
         />
       ))}

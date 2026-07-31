@@ -79,7 +79,12 @@ function CampaignRowInner({
     if (!ok) return;
     setPendingStatus(status);
     try {
-      await mutation.mutateAsync({ kind: "campaign", id: campaign.id, status });
+      await mutation.mutateAsync({
+        kind: "campaign",
+        id: campaign.id,
+        status,
+        accountId: campaign._accountId,
+      });
       toast(`已${action}行銷活動`, "success");
     } catch (e) {
       setPendingStatus(null);
@@ -158,7 +163,12 @@ function CampaignRowInner({
               aria-label="調整預算"
               className="cursor-pointer border-0 bg-transparent p-1 text-gray-400 hover:text-orange outline-none"
               onClick={() =>
-                onOpenBudget({ kind: "campaign", id: campaign.id, name: campaign.name })
+                onOpenBudget({
+                  kind: "campaign",
+                  id: campaign.id,
+                  name: campaign.name,
+                  accountId: campaign._accountId,
+                })
               }
             >
               <svg
@@ -213,6 +223,7 @@ function CampaignRowInner({
           date={date}
           onOpenBudget={onOpenBudget}
           campaignName={campaign.name}
+          accountId={campaign._accountId}
           extras={extras}
         />
       )}
@@ -229,6 +240,7 @@ function CampaignAdsets({
   date,
   onOpenBudget,
   campaignName,
+  accountId,
   extras,
 }: {
   query: ReturnType<typeof useAdsets>;
@@ -237,6 +249,7 @@ function CampaignAdsets({
   date: DateConfig;
   onOpenBudget: (target: BudgetModalTarget) => void;
   campaignName: string;
+  accountId?: string;
   extras: string[];
 }) {
   if (query.isLoading || query.isPending) {
@@ -282,6 +295,7 @@ function CampaignAdsets({
           date={date}
           onOpenBudget={onOpenBudget}
           campaignName={campaignName}
+          accountId={accountId}
           extras={extras}
         />
       ))}

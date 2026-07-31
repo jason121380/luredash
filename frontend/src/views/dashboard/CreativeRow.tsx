@@ -39,10 +39,17 @@ export interface CreativeRowProps {
    *  root — undefined for flat views (素材比較) where there is no
    *  single parent campaign. */
   campaignName?: string;
+  accountId?: string;
   extras: string[];
 }
 
-function CreativeRowInner({ creative, multiAcct, campaignName, extras }: CreativeRowProps) {
+function CreativeRowInner({
+  creative,
+  multiAcct,
+  campaignName,
+  accountId,
+  extras,
+}: CreativeRowProps) {
   const ins = getIns(creative);
   const msgs = getMsgCount(creative);
   const spend = Number(ins.spend) || 0;
@@ -64,7 +71,7 @@ function CreativeRowInner({ creative, multiAcct, campaignName, extras }: Creativ
     if (!ok) return;
     setPendingStatus(status);
     try {
-      await mutation.mutateAsync({ kind: "creative", id: creative.id, status });
+      await mutation.mutateAsync({ kind: "creative", id: creative.id, status, accountId });
       toast(`已${action}廣告`, "success");
     } catch (e) {
       setPendingStatus(null);

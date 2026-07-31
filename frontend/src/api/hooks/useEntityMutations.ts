@@ -19,6 +19,32 @@ export interface StatusMutationInput {
   kind: EntityKind;
   id: string;
   status: FbEntityStatus;
+  accountId?: string;
+}
+
+function overviewKeyContainsAccount(queryKey: readonly unknown[], accountId: string): boolean {
+  const idsKey = queryKey[1];
+  if (typeof idsKey !== "string") return false;
+  return idsKey.split(",").includes(accountId);
+}
+
+function invalidateAffectedOverview(
+  qc: ReturnType<typeof useQueryClient>,
+  accountId?: string,
+): void {
+  if (!accountId) {
+    qc.invalidateQueries({ queryKey: ["overview"] });
+    qc.invalidateQueries({ queryKey: ["overview-lite"] });
+    return;
+  }
+  const predicate = (q: { queryKey: readonly unknown[] }) => {
+    const root = q.queryKey[0];
+    return (
+      (root === "overview" || root === "overview-lite") &&
+      overviewKeyContainsAccount(q.queryKey, accountId)
+    );
+  };
+  qc.invalidateQueries({ predicate });
 }
 
 export function useEntityStatusMutation() {
@@ -47,8 +73,7 @@ export function useEntityStatusMutation() {
       } else {
         qc.invalidateQueries({ queryKey: ["creatives"] });
       }
-      qc.invalidateQueries({ queryKey: ["overview"] });
-      qc.invalidateQueries({ queryKey: ["overview-lite"] });
+      invalidateAffectedOverview(qc, input.accountId);
     },
   });
 }
@@ -57,6 +82,7 @@ export interface BudgetMutationInput {
   kind: "campaign" | "adset";
   id: string;
   dailyBudget: number;
+  accountId?: string;
 }
 
 export function useEntityBudgetMutation() {
@@ -74,8 +100,7 @@ export function useEntityBudgetMutation() {
       } else {
         qc.invalidateQueries({ queryKey: ["adsets"] });
       }
-      qc.invalidateQueries({ queryKey: ["overview"] });
-      qc.invalidateQueries({ queryKey: ["overview-lite"] });
+      invalidateAffectedOverview(qc, input.accountId);
     },
   });
 }
