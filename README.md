@@ -67,7 +67,7 @@ Facebook 廣告管理後台，串接 Facebook Marketing API v21.0，支援 80+ �
 - **廣告帳號** `/settings` — BM panel + 帳戶啟用 / 多選 / 拖曳排序
 - **LINE 推播** `/line-push` — 群組管理表格,搜尋過濾,Topbar 右上有重新整理按鈕
 - **我的訂閱** `/billing` — 訂閱方案 + 用量條 + Polar customer portal
-- 設定群組底下另有兩個按鈕:**工程模式**(開 `EngineeringModal` 看 cache / 工具)、**登出**(2026-05-26 後從 avatar dropdown 移到這裡)
+- 設定群組底下另有兩個按鈕:**工程模式**(開 `EngineeringModal` 看 FB 限流戰情室 / cache / 工具;含「限流・推播說明」分頁)、**登出**(2026-05-26 後從 avatar dropdown 移到這裡)
 
 ### LINE 推播（LINE Push）
 - 群組自動登錄:LINE bot 加入群組時 webhook upsert 入 `line_groups`
@@ -134,6 +134,10 @@ uvicorn main:app --port 8001 --reload
 | `FB_API_VERSION` | Graph API 版本(預設 `v21.0`)|
 | `GEMINI_API_KEY` | Google Gemini API Key |
 | `GEMINI_MODEL` | Gemini 模型名稱(預設 `gemini-3-flash-preview`)|
+| `FB_HISTORICAL_CACHE_TTL_SECONDS` | 已封閉歷史區間 insights 快取 TTL(預設 `3600`);滾動區間維持 300s。降低對 FB App 全域每小時呼叫額度的重複消耗 |
+| `FB_OFFPEAK_WARM_START_HOUR` / `FB_OFFPEAK_WARM_END_HOUR` | 每月重型預熱 fan-out 只在此當地離峰時段觸發(預設 `2`–`6`);`start==end` 停用 |
+
+> FB 限流治理:系統以「五層降載」(per-account 歸戶、精準 invalidate、歷史區間長快取、離峰預熱、排程推播解鎖)降低對 Facebook API 每小時呼叫額度的消耗。細節見 **工程模式 →「限流・推播說明」分頁**。
 
 ---
 
