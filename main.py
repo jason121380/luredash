@@ -3407,6 +3407,72 @@ def _insights_clause(fields: str, date_preset: str = "last_30d", time_range: Opt
     return f"insights.date_preset({date_preset}){{{fields}}}"
 
 
+# ── Historical (closed-window) insights caching ─────────────────────
+# A closed date range's numbers are already final — beyond FB's 1-2 day
+# attribution settle they never change — so re-fetching every 5 min just
+# burns the app-level (X-App-Usage / code 4) hourly call budget for
+# identical bytes. Cache those responses far longer. Rolling windows that
+# include today (last_7d / this_month / maximum / …) keep the default
+# short TTL because their numbers still accumulate. Env-tunable.
+_HISTORICAL_CACHE_TTL_SECONDS = _env_int("FB_HISTORICAL_CACHE_TTL_SECONDS", 3600)
+
+# date_preset values whose window is entirely in the past. Deliberately
+# EXCLUDES rolling presets (today / last_3d / last_7d / last_14d /
+# last_28d / last_30d / last_90d / this_week_* / this_month /
+# this_quarter / this_year / maximum) — those still include the current
+# (partial) day and must stay on the short TTL.
+_CLOSED_DATE_PRESETS = frozenset(
+    {
+        "yesterday",
+        "last_week_mon_sun",
+        "last_week_sun_sat",
+        "last_month",
+        "last_quarter",
+        "last_year",
+    }
+)
+
+_TIME_RANGE_UNTIL_RE = re.compile(r"until['\"]?\s*[:=]\s*['\"]?(\d{4}-\d{2}-\d{2})")
+
+
+def _is_closed_date_range(
+    date_preset: Optional[str], time_range: Optional[str]
+) -> bool:
+    """True when the insights window is fully in the past (its numbers
+    won't change beyond FB's attribution settle), so the FB read cache
+    can hold the response far longer.
+
+    - time_range: closed iff its `until` date is strictly before today
+      (SCHEDULER_TZ) — the unambiguous path most historical views use.
+    - date_preset: closed iff it's a fixed past-window preset; rolling
+      presets that include today are treated as live.
+    Malformed / unrecognised inputs fall back to False (short TTL) so a
+    parse miss can never over-cache live data.
+    """
+    if time_range:
+        m = _TIME_RANGE_UNTIL_RE.search(time_range)
+        if not m:
+            return False
+        try:
+            until = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            return False
+        return until < datetime.now(_scheduler_tz()).date()
+    if date_preset:
+        return date_preset in _CLOSED_DATE_PRESETS
+    return False
+
+
+def _insights_cache_ttl(
+    date_preset: Optional[str], time_range: Optional[str]
+) -> float:
+    """TTL for an insights FB read: long for closed/historical windows,
+    the default short TTL for live windows."""
+    if _is_closed_date_range(date_preset, time_range):
+        return float(_HISTORICAL_CACHE_TTL_SECONDS)
+    return _CACHE_TTL_SECONDS
+
+
 # ── Pages ───────────────────────────────────────────────────────────
 
 def _index_bytes() -> bytes:
@@ -7101,13 +7167,14 @@ async def _fetch_campaign_insights_bulk(
         base_params["time_range"] = time_range
     else:
         base_params["date_preset"] = date_preset
+    cache_ttl = _insights_cache_ttl(date_preset, time_range)
 
     rows: list = []
     last_err: Optional[HTTPException] = None
     for tier, fields in (("full", full_fields), ("mid", mid_fields), ("min", min_fields)):
         try:
             rows = await fb_get_paginated(
-                f"{account_id}/insights", {**base_params, "fields": fields}
+                f"{account_id}/insights", {**base_params, "fields": fields}, ttl=cache_ttl
             )
             if last_err is not None:
                 print(
@@ -7178,10 +7245,13 @@ async def _fetch_single_entity_insights(
         params["time_range"] = time_range
     else:
         params["date_preset"] = date_preset
+    cache_ttl = _insights_cache_ttl(date_preset, time_range)
 
     for fields in (full_fields, mid_fields, min_fields):
         try:
-            resp = await fb_get(f"{entity_id}/insights", {**params, "fields": fields})
+            resp = await fb_get(
+                f"{entity_id}/insights", {**params, "fields": fields}, cache_ttl=cache_ttl
+            )
             data = resp.get("data") if isinstance(resp, dict) else None
             return data[0] if isinstance(data, list) and data else {}
         except HTTPException as e:
@@ -7238,12 +7308,13 @@ async def _fetch_child_insights_bulk(
         base_params["time_range"] = time_range
     else:
         base_params["date_preset"] = date_preset
+    cache_ttl = _insights_cache_ttl(date_preset, time_range)
 
     rows: list = []
     for fields in (full_fields, mid_fields, min_fields):
         try:
             rows = await fb_get_paginated(
-                f"{parent_id}/insights", {**base_params, "fields": fields}
+                f"{parent_id}/insights", {**base_params, "fields": fields}, ttl=cache_ttl
             )
             break
         except HTTPException as e:
@@ -15012,6 +15083,27 @@ _HISTORY_WARM_AUTO_STATE_KEY = "_history_warm_auto_state"
 _COST_CENTER_WARM_AUTO_STATE_KEY = "_cost_center_warm_auto_state"
 _HISTORY_WARM_AUTO_RETRY_GAP_S = 6 * 3600  # 全滅(warmed=0)後最快 6h 重試
 
+# 每月一次的重型 fan-out(全帳號 history-warm + lurefin cost-center)只在
+# 離峰時段觸發,避免這波尖峰疊在白天使用者流量的同一個 app-level FB 呼叫
+# 額度上(正是 code=4 全域限流的來源)。上個月早已結算封閉,把 fan-out 延到
+# 凌晨安靜時段沒有任何功能代價。以 SCHEDULER_TZ 當地小時判斷;start==end 代表
+# 停用此閘門(隨時可跑),方便需要時強制立即預熱。
+_OFFPEAK_WARM_START_HOUR = _env_int("FB_OFFPEAK_WARM_START_HOUR", 2)
+_OFFPEAK_WARM_END_HOUR = _env_int("FB_OFFPEAK_WARM_END_HOUR", 6)
+
+
+def _is_offpeak_now() -> bool:
+    """True when the current SCHEDULER_TZ local hour is inside the
+    off-peak warm window [start, end). Handles a window that wraps past
+    midnight (start > end). start == end disables the gate (always True)."""
+    start, end = _OFFPEAK_WARM_START_HOUR, _OFFPEAK_WARM_END_HOUR
+    if start == end:
+        return True
+    hour = datetime.now(_scheduler_tz()).hour
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end  # wraps midnight, e.g. 22 → 5
+
 
 async def _history_warm_auto_state_load(key: str = _HISTORY_WARM_AUTO_STATE_KEY) -> dict:
     if _db_pool is None:
@@ -15073,6 +15165,10 @@ async def _history_warm_auto_tick() -> None:
     state = await _history_warm_auto_state_load()
     if state.get("done") == target:
         return
+    # 只在離峰時段跑這波全帳號 fan-out(見 _is_offpeak_now)。尚未 done 的月份
+    # 會在每晚離峰窗重試,直到成功。
+    if not _is_offpeak_now():
+        return
     attempt_at = state.get("attempt_at")
     if state.get("attempt_month") == target and attempt_at:
         try:
@@ -15118,6 +15214,9 @@ async def _cost_center_warm_auto_tick() -> None:
         return  # 上個月還在結算緩衝期
     state = await _history_warm_auto_state_load(_COST_CENTER_WARM_AUTO_STATE_KEY)
     if state.get("done") == target:
+        return
+    # 只在離峰時段跑(同 _history_warm_auto_tick)。
+    if not _is_offpeak_now():
         return
     attempt_at = state.get("attempt_at")
     if state.get("attempt_month") == target and attempt_at:

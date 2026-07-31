@@ -74,6 +74,8 @@ GEMINI_MODEL    — Gemini model (default: gemini-3-flash-preview)
 EZPAY_MERCHANT_ID / EZPAY_HASH_KEY / EZPAY_HASH_IV — 藍新 ezPay 電子發票 商店金鑰 (HashKey 32碼 / HashIV 16碼, AES-256-CBC)
 EZPAY_API_BASE  — ezPay API base (default TEST https://cinv.ezpay.com.tw; prod https://inv.ezpay.com.tw)
 EZPAY_MOCK      — "1" prints the decrypted invoice payload instead of calling ezPay (dev)
+FB_HISTORICAL_CACHE_TTL_SECONDS — closed/historical insights 讀取快取 TTL (default 3600). 已封閉的日期區間(time_range 的 until < 今天、或固定過去 date_preset:yesterday/last_month/last_week_*/last_quarter/last_year)數字已定案,拉長 TTL 大幅減少對 App 全域(X-App-Usage / code 4)每小時呼叫額度的重複消耗。滾動區間(last_7d/this_month/maximum…)仍用預設 300s。
+FB_OFFPEAK_WARM_START_HOUR / FB_OFFPEAK_WARM_END_HOUR — 每月重型 fan-out(全帳號 history-warm + lurefin cost-center 自動重熱)只在此 SCHEDULER_TZ 當地離峰時段觸發 (default 2–6)。避免每月一次的尖峰疊在白天使用者流量的同一個 app-level 呼叫額度上。start==end 停用閘門(隨時可跑)。手動工程模式預熱不受此限。
 ```
 
 ## Token Flow
