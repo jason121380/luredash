@@ -12448,30 +12448,19 @@ async def test_security_push_config(
 
 # ── Scheduler loop ────────────────────────────────────────────
 
-async def _scheduler_tick() -> None:
-    """Run one pass: find due configs, push each, update bookkeeping.
+async def _claim_due_line_push_config(now: datetime) -> Optional[dict]:
+    """Atomically claim one due LINE push config for this worker.
 
-    Uses `FOR UPDATE SKIP LOCKED` so two concurrent workers (or two
-    overlapping ticks) never grab the same row — each row is owned
-    by exactly one worker for the duration of the transaction.
+    Claiming one row at a time avoids the "claimed but not processed"
+    batch side effect: if the tick stops after processing item 3, item
+    4 was never marked with ``last_run_at = now`` and remains eligible
+    for the next scheduler pass.
     """
-    _fb_call_source.set("line-push")
     if _db_pool is None:
-        return
-    now = datetime.now(timezone.utc)
+        return None
     async with _db_pool.acquire() as conn:
         async with conn.transaction():
-            # The `last_run_at < next_run_at` guard excludes rows another
-            # worker grabbed this tick (their last_run_at was just bumped).
-            # The 30-minute grace clause is the SELF-HEAL path: a row whose
-            # push failed (or whose worker crashed mid-push) is left with
-            # last_run_at >= next_run_at and would otherwise be stranded
-            # FOREVER — the exact bug where a scheduled push silently never
-            # fired again after one FB-throttled failure, while manual 測試
-            # kept working. A real in-flight push finishes in seconds, so
-            # anything still "grabbed" after 30 minutes is dead and safe to
-            # re-run.
-            due = await conn.fetch(
+            row = await conn.fetchrow(
                 """
                 SELECT * FROM campaign_line_push_configs
                 WHERE enabled
@@ -12482,26 +12471,35 @@ async def _scheduler_tick() -> None:
                     OR last_run_at <= $1 - INTERVAL '30 minutes'
                   )
                 ORDER BY next_run_at ASC
-                LIMIT $2
+                LIMIT 1
                 FOR UPDATE SKIP LOCKED
                 """,
                 now,
-                _LINE_PUSH_MAX_CONFIGS_PER_TICK,
             )
-            # Bump last_run_at inside the same txn so other workers'
-            # `last_run_at < next_run_at` filter immediately excludes
-            # these rows even before we push. The real next_run_at
-            # update happens after push success below.
-            if due:
-                await conn.execute(
-                    """
-                    UPDATE campaign_line_push_configs
-                    SET last_run_at = $1
-                    WHERE id = ANY($2::uuid[])
-                    """,
-                    now,
-                    [r["id"] for r in due],
-                )
+            if row is None:
+                return None
+            await conn.execute(
+                """
+                UPDATE campaign_line_push_configs
+                SET last_run_at = $1
+                WHERE id = $2::uuid
+                """,
+                now,
+                row["id"],
+            )
+            return dict(row)
+
+
+async def _scheduler_tick() -> None:
+    """Run one pass: find due configs, push each, update bookkeeping.
+
+    Uses `FOR UPDATE SKIP LOCKED` so two concurrent workers (or two
+    overlapping ticks) never grab the same row — each row is owned
+    by exactly one worker for the duration of the transaction.
+    """
+    _fb_call_source.set("line-push")
+    if _db_pool is None:
+        return
 
     # Per-tick cache so we only resolve allowed-config sets / limits
     # once per owner even if many of their configs are due in the
@@ -12518,10 +12516,10 @@ async def _scheduler_tick() -> None:
     # the user-facing schedule.
     _last_account_id: Optional[str] = None
 
-    for row in due:
-        gate_reason = _background_gate_reason()
-        if gate_reason:
-            print(f"[scheduler] stopping remaining due configs — {gate_reason}", flush=True)
+    for _ in range(_LINE_PUSH_MAX_CONFIGS_PER_TICK):
+        now = datetime.now(timezone.utc)
+        row = await _claim_due_line_push_config(now)
+        if row is None:
             break
         cfg = _config_row_to_dict(row)
         # Spread out consecutive pushes targeting the same ad account.
@@ -12752,11 +12750,19 @@ async def _scheduler_loop() -> None:
     try:
         while True:
             try:
+                # Scheduled LINE pushes are customer-visible work and
+                # should not be skipped wholesale by the conservative
+                # background BUCU gate. FB calls made while building the
+                # report still pass through the normal live/per-account
+                # throttles inside fb_get(), and failures schedule a retry.
+                await _scheduler_tick()
                 gate_reason = _background_gate_reason()
                 if gate_reason:
-                    print(f"[scheduler] skipping tick — {gate_reason}", flush=True)
+                    print(
+                        f"[background] skipping history warm tick — {gate_reason}",
+                        flush=True,
+                    )
                 else:
-                    await _scheduler_tick()
                     # 每月自動重熱上個月快照 — 絕大多數 tick 直接 no-op
                     # (已 done / 還在結算緩衝期),只有每月 3 號後第一次
                     # 會真的 fan-out。account_month_snapshots(全帳號)與
