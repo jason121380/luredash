@@ -23,6 +23,7 @@ export interface BudgetModalTarget {
   kind: Extract<EntityKind, "campaign" | "adset">;
   id: string;
   name: string;
+  accountId?: string;
 }
 
 export interface BudgetModalProps {
@@ -53,7 +54,12 @@ export function BudgetModal({ open, target, onClose }: BudgetModalProps) {
     const ok = await confirm(`確定將每日預算更改為 $${fM(val)}？`);
     if (!ok) return;
     try {
-      await mutation.mutateAsync({ kind: target.kind, id: target.id, dailyBudget: val });
+      await mutation.mutateAsync({
+        kind: target.kind,
+        id: target.id,
+        dailyBudget: val,
+        accountId: target.accountId,
+      });
       onClose();
     } catch (err) {
       setError(mutationErrorMessage(err));

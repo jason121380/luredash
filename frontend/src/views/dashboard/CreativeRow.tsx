@@ -41,6 +41,7 @@ export interface CreativeRowProps {
    *  root — undefined for flat views (素材比較) where there is no
    *  single parent campaign. */
   campaignName?: string;
+  accountId?: string;
   extras: string[];
   /** Parent campaign markup % for the 花費+% cell. Undefined in the flat
    *  素材比較 view (no single parent campaign) → falls back to the team
@@ -52,6 +53,7 @@ function CreativeRowInner({
   creative,
   multiAcct,
   campaignName,
+  accountId,
   extras,
   spendPlusMarkup,
 }: CreativeRowProps) {
@@ -88,7 +90,7 @@ function CreativeRowInner({
     if (!ok) return;
     setPendingStatus(status);
     try {
-      await mutation.mutateAsync({ kind: "creative", id: creative.id, status });
+      await mutation.mutateAsync({ kind: "creative", id: creative.id, status, accountId });
       toast(`已${action}廣告`, "success");
     } catch (e) {
       setPendingStatus(null);

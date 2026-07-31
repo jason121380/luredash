@@ -147,6 +147,8 @@ _fb_semaphore: asyncio.Semaphore = asyncio.Semaphore(_FB_GLOBAL_CONCURRENCY)
 _PER_ACCOUNT_CONCURRENCY = _env_int("FB_PER_ACCOUNT_CONCURRENCY", 2)
 _per_account_semaphores: dict[str, asyncio.Semaphore] = {}
 _OVERVIEW_ACCOUNT_CONCURRENCY = _env_int("OVERVIEW_ACCOUNT_CONCURRENCY", 4)
+_CAMPAIGNS_PARALLEL_INSIGHTS = os.getenv("CAMPAIGNS_PARALLEL_INSIGHTS", "0") == "1"
+_OVERVIEW_PARALLEL_ACCOUNT_INSIGHTS = os.getenv("OVERVIEW_PARALLEL_ACCOUNT_INSIGHTS", "0") == "1"
 
 # Security monitor background work is extra conservative because it is
 # not user-facing latency. It should never compete aggressively with
@@ -155,6 +157,7 @@ _SECURITY_SCAN_CONCURRENCY = _env_int("SECURITY_SCAN_CONCURRENCY", 2)
 _SECURITY_PUSH_MAX_CONFIGS_PER_TICK = _env_int("SECURITY_PUSH_MAX_CONFIGS_PER_TICK", 3)
 _SECURITY_PUSH_ENRICH_CREATORS = os.getenv("SECURITY_PUSH_ENRICH_CREATORS", "0") == "1"
 _SECURITY_PUSH_SCAN_CACHE_TTL_SECONDS = _env_int("SECURITY_PUSH_SCAN_CACHE_TTL_SECONDS", 120)
+_LINE_PUSH_MAX_CONFIGS_PER_TICK = _env_int("LINE_PUSH_MAX_CONFIGS_PER_TICK", 10)
 
 
 class _NullAsyncContext:
@@ -181,6 +184,86 @@ def _extract_account_id_from_path(path: str) -> Optional[str]:
         return None
     head = path.split("/", 1)[0]
     return head if head.startswith("act_") else None
+
+
+_ENTITY_ACCOUNT_TTL_SECONDS = _env_int("FB_ENTITY_ACCOUNT_TTL_SECONDS", 60 * 60)
+_entity_account_map: dict[str, tuple[str, float]] = {}
+
+
+def _normalise_account_id(account_id: Any) -> Optional[str]:
+    raw = str(account_id or "").strip()
+    if not raw:
+        return None
+    return raw if raw.startswith("act_") else f"act_{raw}"
+
+
+def _remember_entity_account(entity_id: Any, account_id: Any) -> None:
+    eid = str(entity_id or "").strip()
+    aid = _normalise_account_id(account_id)
+    if not eid or not aid or eid == aid:
+        return
+    _entity_account_map[eid] = (aid, time.monotonic() + _ENTITY_ACCOUNT_TTL_SECONDS)
+
+
+def _lookup_entity_account(entity_id: str) -> Optional[str]:
+    if not entity_id:
+        return None
+    entry = _entity_account_map.get(entity_id)
+    if not entry:
+        return None
+    account_id, deadline = entry
+    if deadline <= time.monotonic():
+        _entity_account_map.pop(entity_id, None)
+        return None
+    return account_id
+
+
+def _account_id_for_path(path: str) -> Optional[str]:
+    direct = _extract_account_id_from_path(path)
+    if direct:
+        return direct
+    if not path or "/" in path:
+        head = path.split("/", 1)[0]
+    else:
+        head = path
+    if head in {"me", "debug_token"}:
+        return None
+    return _lookup_entity_account(head)
+
+
+def _remember_graph_entities_account(payload: Any, account_id: Any) -> None:
+    aid = _normalise_account_id(account_id)
+    if not aid:
+        return
+    if isinstance(payload, list):
+        for item in payload:
+            _remember_graph_entities_account(item, aid)
+        return
+    if not isinstance(payload, dict):
+        return
+    eid = payload.get("id")
+    if eid:
+        _remember_entity_account(eid, aid)
+    creative = payload.get("creative")
+    if isinstance(creative, dict) and creative.get("id"):
+        _remember_entity_account(creative.get("id"), aid)
+    for nested_key in ("campaigns", "adsets", "ads", "data"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict) and isinstance(nested.get("data"), list):
+            _remember_graph_entities_account(nested.get("data"), aid)
+        elif isinstance(nested, list):
+            _remember_graph_entities_account(nested, aid)
+
+
+def _learn_account_from_graph_response(path: str, body: Any) -> None:
+    account_id = _account_id_for_path(path)
+    if isinstance(body, dict):
+        body_account = _normalise_account_id(body.get("account_id"))
+        if body.get("id") and body_account:
+            _remember_entity_account(body.get("id"), body_account)
+            account_id = body_account
+    if account_id:
+        _remember_graph_entities_account(body, account_id)
 
 
 def _account_semaphore(account_id: str) -> asyncio.Semaphore:
@@ -2264,7 +2347,7 @@ def _record_account_throttle(account_id: Optional[str], path: str, error_code: i
     regain), update the global `_last_ads_throttle_at`, and emit a
     structured log line so operators can correlate from stderr.
     """
-    aid = account_id or _extract_account_id_from_path(path) or ""
+    aid = account_id or _account_id_for_path(path) or ""
     regain_min = _peak_regain_minutes()
     # Cooldown floor: 10 minutes. FB's BUCU header sometimes reports
     # 0 minutes IMMEDIATELY after the throttle fires (it's an estimate),
@@ -2746,9 +2829,10 @@ async def _fb_request(
         cache_key = _cache_key(token, path, params, kind="single")
         cached = _cache_get(cache_key)
         if cached is not None:
+            _learn_account_from_graph_response(path, cached)
             _log_fb_call(
                 path=path,
-                account_id=_extract_account_id_from_path(path),
+                account_id=_account_id_for_path(path),
                 method=method,
                 ms=0,
                 status=200,
@@ -2763,7 +2847,7 @@ async def _fb_request(
             return stale
         _log_fb_call(
             path=path,
-            account_id=_extract_account_id_from_path(path),
+            account_id=_account_id_for_path(path),
             method=method,
             ms=0,
             status=429,
@@ -2786,7 +2870,7 @@ async def _fb_request(
         wait = _live_bucu_gate_wait_seconds()
         _log_fb_call(
             path=path,
-            account_id=_extract_account_id_from_path(path),
+            account_id=_account_id_for_path(path),
             method=method,
             ms=0,
             status=429,
@@ -2809,7 +2893,7 @@ async def _fb_request(
     # "try again in N minutes" message. This is the dominant lever
     # against rate-limit escalation: one 80004 = stop talking to that
     # account for 10+ minutes, full stop.
-    acct_for_gate = _extract_account_id_from_path(path)
+    acct_for_gate = _account_id_for_path(path)
     remaining = _account_throttle_remaining(acct_for_gate)
     if remaining > 0:
         stale = _stale_response_for_throttle(cache_key, path, method)
@@ -2842,6 +2926,7 @@ async def _fb_request(
         async with lock:
             cached = _cache_get(cache_key)
             if cached is not None:
+                _learn_account_from_graph_response(path, cached)
                 _log_fb_call(
                     path=path,
                     account_id=acct_for_gate,
@@ -2953,7 +3038,7 @@ async def _fb_fetch_and_cache(
     # matters — we want to BLOCK on the account gate before consuming
     # a global slot, otherwise a hot account would starve the global
     # pool. Bypass per-account when path doesn't carry act_*.
-    account_id = _extract_account_id_from_path(path)
+    account_id = _account_id_for_path(path)
     acct_sem = _account_semaphore(account_id) if account_id else None
     started = time.monotonic()
     r = None
@@ -3053,6 +3138,7 @@ async def _fb_fetch_and_cache(
             )
             raise HTTPException(status_code=http_status, detail=detail)
         # Cache successful GET responses
+        _learn_account_from_graph_response(path, body)
         if cache_key is not None:
             _cache_put(cache_key, body, ttl=cache_ttl if cache_ttl is not None else _CACHE_TTL_SECONDS)
         _log_fb_call(
@@ -3139,9 +3225,10 @@ async def fb_get_paginated(
     cache_key = _cache_key(token, path, params, kind="paged")
     cached = _cache_get(cache_key)
     if cached is not None:
+        _learn_account_from_graph_response(path, cached)
         _log_fb_call(
             path=path,
-            account_id=_extract_account_id_from_path(path),
+            account_id=_account_id_for_path(path),
             method="GET",
             ms=0,
             status=200,
@@ -3156,7 +3243,7 @@ async def fb_get_paginated(
             return stale
         _log_fb_call(
             path=path,
-            account_id=_extract_account_id_from_path(path),
+            account_id=_account_id_for_path(path),
             method="GET",
             ms=0,
             status=429,
@@ -3179,7 +3266,7 @@ async def fb_get_paginated(
         wait = _live_bucu_gate_wait_seconds()
         _log_fb_call(
             path=path,
-            account_id=_extract_account_id_from_path(path),
+            account_id=_account_id_for_path(path),
             method="GET",
             ms=0,
             status=429,
@@ -3198,7 +3285,7 @@ async def fb_get_paginated(
     # Same per-account throttle gate as `_fb_request`. Catches the
     # paginated read paths (account list, campaigns, activities)
     # before they issue a doomed call against a throttled account.
-    acct_for_gate = _extract_account_id_from_path(path)
+    acct_for_gate = _account_id_for_path(path)
     remaining = _account_throttle_remaining(acct_for_gate)
     if remaining > 0:
         stale = _stale_response_for_throttle(cache_key, path, "GET")
@@ -3227,6 +3314,7 @@ async def fb_get_paginated(
         # populated the cache while we were blocked.
         cached = _cache_get(cache_key)
         if cached is not None:
+            _learn_account_from_graph_response(path, cached)
             _log_fb_call(
                 path=path,
                 account_id=acct_for_gate,
@@ -3269,7 +3357,7 @@ async def _fb_get_paginated_fetch(
     items: List[dict] = []
     next_url: Optional[str] = f"{BASE_URL}/{path}"
     page_params = {"access_token": token, **params}
-    account_id = _extract_account_id_from_path(path)
+    account_id = _account_id_for_path(path)
     acct_sem = _account_semaphore(account_id) if account_id else None
     pages_fetched = 0
     while next_url:
@@ -3397,6 +3485,7 @@ async def _fb_get_paginated_fetch(
         next_url = data.get("paging", {}).get("next")
         page_params = {}  # next_url already contains all params
     _cache_put(cache_key, items, ttl)
+    _learn_account_from_graph_response(path, items)
     return items
 
 
@@ -7378,20 +7467,29 @@ async def _fetch_campaigns_for_account(
             account_id, include_archived, include_adsets
         )
 
-    # Parallel fetch of metadata + bulk insights. Both have their own
-    # cache layers (metadata 15min, insights 5min), so this is cheap
-    # on warm cache hits. asyncio.gather lets us overlap the two FB
-    # calls on cold start instead of paying their latency serially.
-    metadata_task = _fetch_campaigns_metadata(
-        account_id, include_archived, include_adsets
-    )
-    insights_task = _fetch_campaign_insights_bulk(account_id, date_preset, time_range)
-    try:
-        metadata, insights_by_id = await asyncio.gather(metadata_task, insights_task)
-    except HTTPException:
-        # Re-raise the metadata error; insights errors are already
-        # swallowed inside _fetch_campaign_insights_bulk.
-        raise
+    # Default to a paced account-local sequence. Running metadata and
+    # campaign-level insights in parallel is faster, but on cold 80-account
+    # loads it doubles the per-account burst before the global semaphore can
+    # smooth it out. Operators can temporarily restore the older behavior
+    # with CAMPAIGNS_PARALLEL_INSIGHTS=1 after watching BUCU headroom.
+    if _CAMPAIGNS_PARALLEL_INSIGHTS:
+        metadata_task = _fetch_campaigns_metadata(
+            account_id, include_archived, include_adsets
+        )
+        insights_task = _fetch_campaign_insights_bulk(account_id, date_preset, time_range)
+        try:
+            metadata, insights_by_id = await asyncio.gather(metadata_task, insights_task)
+        except HTTPException:
+            # Re-raise the metadata error; insights errors are already
+            # swallowed inside _fetch_campaign_insights_bulk.
+            raise
+    else:
+        metadata = await _fetch_campaigns_metadata(
+            account_id, include_archived, include_adsets
+        )
+        insights_by_id = await _fetch_campaign_insights_bulk(
+            account_id, date_preset, time_range
+        )
 
     # CRITICAL: shallow-copy each campaign dict before stitching.
     # `metadata` is the SHARED reference from the metadata cache —
@@ -8745,34 +8843,42 @@ async def get_overview(
                 return aid, {"campaigns": [], "insights": None, "error": f"campaigns: {detail}"}
             return aid, {"campaigns": camps, "insights": None, "error": None}
 
-        ins_task = asyncio.create_task(
-            _fetch_account_insights(aid, date_preset, time_range)
-        )
-        await asyncio.gather(camps_task, ins_task, return_exceptions=True)
-
         error_parts: list[str] = []
         camps: List[dict] = []
         ins_flat: Optional[dict] = None
 
-        camps_exc = camps_task.exception()
-        if camps_exc is not None:
-            detail = (
-                camps_exc.detail if isinstance(camps_exc, HTTPException) else str(camps_exc)
-            )
-            error_parts.append(f"campaigns: {detail}")
-        else:
-            camps = camps_task.result()
-
-        ins_exc = ins_task.exception()
-        if ins_exc is not None:
-            detail = (
-                ins_exc.detail if isinstance(ins_exc, HTTPException) else str(ins_exc)
-            )
-            error_parts.append(f"insights: {detail}")
-        else:
-            raw = ins_task.result()
+        async def _load_account_insights() -> None:
+            nonlocal ins_flat
+            raw = await _fetch_account_insights(aid, date_preset, time_range)
             items = raw.get("data") or [] if isinstance(raw, dict) else []
             ins_flat = items[0] if items else None
+
+        ins_task = (
+            asyncio.create_task(_load_account_insights())
+            if _OVERVIEW_PARALLEL_ACCOUNT_INSIGHTS
+            else None
+        )
+
+        try:
+            camps = await camps_task
+        except (HTTPException, Exception) as camps_exc:
+            detail = camps_exc.detail if isinstance(camps_exc, HTTPException) else str(camps_exc)
+            error_parts.append(f"campaigns: {detail}")
+
+        if ins_task is not None:
+            await asyncio.gather(ins_task, return_exceptions=True)
+            ins_exc = ins_task.exception()
+            if ins_exc is not None:
+                detail = (
+                    ins_exc.detail if isinstance(ins_exc, HTTPException) else str(ins_exc)
+                )
+                error_parts.append(f"insights: {detail}")
+        else:
+            try:
+                await _load_account_insights()
+            except (HTTPException, Exception) as ins_exc:
+                detail = ins_exc.detail if isinstance(ins_exc, HTTPException) else str(ins_exc)
+                error_parts.append(f"insights: {detail}")
 
         # Cache a complete past month once fetched cleanly (no error) so
         # the next view of it serves from DB instead of FB. Empty result
@@ -12376,10 +12482,11 @@ async def _scheduler_tick() -> None:
                     OR last_run_at <= $1 - INTERVAL '30 minutes'
                   )
                 ORDER BY next_run_at ASC
-                LIMIT 50
+                LIMIT $2
                 FOR UPDATE SKIP LOCKED
                 """,
                 now,
+                _LINE_PUSH_MAX_CONFIGS_PER_TICK,
             )
             # Bump last_run_at inside the same txn so other workers'
             # `last_run_at < next_run_at` filter immediately excludes
@@ -12412,6 +12519,10 @@ async def _scheduler_tick() -> None:
     _last_account_id: Optional[str] = None
 
     for row in due:
+        gate_reason = _background_gate_reason()
+        if gate_reason:
+            print(f"[scheduler] stopping remaining due configs — {gate_reason}", flush=True)
+            break
         cfg = _config_row_to_dict(row)
         # Spread out consecutive pushes targeting the same ad account.
         if _last_account_id and cfg.get("account_id") == _last_account_id:
