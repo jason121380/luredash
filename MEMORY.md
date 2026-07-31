@@ -88,12 +88,25 @@ This means the scope is **safe to request even without review** — FB's behavio
   interpreted as `SCHEDULER_TZ` (default Asia/Taipei) and converted
   to UTC for `next_run_at` storage. Helper: `main._compute_next_run()`.
 - Scheduler: single asyncio background task started in `lifespan`
-  ticking every 60s. `_scheduler_tick()` selects
-  `enabled AND next_run_at <= NOW()` rows, pushes Flex, advances `next_run_at`.
-- Failure policy: fail_count ≥ 3 → `enabled=false` (auto-disable).
-  Every attempt is logged in `line_push_logs`.
-- Assumptions: **single uvicorn worker** (no advisory lock yet).
-  If worker count ever goes > 1, switch the SELECT to `FOR UPDATE SKIP LOCKED`.
+  ticking every 60s. `_scheduler_tick()` claims due configs
+  (`enabled AND next_run_at <= NOW()` + 30-min self-heal grace) **one at a
+  time** via `_claim_due_line_push_config` (`LIMIT 1 FOR UPDATE SKIP
+  LOCKED`), up to `_LINE_PUSH_MAX_CONFIGS_PER_TICK` (10) per tick, pushes
+  Flex, advances `next_run_at`. **The tick runs UNCONDITIONALLY** — it is
+  NOT gated by `_background_gate_reason()` (2026-07-31 `a499753`); only the
+  monthly history-warm / cost-center auto-ticks stay behind that gate.
+  Scheduled pushes are customer-visible time commitments, so they must not
+  be skipped wholesale when background BUCU is high; the per-call
+  live/per-account throttles inside `fb_get` still apply, and a throttled
+  build just fails → retry.
+- Failure policy: `fail_count ≥ SCHEDULER_FAIL_THRESHOLD` (5) →
+  `enabled=false` (auto-disable). On failure `next_run_at` moves to
+  `min(now + 10min×fail_count, next_natural)` so a throttled push retries
+  ~10-30 min late instead of being stranded. Every attempt logged in
+  `line_push_logs`. NOTE: rate-limit failures currently count toward
+  auto-disable the same as permanent errors (dead token / kicked bot).
+- Concurrency: `FOR UPDATE SKIP LOCKED` + immediate `last_run_at` bump make
+  overlapping ticks / multiple workers safe (each row owned by one worker).
 - Env vars: `LINE_CHANNEL_ACCESS_TOKEN`, `LINE_CHANNEL_SECRET`,
   `LINE_MOCK=1` (local dev), `SCHEDULER_TZ`.
 - Webhook public URL (Zeabur): `https://{your-zeabur-domain}/api/line/webhook` — register this on the LINE Developers Console.
@@ -315,3 +328,30 @@ Two-day burst on `main`. ~50 commits, themed in three buckets:
 - Security view: scan record labels shortened (`c9de181`), 「查看」button removed (`15a4e4a`), all scan records always shown (`5a0ab0c`). Security push button was removed then immediately restored (`1a2b1c1` → `e578c2b` revert) — keep it visible.
 - Store expenses: per-account selection store + 158-line UI block removed (`56ef801`). View now always uses ALL store-tagged accounts; `useUiStore.storeExpensesAccountIds` state is dead.
 - `TopbarSeparator` is now a no-op stub (returns `null`) after `601307f` removed the divider rule globally.
+
+## 2026-07-31 — FB 限流治理(五層降載)+ 排程推播解鎖 + 工程模式「限流・推播說明」分頁
+
+**背景**:工程模式「限流戰情室」的「限流事件全紀錄」出現多筆 `全域 code=4`,而旁邊 BUCU 只有 3–13%。困惑點是「BUCU 這麼低為何爆」。
+
+**根因**:FB 有**三套各自獨立**的限流桶,一桶低不代表另一桶不會爆:
+- **BUCU(商業用途,每廣告帳號一桶)** — code `80000–80014` — header `X-Business-Use-Case-Usage`(`_peak_bucu_pct`)
+- **App 全域(整個 App、全部使用者共用同一個每小時額度)** — code `4` — header `X-App-Usage`(`_peak_app_usage_pct`)
+- **User / Page / 自訂** — code `17 / 32 / 613`
+`code=4` 是 **App 全域**桶爆,跟單帳號 BUCU 無關;戰情室每列旁的 `BUCU %` 只反映第一桶,對 code-4 事件不是關鍵指標(易誤導)。爆 code-4 的推力是「多位同事同一小時各自看同批帳號 + 背景任務,insights 呼叫在 App 層級加總」→ 所以 scope 一定是「全域」。
+
+**五層降載(不同角度砍 FB 原始呼叫數,互補)**:
+1. **Per-account 歸戶(codex `97938e4`)** — `{adset}/ads`、`{campaign}/insights` 這種不帶 `act_` 前綴的 entity 路徑以前繞過 per-account 節流閘門/semaphore。新增 `_entity_account_map`(60min TTL)+ `_learn_account_from_graph_response` / `_account_id_for_path`:從 graph 回應學 entity→帳號,讓這些呼叫也被正確歸戶限速。有 `tests/test_rate_limit_helpers.py` 覆蓋。
+2. **精準 invalidate(codex `97938e4`,前端)** — `useEntityMutations` 改用 `invalidateAffectedOverview(qc, accountId)`:改一個活動的狀態/預算後只重抓「受影響帳號」的 overview,不再 invalidate 全部 80 帳號。Row 元件補傳 `accountId`(optional,漏傳退回全域 invalidate,安全)。
+3. **歷史區間長 TTL(`#377`,main.py)** — `_is_closed_date_range()` / `_insights_cache_ttl()`:已封閉區間(`time_range` 的 `until < 今天`,或固定過去 `date_preset` = `yesterday`/`last_month`/`last_week_*`/`last_quarter`/`last_year`)快取 TTL 拉到 `FB_HISTORICAL_CACHE_TTL_SECONDS`(預設 3600s);滾動區間維持 300s。套在三個 insights helper(`_fetch_campaign_insights_bulk` / `_fetch_single_entity_insights` / `_fetch_child_insights_bulk`)。
+4. **離峰預熱(`#377`,main.py)** — `_is_offpeak_now()`:每月一次的全帳號 `_history_warm_auto_tick` + lurefin `_cost_center_warm_auto_tick` fan-out 只在 `FB_OFFPEAK_WARM_START_HOUR`–`END_HOUR`(當地,預設 2–6)觸發;未完成的月份每晚重試。**手動工程模式預熱不受限**。
+5. **排程推播解鎖(codex `a499753`)** — 見下。
+
+**排程推播解鎖(修「到點沒推」根因)**:先前 `_scheduler_loop` 每個 tick 開頭先過 `_background_gate_reason()`,閘門啟動(BUCU/app-usage 高)就把**整個 `_scheduler_tick()` 跳過** → 到點的 LINE 推播無聲延後、`next_run_at` 也沒前進(卡到 30 分 self-heal grace 才動)。修法:
+- `_scheduler_tick()` 現在**無條件執行**(移出背景閘門);背景閘門只再管 history-warm / cost-center 兩個每月重熱。
+- 推播內部的 FB 呼叫仍走 `fb_get` 的 live-gate(95%)+ per-account 節流,打不動就 fail-fast → 走既有單筆重試,不會硬幹 FB。
+- 認領方式從「批次抓 N 筆 + 中途 break」改成 `_claim_due_line_push_config`(`LIMIT 1 FOR UPDATE SKIP LOCKED`,迴圈最多 `_LINE_PUSH_MAX_CONFIGS_PER_TICK`=10 次逐一認領),消除「已認領未處理」殘留 ≤30 分延遲的副作用。
+- **殘留權衡**:持續性 FB 限流(~100 分,失敗間隔 10 分×fail)下,推播可能累積 5 次失敗而 auto-disable(`SCHEDULER_FAIL_THRESHOLD`)。目前限流類失敗與永久錯誤同計;要更保守可讓限流失敗不計入門檻。**尚未做**。
+
+**工程模式新分頁「限流・推播說明」(`RateLimitDocsPanel`,`EngineeringView.tsx`)** — `EngineeringTab` 加 `"docs"`,排在「各帳戶 FB 限流」之後。純靜態說明卡片(用共用 `Card`,部分 collapsible):一分鐘總結 / 三套限流桶 / 為何 BUCU 低卻爆 code 4 / 自我保護閘門與冷卻 / 五層降載 / 排程推播運作 / 怎麼判讀「限流事件全紀錄」。讓操作者看戰情室時能對照解讀,不用翻程式碼。
+
+**尚未做(最大槓桿,待決策)**:**共用讀取快取** — `_cache_key` 目前含 `token_hash`,所以多位同事看同批帳號時同一份 insights 對別人都 cache miss、各打一次 FB。把唯讀 insights GET 改成 key 不含 token(跨使用者共用)可把 N 人收斂成 1 次呼叫;需先確認「單一團隊、帳號全共用」的授權姿態(否則要加同租戶範圍限制)。

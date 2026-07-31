@@ -45,7 +45,13 @@ function useTabVisible(): boolean {
  * closed modal stops issuing requests immediately (the Modal unmounts
  * children when `open` flips false).
  */
-type EngineeringTab = "dashboard" | "ad-account" | "history-warm" | "cost-center" | "other";
+type EngineeringTab =
+  | "dashboard"
+  | "ad-account"
+  | "docs"
+  | "history-warm"
+  | "cost-center"
+  | "other";
 
 const ENGINEERING_TABS: Array<{
   id: EngineeringTab;
@@ -64,6 +70,12 @@ const ENGINEERING_TABS: Array<{
     label: "各帳戶 FB 限流",
     mobileLabel: "各帳戶",
     subtitle: "FB API 節流狀態",
+  },
+  {
+    id: "docs",
+    label: "限流・推播說明",
+    mobileLabel: "說明",
+    subtitle: "機制、名詞、判讀方式",
   },
   {
     id: "history-warm",
@@ -151,6 +163,8 @@ function EngineeringPanels() {
           <FbCallsPanel />
         ) : activeTab === "ad-account" ? (
           <FbUsagePanel />
+        ) : activeTab === "docs" ? (
+          <RateLimitDocsPanel />
         ) : activeTab === "history-warm" ? (
           <HistoryWarmPanel />
         ) : activeTab === "cost-center" ? (
@@ -203,6 +217,268 @@ function RuntimeDiagnosticsPanel() {
       </div>
       <div className="mt-4">
         <ActionTypeProbePanel />
+      </div>
+    </section>
+  );
+}
+
+// ── 限流・推播說明 ────────────────────────────────────────────
+//
+// Static reference panel. Explains the three FB rate-limit buckets, the
+// self-protection gates/cooldowns, the five load-reduction measures, and
+// how scheduled LINE pushes behave — so an operator reading 戰情室 can
+// interpret what they see without digging through the code / CLAUDE.md.
+
+function DocCode({ children }: { children: React.ReactNode }) {
+  return (
+    <code className="rounded bg-bg px-1 py-0.5 font-mono text-[11px] text-ink">{children}</code>
+  );
+}
+
+function DocBucket({
+  name,
+  codes,
+  header,
+  scope,
+  tone,
+}: {
+  name: string;
+  codes: string;
+  header: string;
+  scope: string;
+  tone: "orange" | "gray";
+}) {
+  return (
+    <div className="rounded-xl border border-border p-3">
+      <div className="flex items-center gap-2">
+        <span
+          className={cn(
+            "inline-block h-2 w-2 shrink-0 rounded-full",
+            tone === "orange" ? "bg-orange" : "bg-gray-300",
+          )}
+        />
+        <span className="text-[13px] font-bold text-ink">{name}</span>
+      </div>
+      <dl className="mt-2 space-y-1 text-[12px] text-gray-500">
+        <div className="flex gap-2">
+          <dt className="w-14 shrink-0 text-gray-400">錯誤碼</dt>
+          <dd className="min-w-0">
+            <DocCode>{codes}</DocCode>
+          </dd>
+        </div>
+        <div className="flex gap-2">
+          <dt className="w-14 shrink-0 text-gray-400">Header</dt>
+          <dd className="min-w-0">
+            <DocCode>{header}</DocCode>
+          </dd>
+        </div>
+        <div className="flex gap-2">
+          <dt className="w-14 shrink-0 text-gray-400">範圍</dt>
+          <dd className="min-w-0">{scope}</dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+function DocStep({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
+  return (
+    <li className="flex gap-3">
+      <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-orange-bg text-[11px] font-bold text-orange">
+        {n}
+      </span>
+      <div className="min-w-0">
+        <div className="text-[13px] font-semibold text-ink">{title}</div>
+        <div className="mt-0.5 text-[12px] leading-relaxed text-gray-500">{children}</div>
+      </div>
+    </li>
+  );
+}
+
+function RateLimitDocsPanel() {
+  return (
+    <section>
+      <header className="mb-3">
+        <h2 className="text-[15px] font-bold text-ink">限流・推播說明</h2>
+        <p className="mt-0.5 text-xs text-gray-400">
+          FB 呼叫量的限流機制、系統自我保護、降載措施,以及排程推播如何運作 —— 看戰情室時對照這裡。
+        </p>
+      </header>
+
+      <div className="grid grid-cols-1 gap-4">
+        <Card title="一分鐘總結">
+          <div className="space-y-2 text-[13px] leading-relaxed text-gray-600">
+            <p>
+              Facebook 限制的是「
+              <span className="font-semibold text-ink">單位時間的 API 呼叫次數</span>
+              」,不是流量大小。超過就回錯誤碼,系統會進入短暫冷卻。
+            </p>
+            <p>
+              為了盡量不爆、爆了也能自動恢復,系統做了{" "}
+              <span className="font-semibold text-orange">五層降載</span>{" "}
+              與多道自我保護閘門(下方各卡片說明)。戰情室的「限流事件全紀錄」就是每一次爆桶的完整歷史。
+            </p>
+          </div>
+        </Card>
+
+        <Card
+          title="FB 的三套限流桶(各自獨立)"
+          subtitle="這是最容易誤解的地方:三桶互不相干,一桶低不代表另一桶不會爆"
+        >
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+            <DocBucket
+              name="BUCU(商業用途)"
+              codes="80000–80014"
+              header="X-Business-Use-Case-Usage"
+              scope="每個廣告帳號各自一桶"
+              tone="gray"
+            />
+            <DocBucket
+              name="App 全域"
+              codes="4"
+              header="X-App-Usage"
+              scope="整個 App、全部使用者共用同一個每小時額度"
+              tone="orange"
+            />
+            <DocBucket
+              name="User / Page / 自訂"
+              codes="17 / 32 / 613"
+              header="—"
+              scope="單一使用者 / 粉專 / 自訂層級"
+              tone="gray"
+            />
+          </div>
+          <p className="mt-3 text-[12px] leading-relaxed text-gray-500">
+            戰情室每列事件旁顯示的 <DocCode>BUCU %</DocCode> 只反映「第一桶(單帳號商業用途)」。 對{" "}
+            <DocCode>code=4</DocCode>(App 全域)這種事件而言,BUCU% 不是關鍵指標 —— 別被它很低誤導。
+          </p>
+        </Card>
+
+        <Card title="為什麼 BUCU 只有 3–13% 卻爆 code 4?" collapsible defaultOpen={false}>
+          <div className="space-y-2 text-[13px] leading-relaxed text-gray-600">
+            <p>
+              因為爆的不是「單帳號 BUCU」那桶,而是「
+              <span className="font-semibold text-ink">App 全域每小時總呼叫數</span>」那桶。
+            </p>
+            <p>
+              每個帳號自己的 BUCU 都很低(呼叫分散在很多帳號),但{" "}
+              <span className="font-semibold text-ink">全部同事 + 背景任務加起來</span>
+              的每小時呼叫總量,頂到了 App 層級上限 → FB 直接丟 <DocCode>code=4</DocCode>。
+            </p>
+            <p className="text-gray-500">
+              典型情境:多位同事同一小時各自開儀表板看同一批帳號、報告、LINE 推播、安全掃描,insights
+              呼叫在 App 層級加總後爆桶。所以這種事件 scope 一定是「全域」。
+            </p>
+          </div>
+        </Card>
+
+        <Card
+          title="系統的自我保護(閘門與冷卻)"
+          subtitle="爆桶前先自我節流,爆桶後進冷卻;都會自然解除"
+          collapsible
+          defaultOpen={false}
+        >
+          <ul className="space-y-2.5 text-[12px] leading-relaxed text-gray-600">
+            <li>
+              <span className="font-semibold text-ink">Live gate(使用者操作)</span> — BUCU 或
+              App-usage 到高標(預設 95% / 92%)時,新的 FB
+              呼叫暫擋、只回既有快取,畫面顯示「用量保護模式」。
+            </li>
+            <li>
+              <span className="font-semibold text-ink">Background gate(背景任務)</span> — 到 80% /
+              75% 就暫停歷史預熱等重活(<DocCode>_background_gate_reason</DocCode>)。
+            </li>
+            <li>
+              <span className="font-semibold text-ink">Per-account 冷卻</span> — 某帳號回{" "}
+              <DocCode>80004</DocCode> → 那帳號停打 ≥10 分鐘(避免越戳越糟)。
+            </li>
+            <li>
+              <span className="font-semibold text-ink">Global 冷卻</span> — 回{" "}
+              <DocCode>4 / 17 / 32 / 613</DocCode> → 全站 FB 呼叫冷卻 ≥10 分鐘。
+            </li>
+            <li className="text-gray-500">
+              這些都會<span className="font-semibold text-ink">自然解除</span>:BUCU 快照 15
+              分鐘內沒有新呼叫就過期歸零,冷卻到期後自動放行。
+            </li>
+          </ul>
+        </Card>
+
+        <Card title="我們做的五層降載" subtitle="從不同角度砍掉 FB 的原始呼叫數,彼此互補">
+          <ol className="space-y-3">
+            <DocStep n={1} title="Per-account 歸戶">
+              像 <DocCode>{"{adset}/ads"}</DocCode>、<DocCode>{"{campaign}/insights"}</DocCode>{" "}
+              這種不帶 <DocCode>act_</DocCode> 前綴的路徑,以前繞過 per-account 節流;現在從回應學會
+              entity→帳號的對應,讓它們也被正確歸戶、限速。
+            </DocStep>
+            <DocStep n={2} title="精準 invalidate">
+              改一個活動的狀態/預算後,只重抓「受影響的那一個帳號」的總覽,而不是全部帳號 ——
+              省下每次操作的重抓爆量。
+            </DocStep>
+            <DocStep n={3} title="歷史區間長快取">
+              已封閉的日期區間(過去月份、until &lt; 今天)數字已定案,快取拉長到 1 小時(預設),不再每 5
+              分鐘重抓。滾動區間(近 7 天、本月…)維持短快取。
+            </DocStep>
+            <DocStep n={4} title="離峰預熱">
+              每月一次的全帳號重型預熱 fan-out,只在當地凌晨 2–6
+              點跑,避開白天使用者流量的同一個小時額度。
+            </DocStep>
+            <DocStep n={5} title="排程推播解鎖">
+              排程 LINE 推播不再被背景閘門整批跳過(見下一張卡),確保到點會發。
+            </DocStep>
+          </ol>
+        </Card>
+
+        <Card
+          title="排程 LINE 推播怎麼運作"
+          subtitle="到點為什麼發 / 不發,以及失敗後的行為"
+          collapsible
+          defaultOpen={false}
+        >
+          <div className="space-y-2 text-[12px] leading-relaxed text-gray-600">
+            <p>
+              排程器每 60 秒一個 tick:抓出「到期(<DocCode>next_run_at ≤ 現在</DocCode>
+              )且啟用」的推播設定,
+              <span className="font-semibold text-ink">逐一認領</span>
+              →組報告→推 LINE→把 <DocCode>next_run_at</DocCode> 推到下一個排程時間。
+            </p>
+            <p>
+              推播失敗會排<span className="font-semibold text-ink">重試</span>(間隔 10 分 ×
+              失敗次數); 連續 5 次失敗會自動停用該設定,並在設定上記下 <DocCode>last_error</DocCode>
+              。
+            </p>
+            <p className="rounded-lg bg-bg p-2.5 text-gray-500">
+              <span className="font-semibold text-ink">曾經到點沒推的原因</span>:背景閘門(BUCU
+              高)會把整個推播 tick 一起跳過,導致到點的推播無聲延後、<DocCode>next_run_at</DocCode>{" "}
+              也沒前進。<span className="font-semibold text-ink">已修</span>:推播 tick
+              不再受背景閘門整批
+              跳過(改成逐一認領),即使背景在自我節流也照發;真的打不動時走單筆重試,而不是整批卡死。
+            </p>
+          </div>
+        </Card>
+
+        <Card title="怎麼判讀「限流事件全紀錄」" collapsible defaultOpen={false}>
+          <ul className="space-y-2 text-[12px] leading-relaxed text-gray-600">
+            <li>
+              <span className="font-semibold text-ink">每一列 = 一次爆桶</span>
+              (一個 episode)。同一波限流只記一列,所以列數少是正常的,不是漏記。
+            </li>
+            <li>
+              每列包含:<span className="font-semibold text-ink">scope</span>(全域 / 帳戶)、
+              <span className="font-semibold text-ink">code</span>、
+              <span className="font-semibold text-ink">觸發者</span>(哪位使用者的 token)、
+              <span className="font-semibold text-ink">頁面/路徑</span>、當下的{" "}
+              <DocCode>BUCU %</DocCode>。
+            </li>
+            <li>
+              紅色標「<span className="font-semibold text-orange">最後爆</span>」= 最新一次事件。
+            </li>
+            <li className="text-gray-500">
+              研判:<DocCode>code=4</DocCode>(全域)看的是「多人 + 背景在同一小時的總呼叫量」;
+              <DocCode>80004</DocCode>(帳戶)看的是「那一個帳號被戳太快」。此表為 DB
+              持久化,重啟不遺失。
+            </li>
+          </ul>
+        </Card>
       </div>
     </section>
   );
