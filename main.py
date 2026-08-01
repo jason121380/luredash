@@ -149,6 +149,16 @@ _per_account_semaphores: dict[str, asyncio.Semaphore] = {}
 _OVERVIEW_ACCOUNT_CONCURRENCY = _env_int("OVERVIEW_ACCOUNT_CONCURRENCY", 4)
 _CAMPAIGNS_PARALLEL_INSIGHTS = os.getenv("CAMPAIGNS_PARALLEL_INSIGHTS", "0") == "1"
 _OVERVIEW_PARALLEL_ACCOUNT_INSIGHTS = os.getenv("OVERVIEW_PARALLEL_ACCOUNT_INSIGHTS", "0") == "1"
+# Shared (cross-user) read cache for INSIGHTS GETs. The default per-token
+# cache means N team members viewing the SAME accounts each trigger their
+# own FB call for identical insights bytes — the dominant driver of the
+# App-global (X-App-Usage / code 4) hourly budget. When on, insights reads
+# use a token-independent cache key so the first fetch serves everyone for
+# the TTL (and the single-flight lock coalesces concurrent misses into ONE
+# FB call). SAFE for a single-agency deployment where all staff can see all
+# accounts (LURE). Set FB_SHARED_INSIGHTS_CACHE=0 if the server ever becomes
+# genuinely multi-tenant (different agencies must NOT share insights bytes).
+_SHARED_INSIGHTS_CACHE = os.getenv("FB_SHARED_INSIGHTS_CACHE", "1") == "1"
 
 # Security monitor background work is extra conservative because it is
 # not user-facing latency. It should never compete aggressively with
@@ -1205,6 +1215,14 @@ async def lifespan(app: FastAPI):
                         bucu_pct INTEGER
                     )
                     """
+                )
+                # `app_usage_pct`: X-App-Usage.call_count % at the moment of
+                # the hit — THE relevant bucket for global code=4 events
+                # (bucu_pct is the per-account business bucket, which is a
+                # DIFFERENT bucket and often near-zero on a code-4 row).
+                await conn.execute(
+                    "ALTER TABLE fb_throttle_events "
+                    "ADD COLUMN IF NOT EXISTS app_usage_pct INTEGER"
                 )
                 await conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_fb_throttle_events_ts "
@@ -2317,6 +2335,7 @@ async def _persist_throttle_event(
     source: str,
     fb_user_id: str,
     bucu: int,
+    app_usage: int = 0,
 ) -> None:
     """Durably record a rate-limit / throttle hit to `fb_throttle_events`
     so the 工程模式 panel keeps the FULL history (survives restarts and
@@ -2327,8 +2346,8 @@ async def _persist_throttle_event(
         async with _db_pool.acquire() as conn:
             await conn.execute(
                 """INSERT INTO fb_throttle_events
-                     (scope, account_id, path, error_code, source, fb_user_id, bucu_pct)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                     (scope, account_id, path, error_code, source, fb_user_id, bucu_pct, app_usage_pct)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
                 scope,
                 account_id or None,
                 path or None,
@@ -2336,6 +2355,7 @@ async def _persist_throttle_event(
                 source or None,
                 fb_user_id or None,
                 int(bucu),
+                int(app_usage),
             )
     except Exception:
         pass
@@ -2358,6 +2378,7 @@ def _record_account_throttle(account_id: Optional[str], path: str, error_code: i
     uid = _current_fb_user_id.get() or ""
     source = _fb_call_source.get()
     bucu = _peak_bucu_pct()
+    app_usage = _peak_app_usage_pct()
     global _last_ads_throttle_at
     _last_ads_throttle_at = now
     if aid:
@@ -2374,6 +2395,7 @@ def _record_account_throttle(account_id: Optional[str], path: str, error_code: i
                 "fb_user_id": uid,
                 "source": source,
                 "bucu": bucu,
+                "app_usage": app_usage,
             }
         )
     _spawn_bg(
@@ -2385,6 +2407,7 @@ def _record_account_throttle(account_id: Optional[str], path: str, error_code: i
             source=source,
             fb_user_id=uid,
             bucu=bucu,
+            app_usage=app_usage,
         )
     )
     print(
@@ -2447,6 +2470,7 @@ def _record_global_throttle(path: str, error_code: int) -> None:
     uid = _current_fb_user_id.get() or ""
     source = _fb_call_source.get()
     bucu = _peak_bucu_pct()
+    app_usage = _peak_app_usage_pct()
     global _global_fb_throttle_until, _last_ads_throttle_at
     _global_fb_throttle_until = max(_global_fb_throttle_until, deadline)
     _last_ads_throttle_at = time.monotonic()
@@ -2458,6 +2482,7 @@ def _record_global_throttle(path: str, error_code: int) -> None:
             "fb_user_id": uid,
             "source": source,
             "bucu": bucu,
+            "app_usage": app_usage,
         }
     )
     _spawn_bg(
@@ -2469,6 +2494,7 @@ def _record_global_throttle(path: str, error_code: int) -> None:
             source=source,
             fb_user_id=uid,
             bucu=bucu,
+            app_usage=app_usage,
         )
     )
     print(
@@ -2490,18 +2516,31 @@ def _global_throttle_remaining() -> float:
     return remaining
 
 
-def _cache_key(token: str, path: str, params: dict, *, kind: str = "single") -> str:
+def _cache_key(
+    token: str, path: str, params: dict, *, kind: str = "single", shared: bool = False
+) -> str:
     """Build a stable cache key from token + path + sorted params.
     The token is hashed so it never appears in memory inspection or
     log output in plaintext form. ``kind`` distinguishes single-page
     GETs ("single") from paginated calls ("paged") so they never collide.
+
+    ``shared=True`` drops the per-token component so the entry is shared
+    across ALL users (used for insights GETs — the data depends only on
+    account+date, not on who is asking; see `_SHARED_INSIGHTS_CACHE`).
+    Invalidation (`_cache_invalidate`) matches on the path, not the token
+    prefix, so shared entries are still busted correctly on mutations.
     """
-    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12] if token else "anon"
+    if shared:
+        token_part = "shared"
+    else:
+        token_part = (
+            hashlib.sha256(token.encode("utf-8")).hexdigest()[:12] if token else "anon"
+        )
     # Strip access_token from params before hashing — it's already
-    # represented by token_hash.
+    # represented by token_part.
     sanitized = {k: v for k, v in params.items() if k != "access_token"}
     param_str = "&".join(f"{k}={v}" for k, v in sorted(sanitized.items()))
-    return f"{token_hash}::{kind}::{path}::{param_str}"
+    return f"{token_part}::{kind}::{path}::{param_str}"
 
 
 def _cache_get(key: str) -> Any:
@@ -2792,6 +2831,7 @@ async def _fb_request(
     *,
     slow_ok: bool = False,
     cache_ttl: Optional[float] = None,
+    shared_cache: bool = False,
 ) -> dict:
     """Send a request to FB Graph API and convert ALL failure modes to HTTPException
     with a JSON body so the frontend can always parse and display the error.
@@ -2826,7 +2866,7 @@ async def _fb_request(
     # Cache lookup for GET only (POSTs are mutations, never cached)
     cache_key: Optional[str] = None
     if method == "GET":
-        cache_key = _cache_key(token, path, params, kind="single")
+        cache_key = _cache_key(token, path, params, kind="single", shared=shared_cache)
         cached = _cache_get(cache_key)
         if cached is not None:
             _learn_account_from_graph_response(path, cached)
@@ -3161,8 +3201,16 @@ async def fb_get(
     *,
     slow_ok: bool = False,
     cache_ttl: Optional[float] = None,
+    shared_cache: bool = False,
 ) -> dict:
-    return await _fb_request("GET", path, params=params, slow_ok=slow_ok, cache_ttl=cache_ttl)
+    return await _fb_request(
+        "GET",
+        path,
+        params=params,
+        slow_ok=slow_ok,
+        cache_ttl=cache_ttl,
+        shared_cache=shared_cache,
+    )
 
 
 async def fb_post(
@@ -3194,6 +3242,7 @@ async def fb_get_paginated(
     *,
     ttl: float = _CACHE_TTL_SECONDS,
     max_pages: Optional[int] = None,
+    shared_cache: bool = False,
 ) -> List[dict]:
     """Paginate through a FB Graph API endpoint that returns {data:[], paging:{next}}.
     Always raises HTTPException on failure (never lets httpx errors bubble up as 500).
@@ -3222,7 +3271,7 @@ async def fb_get_paginated(
     if not token:
         raise HTTPException(status_code=401, detail="Facebook access token not set. Please log in.")
 
-    cache_key = _cache_key(token, path, params, kind="paged")
+    cache_key = _cache_key(token, path, params, kind="paged", shared=shared_cache)
     cached = _cache_get(cache_key)
     if cached is not None:
         _learn_account_from_graph_response(path, cached)
@@ -6939,7 +6988,7 @@ async def get_engineering_fb_calls():
                 rows = await conn.fetch(
                     """
                     SELECT scope, account_id, path, error_code, source,
-                           fb_user_id, bucu_pct,
+                           fb_user_id, bucu_pct, app_usage_pct,
                            EXTRACT(EPOCH FROM ts) AS ts_epoch
                     FROM fb_throttle_events
                     ORDER BY ts DESC
@@ -6960,6 +7009,7 @@ async def get_engineering_fb_calls():
                         "source": r["source"] or "",
                         "fb_user_id": r["fb_user_id"] or "",
                         "bucu_pct": r["bucu_pct"],
+                        "app_usage_pct": r["app_usage_pct"],
                     }
                 )
         except Exception:
@@ -6978,6 +7028,7 @@ async def get_engineering_fb_calls():
                         "source": ev.get("source") or "",
                         "fb_user_id": ev.get("fb_user_id") or "",
                         "bucu_pct": ev.get("bucu"),
+                        "app_usage_pct": ev.get("app_usage"),
                     }
                 )
         for ev in _global_throttle_events:
@@ -6991,6 +7042,7 @@ async def get_engineering_fb_calls():
                     "source": ev.get("source") or "",
                     "fb_user_id": ev.get("fb_user_id") or "",
                     "bucu_pct": ev.get("bucu"),
+                    "app_usage_pct": ev.get("app_usage"),
                 }
             )
         throttle_events.sort(key=lambda x: x["ts"], reverse=True)
@@ -7263,7 +7315,10 @@ async def _fetch_campaign_insights_bulk(
     for tier, fields in (("full", full_fields), ("mid", mid_fields), ("min", min_fields)):
         try:
             rows = await fb_get_paginated(
-                f"{account_id}/insights", {**base_params, "fields": fields}, ttl=cache_ttl
+                f"{account_id}/insights",
+                {**base_params, "fields": fields},
+                ttl=cache_ttl,
+                shared_cache=_SHARED_INSIGHTS_CACHE,
             )
             if last_err is not None:
                 print(
@@ -7339,7 +7394,10 @@ async def _fetch_single_entity_insights(
     for fields in (full_fields, mid_fields, min_fields):
         try:
             resp = await fb_get(
-                f"{entity_id}/insights", {**params, "fields": fields}, cache_ttl=cache_ttl
+                f"{entity_id}/insights",
+                {**params, "fields": fields},
+                cache_ttl=cache_ttl,
+                shared_cache=_SHARED_INSIGHTS_CACHE,
             )
             data = resp.get("data") if isinstance(resp, dict) else None
             return data[0] if isinstance(data, list) and data else {}
@@ -7403,7 +7461,10 @@ async def _fetch_child_insights_bulk(
     for fields in (full_fields, mid_fields, min_fields):
         try:
             rows = await fb_get_paginated(
-                f"{parent_id}/insights", {**base_params, "fields": fields}, ttl=cache_ttl
+                f"{parent_id}/insights",
+                {**base_params, "fields": fields},
+                ttl=cache_ttl,
+                shared_cache=_SHARED_INSIGHTS_CACHE,
             )
             break
         except HTTPException as e:
@@ -7985,7 +8046,15 @@ async def get_insights_breakdown(
     else:
         params["date_preset"] = date_preset
 
-    rows = await fb_get_paginated(f"{id}/insights", params)
+    # 報告的 版位/性別/年齡/地區 strip 是每個廣告組合各 ×4 個 breakdown 呼叫,
+    # 一份多廣告組合的報告一開就是幾十個 insights 呼叫的瞬間爆發。封閉區間
+    # 拉長 TTL + 跨使用者共用,讓重複開同一份報告(尤其歷史)不再重打 FB。
+    rows = await fb_get_paginated(
+        f"{id}/insights",
+        params,
+        ttl=_insights_cache_ttl(date_preset, time_range),
+        shared_cache=_SHARED_INSIGHTS_CACHE,
+    )
     out: list[dict[str, Any]] = []
     for r in rows:
         if not isinstance(r, dict):

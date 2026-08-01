@@ -354,4 +354,10 @@ Two-day burst on `main`. ~50 commits, themed in three buckets:
 
 **工程模式新分頁「限流・推播說明」(`RateLimitDocsPanel`,`EngineeringView.tsx`)** — `EngineeringTab` 加 `"docs"`,排在「各帳戶 FB 限流」之後。純靜態說明卡片(用共用 `Card`,部分 collapsible):一分鐘總結 / 三套限流桶 / 為何 BUCU 低卻爆 code 4 / 自我保護閘門與冷卻 / 五層降載 / 排程推播運作 / 怎麼判讀「限流事件全紀錄」。讓操作者看戰情室時能對照解讀,不用翻程式碼。
 
-**尚未做(最大槓桿,待決策)**:**共用讀取快取** — `_cache_key` 目前含 `token_hash`,所以多位同事看同批帳號時同一份 insights 對別人都 cache miss、各打一次 FB。把唯讀 insights GET 改成 key 不含 token(跨使用者共用)可把 N 人收斂成 1 次呼叫;需先確認「單一團隊、帳號全共用」的授權姿態(否則要加同租戶範圍限制)。
+## 2026-08-01 — 追加三項降載(承上)
+
+1. **共用讀取快取(DONE — 前一天列為「最大槓桿待決策」)** — `_cache_key(..., shared=True)` 用固定 `shared` 取代 per-token hash;`fb_get` / `fb_get_paginated` / `_fb_request` 加 `shared_cache` 參數,由三個 insights helper + `/api/breakdown` 帶入(gate:`FB_SHARED_INSIGHTS_CACHE`,預設 on)。N 位同事看同批帳號 → 同一份 insights 只打一次 FB(single-flight 也順便合併並發 miss)。**單一代理商全員共用帳號時安全**;多租戶要設 0。`_cache_invalidate` 以 path 比對(非 token 前綴),shared 項仍被 mutation 正確清除。
+2. **限流 log 補記 App-usage%** — `fb_throttle_events` 加 `app_usage_pct` 欄(`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`);`_record_account_throttle` / `_record_global_throttle` 補抓 `_peak_app_usage_pct()`;`/api/engineering/fb-calls` 的 `throttle_events` 回傳 `app_usage_pct`;前端在每列 `BUCU N%` 旁顯示 `App N%`,**code-4 那列以紅色粗體標出**(因為 code-4 該看 App 全域桶,不是 BUCU)。解決「BUCU 低卻爆 code 4」看不到真正桶滿度的問題。
+3. **報告 breakdown TTL + 共用** — `/api/breakdown`(版位/性別/年齡/地區,每廣告組合 ×4)套 `_insights_cache_ttl` + `shared_cache`;一份多廣告組合報告一開就是幾十個 insights 呼叫的瞬間爆發,封閉區間拉長 TTL + 跨人共用讓重複開同一份報告不再重打 FB。
+
+**仍未做**:排程推播「限流類失敗不計入 auto-disable」(見上方殘留權衡);向 FB 申請更高流量層級(抬高 App 全域天花板,非程式)。
