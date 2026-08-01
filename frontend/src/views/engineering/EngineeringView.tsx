@@ -349,8 +349,10 @@ function RateLimitDocsPanel() {
             />
           </div>
           <p className="mt-3 text-[12px] leading-relaxed text-gray-500">
-            戰情室每列事件旁顯示的 <DocCode>BUCU %</DocCode> 只反映「第一桶(單帳號商業用途)」。 對{" "}
-            <DocCode>code=4</DocCode>(App 全域)這種事件而言,BUCU% 不是關鍵指標 —— 別被它很低誤導。
+            戰情室每列事件旁的 <DocCode>BUCU %</DocCode> 只反映「第一桶(單帳號商業用途)」;對{" "}
+            <DocCode>code=4</DocCode>(App 全域)事件而言那不是關鍵指標 —— 別被它很低誤導。 旁邊的{" "}
+            <DocCode>App %</DocCode> 才是 App 全域桶(`X-App-Usage`)的用量,是 code-4 該看的數字, 所以
+            code-4 那列的 App% 會以紅色標出。
           </p>
         </Card>
 
@@ -414,9 +416,12 @@ function RateLimitDocsPanel() {
               改一個活動的狀態/預算後,只重抓「受影響的那一個帳號」的總覽,而不是全部帳號 ——
               省下每次操作的重抓爆量。
             </DocStep>
-            <DocStep n={3} title="歷史區間長快取">
+            <DocStep n={3} title="歷史區間長快取 + 跨使用者共用">
               已封閉的日期區間(過去月份、until &lt; 今天)數字已定案,快取拉長到 1 小時(預設),不再每 5
-              分鐘重抓。滾動區間(近 7 天、本月…)維持短快取。
+              分鐘重抓。滾動區間(近 7 天、本月…)維持短快取。且 insights 快取
+              <span className="font-semibold text-ink">跨使用者共用</span>
+              :多位同事看同批帳號時,同一份 insights 只打一次
+              FB、其餘人吃快取(這是對「多人各自抓」最直接的一刀)。
             </DocStep>
             <DocStep n={4} title="離峰預熱">
               每月一次的全帳號重型預熱 fan-out,只在當地凌晨 2–6
@@ -2020,6 +2025,26 @@ function FbCallsPanel() {
                         {ev.bucu_pct != null && (
                           <span className={cn("ml-1 text-[10px]", isLatest ? "" : "opacity-60")}>
                             BUCU {ev.bucu_pct}%
+                          </span>
+                        )}
+                        {ev.app_usage_pct != null && (
+                          // App-usage% is the bucket that governs global
+                          // code=4 — highlight it there so a low BUCU next
+                          // to a code-4 row isn't read as contradictory.
+                          <span
+                            className={cn(
+                              "ml-1 text-[10px]",
+                              ev.code === 4
+                                ? isLatest
+                                  ? "font-bold"
+                                  : "font-bold text-red-600"
+                                : isLatest
+                                  ? ""
+                                  : "opacity-60",
+                            )}
+                            title="X-App-Usage.call_count%(App 全域每小時呼叫額度 — code 4 的關鍵指標)"
+                          >
+                            App {ev.app_usage_pct}%
                           </span>
                         )}
                       </span>
