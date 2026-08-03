@@ -360,4 +360,11 @@ Two-day burst on `main`. ~50 commits, themed in three buckets:
 2. **限流 log 補記 App-usage%** — `fb_throttle_events` 加 `app_usage_pct` 欄(`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`);`_record_account_throttle` / `_record_global_throttle` 補抓 `_peak_app_usage_pct()`;`/api/engineering/fb-calls` 的 `throttle_events` 回傳 `app_usage_pct`;前端在每列 `BUCU N%` 旁顯示 `App N%`,**code-4 那列以紅色粗體標出**(因為 code-4 該看 App 全域桶,不是 BUCU)。解決「BUCU 低卻爆 code 4」看不到真正桶滿度的問題。
 3. **報告 breakdown TTL + 共用** — `/api/breakdown`(版位/性別/年齡/地區,每廣告組合 ×4)套 `_insights_cache_ttl` + `shared_cache`;一份多廣告組合報告一開就是幾十個 insights 呼叫的瞬間爆發,封閉區間拉長 TTL + 跨人共用讓重複開同一份報告不再重打 FB。
 
+## 2026-08-03 — 報告 burst 併發上限 + 限流診斷區分 n/a
+
+觸發:部署上述後 8/3 仍有一筆 `全域 code=4`,但新的 App% 欄顯示 **`App 0%`**。研判是「瞬間 burst」(非每小時額度塞滿)—— 報告/分享頁自動展開所有廣告組合,每個組合各跑 breakdown strip(4 維在組合內已串接)+ ads;**跨 N 個組合的第一發同時射出** → 一份 5 組合報告一開瞬間 ~15 個 `/insights`,撞 FB spike 保護。路徑是 entity `/insights`、單一使用者、孤立一筆,全符合。
+
+1. **報告 burst 併發上限(前端)** — 新 `frontend/src/lib/fbConcurrency.ts` 的 `limitFb()`(FIFO semaphore,MAX_CONCURRENT=4),包住 `useBreakdown`(breakdown strip)與 `useReportAds`(每組合 ads)的 queryFn。total 呼叫數不變,只把「一次 N 發齊射」攤成穩定 trickle,壓在 FB burst 門檻下。`PerformanceReportContent` 用單一批次呼叫(`/report-ads`),非 burst,不包。
+2. **限流診斷區分 `App 0%` vs `App n/a`** — 新 `_peak_app_usage_pct_or_none()`:X-App-Usage 快照 stale/沒讀到時回 `None`(不是 floor 成 0)。兩個 recorder 改用它;`_persist_throttle_event(app_usage: Optional[int])` → `None` 存 NULL。前端 `app_usage_pct == null` → 顯示 **`App n/a`**(灰,代表 FB 這次沒回報用量 = 瞬間 burst 的訊號),否則 `App N%`。`_peak_app_usage_pct` 本來就取 call_count/total_time/total_cputime 的 max,所以 CPU-bound throttle 也已涵蓋。
+
 **仍未做**:排程推播「限流類失敗不計入 auto-disable」(見上方殘留權衡);向 FB 申請更高流量層級(抬高 App 全域天花板,非程式)。

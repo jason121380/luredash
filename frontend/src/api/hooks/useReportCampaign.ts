@@ -1,5 +1,6 @@
 import { api } from "@/api/client";
 import type { DateConfig } from "@/lib/datePicker";
+import { limitFb } from "@/lib/fbConcurrency";
 import type { FbAdset, FbCampaign, FbCreativeEntity } from "@/types/fb";
 import { useQuery } from "@tanstack/react-query";
 
@@ -10,7 +11,7 @@ export function useReportAds(adsetId: string | null, date: DateConfig, enabled: 
     queryKey: ["report-ads", adsetId, date] as const,
     queryFn: async (): Promise<FbCreativeEntity[]> => {
       if (!adsetId) return [];
-      return (await api.adsets.creatives(adsetId, date)).data ?? [];
+      return (await limitFb(() => api.adsets.creatives(adsetId, date))).data ?? [];
     },
     enabled: enabled && !!adsetId,
     staleTime: 5 * 60_000,

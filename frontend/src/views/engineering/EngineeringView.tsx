@@ -477,6 +477,13 @@ function RateLimitDocsPanel() {
             <li>
               紅色標「<span className="font-semibold text-orange">最後爆</span>」= 最新一次事件。
             </li>
+            <li>
+              <span className="font-semibold text-ink">App% 怎麼讀</span>:<DocCode>App N%</DocCode>{" "}
+              是 App 全域桶當下用量(code-4 的關鍵指標,故 code-4 那列標紅);
+              <DocCode>App n/a</DocCode> 代表 FB 這次沒回報用量 —— 通常是
+              <span className="font-semibold text-ink">瞬間 burst</span>(一次灌太多呼叫)撞到 spike
+              保護,而非每小時額度塞滿。
+            </li>
             <li className="text-gray-500">
               研判:<DocCode>code=4</DocCode>(全域)看的是「多人 + 背景在同一小時的總呼叫量」;
               <DocCode>80004</DocCode>(帳戶)看的是「那一個帳號被戳太快」。此表為 DB
@@ -2027,7 +2034,22 @@ function FbCallsPanel() {
                             BUCU {ev.bucu_pct}%
                           </span>
                         )}
-                        {ev.app_usage_pct != null && (
+                        {ev.app_usage_pct == null ? (
+                          // NULL = FB sent no fresh X-App-Usage header on
+                          // this response (distinct from a real 0%). A
+                          // code=4 with no app-usage reading points to a
+                          // short burst tripping FB's spike protection, not
+                          // the hourly budget being saturated.
+                          <span
+                            className={cn(
+                              "ml-1 text-[10px]",
+                              isLatest ? "opacity-80" : "opacity-45",
+                            )}
+                            title="FB 未回報 X-App-Usage(通常是瞬間 burst,非每小時額度塞滿)"
+                          >
+                            App n/a
+                          </span>
+                        ) : (
                           // App-usage% is the bucket that governs global
                           // code=4 — highlight it there so a low BUCU next
                           // to a code-4 row isn't read as contradictory.
@@ -2042,7 +2064,7 @@ function FbCallsPanel() {
                                   ? ""
                                   : "opacity-60",
                             )}
-                            title="X-App-Usage.call_count%(App 全域每小時呼叫額度 — code 4 的關鍵指標)"
+                            title="X-App-Usage 最高值(call_count / total_time / total_cputime;App 全域每小時額度 — code 4 的關鍵指標)"
                           >
                             App {ev.app_usage_pct}%
                           </span>
