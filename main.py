@@ -2215,6 +2215,26 @@ def _peak_app_usage_pct() -> int:
     )
 
 
+def _peak_app_usage_pct_or_none() -> Optional[int]:
+    """Like `_peak_app_usage_pct` but distinguishes a genuine 0 from "no
+    fresh reading". Returns None when the X-App-Usage snapshot is stale /
+    never seen (so `_peak_app_usage_pct` would floor to 0). Used when
+    recording a throttle event: a `code=4` that arrives WITHOUT a fresh
+    X-App-Usage header (→ None → "n/a" in the panel) is a different story
+    from one where the bucket really read 0% — the former points to a
+    short burst tripping FB's spike protection rather than the rolling
+    hourly budget being full. The max already spans call_count /
+    total_time / total_cputime, so a CPU-bound throttle is captured too,
+    not just call count."""
+    observed = float(_app_usage.get("observed_at") or 0)
+    if observed <= 0 or (time.time() - observed) > _APP_USAGE_STALE_SECONDS:
+        return None
+    return max(
+        int(_app_usage.get(k, 0) or 0)
+        for k in ("call_count", "total_time", "total_cputime")
+    )
+
+
 def _app_usage_snapshot_expires_in() -> int:
     observed = float(_app_usage.get("observed_at") or 0)
     if observed <= 0:
@@ -2335,11 +2355,15 @@ async def _persist_throttle_event(
     source: str,
     fb_user_id: str,
     bucu: int,
-    app_usage: int = 0,
+    app_usage: Optional[int] = None,
 ) -> None:
     """Durably record a rate-limit / throttle hit to `fb_throttle_events`
     so the 工程模式 panel keeps the FULL history (survives restarts and
-    the 5-minute ring-buffer window). Best-effort — never raises."""
+    the 5-minute ring-buffer window). Best-effort — never raises.
+
+    ``app_usage`` is None when there was no fresh X-App-Usage reading at
+    the moment of the hit → stored as NULL → shown as「n/a」(distinct from
+    a genuine 0%)."""
     if _db_pool is None:
         return
     try:
@@ -2355,7 +2379,7 @@ async def _persist_throttle_event(
                 source or None,
                 fb_user_id or None,
                 int(bucu),
-                int(app_usage),
+                None if app_usage is None else int(app_usage),
             )
     except Exception:
         pass
@@ -2378,7 +2402,7 @@ def _record_account_throttle(account_id: Optional[str], path: str, error_code: i
     uid = _current_fb_user_id.get() or ""
     source = _fb_call_source.get()
     bucu = _peak_bucu_pct()
-    app_usage = _peak_app_usage_pct()
+    app_usage = _peak_app_usage_pct_or_none()
     global _last_ads_throttle_at
     _last_ads_throttle_at = now
     if aid:
@@ -2470,7 +2494,7 @@ def _record_global_throttle(path: str, error_code: int) -> None:
     uid = _current_fb_user_id.get() or ""
     source = _fb_call_source.get()
     bucu = _peak_bucu_pct()
-    app_usage = _peak_app_usage_pct()
+    app_usage = _peak_app_usage_pct_or_none()
     global _global_fb_throttle_until, _last_ads_throttle_at
     _global_fb_throttle_until = max(_global_fb_throttle_until, deadline)
     _last_ads_throttle_at = time.monotonic()

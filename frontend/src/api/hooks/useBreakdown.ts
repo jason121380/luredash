@@ -1,5 +1,6 @@
 import { api } from "@/api/client";
 import type { DateConfig } from "@/lib/datePicker";
+import { limitFb } from "@/lib/fbConcurrency";
 import { useQuery } from "@tanstack/react-query";
 
 export type BreakdownLevel = "adset" | "ad";
@@ -39,7 +40,9 @@ export function useBreakdown(
           cpm: string | number | null;
           msgs: number;
         }>;
-      return (await api.breakdown.list(level, id, dim, date)).data;
+      // Funnel through the shared limiter so a report open (N adsets ×
+      // this strip) staggers instead of firing an N-wide /insights burst.
+      return (await limitFb(() => api.breakdown.list(level, id, dim, date))).data;
     },
     enabled: enabled && !!id,
     // 5 min cache window. Breakdown data updates with the rest of FB
