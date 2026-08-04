@@ -1243,6 +1243,7 @@ export const api = {
           fb_user_name: string;
           bucu_pct: number | null;
           app_usage_pct: number | null;
+          subcode: number | null;
         }>;
         throttle_total: number;
         cache_hit_rate_5m: number;
