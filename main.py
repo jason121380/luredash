@@ -1224,6 +1224,16 @@ async def lifespan(app: FastAPI):
                     "ALTER TABLE fb_throttle_events "
                     "ADD COLUMN IF NOT EXISTS app_usage_pct INTEGER"
                 )
+                # `error_subcode`: FB's `error_subcode` — the field that
+                # names WHICH limit fired (the app-hourly budget, the
+                # ads-insights-specific throttle, etc. all surface as
+                # code=4 but with different subcodes). Without it we can
+                # only guess from App% whether a code-4 is a burst vs a
+                # full bucket.
+                await conn.execute(
+                    "ALTER TABLE fb_throttle_events "
+                    "ADD COLUMN IF NOT EXISTS error_subcode INTEGER"
+                )
                 await conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_fb_throttle_events_ts "
                     "ON fb_throttle_events (ts DESC)"
@@ -2356,6 +2366,7 @@ async def _persist_throttle_event(
     fb_user_id: str,
     bucu: int,
     app_usage: Optional[int] = None,
+    subcode: Optional[int] = None,
 ) -> None:
     """Durably record a rate-limit / throttle hit to `fb_throttle_events`
     so the 工程模式 panel keeps the FULL history (survives restarts and
@@ -2363,15 +2374,15 @@ async def _persist_throttle_event(
 
     ``app_usage`` is None when there was no fresh X-App-Usage reading at
     the moment of the hit → stored as NULL → shown as「n/a」(distinct from
-    a genuine 0%)."""
+    a genuine 0%). ``subcode`` is FB's error_subcode (names which limit)."""
     if _db_pool is None:
         return
     try:
         async with _db_pool.acquire() as conn:
             await conn.execute(
                 """INSERT INTO fb_throttle_events
-                     (scope, account_id, path, error_code, source, fb_user_id, bucu_pct, app_usage_pct)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
+                     (scope, account_id, path, error_code, source, fb_user_id, bucu_pct, app_usage_pct, error_subcode)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
                 scope,
                 account_id or None,
                 path or None,
@@ -2380,12 +2391,15 @@ async def _persist_throttle_event(
                 fb_user_id or None,
                 int(bucu),
                 None if app_usage is None else int(app_usage),
+                None if subcode is None else int(subcode),
             )
     except Exception:
         pass
 
 
-def _record_account_throttle(account_id: Optional[str], path: str, error_code: int) -> None:
+def _record_account_throttle(
+    account_id: Optional[str], path: str, error_code: int, subcode: Optional[int] = None
+) -> None:
     """Bookkeeping when 80000-80014 hits: append to per-account event
     history, set the throttle-until deadline (max of 10min and BUCU
     regain), update the global `_last_ads_throttle_at`, and emit a
@@ -2420,6 +2434,7 @@ def _record_account_throttle(account_id: Optional[str], path: str, error_code: i
                 "source": source,
                 "bucu": bucu,
                 "app_usage": app_usage,
+                "subcode": subcode,
             }
         )
     _spawn_bg(
@@ -2432,6 +2447,7 @@ def _record_account_throttle(account_id: Optional[str], path: str, error_code: i
             fb_user_id=uid,
             bucu=bucu,
             app_usage=app_usage,
+            subcode=subcode,
         )
     )
     print(
@@ -2481,7 +2497,7 @@ def _remember_campaigns_unsupported(account_id: str, capability: str, detail: ob
     )
 
 
-def _record_global_throttle(path: str, error_code: int) -> None:
+def _record_global_throttle(path: str, error_code: int, subcode: Optional[int] = None) -> None:
     """Install a process-wide FB API cooldown for app/user/page limits.
 
     Codes 4 / 17 / 32 / 613 mean the bucket is broader than one ad
@@ -2507,6 +2523,7 @@ def _record_global_throttle(path: str, error_code: int) -> None:
             "source": source,
             "bucu": bucu,
             "app_usage": app_usage,
+            "subcode": subcode,
         }
     )
     _spawn_bg(
@@ -2519,6 +2536,7 @@ def _record_global_throttle(path: str, error_code: int) -> None:
             fb_user_id=uid,
             bucu=bucu,
             app_usage=app_usage,
+            subcode=subcode,
         )
     )
     print(
@@ -3182,11 +3200,12 @@ async def _fb_fetch_and_cache(
             # Ads-account throttle (80000-80014) — flag the account so
             # the cache-warm loop and subsequent dashboard hits to THIS
             # account back off, while unrelated accounts keep working.
+            sub_int = sub if isinstance(sub, int) else None
             if isinstance(code, int) and 80000 <= code <= 80014:
-                _record_account_throttle(account_id, path, code)
+                _record_account_throttle(account_id, path, code, sub_int)
                 http_status = 429
             elif isinstance(code, int) and code in {4, 17, 32, 613}:
-                _record_global_throttle(path, code)
+                _record_global_throttle(path, code, sub_int)
                 http_status = 429
             else:
                 http_status = 400
@@ -3510,15 +3529,17 @@ async def _fb_get_paginated_fetch(
                     else:
                         http_status = 400
                     detail = f"{msg} [code={code}]" if code else msg
+                    sub = err.get("error_subcode")
+                    sub_int = sub if isinstance(sub, int) else None
                     if is_ads_throttle:
                         no_retry = True
-                        _record_account_throttle(account_id, path, code)
+                        _record_account_throttle(account_id, path, code, sub_int)
                         wait_min = _peak_regain_minutes()
                         if wait_min:
                             detail = f"{detail} [retry_after_minutes={wait_min}]"
                     elif isinstance(code, int) and code in transient_fb_codes:
                         no_retry = True
-                        _record_global_throttle(path, code)
+                        _record_global_throttle(path, code, sub_int)
                         wait_sec = int(_global_throttle_remaining())
                         detail = f"{detail} [retry_after_seconds={wait_sec}]"
                     last_exc = HTTPException(status_code=http_status, detail=detail)
@@ -7012,7 +7033,7 @@ async def get_engineering_fb_calls():
                 rows = await conn.fetch(
                     """
                     SELECT scope, account_id, path, error_code, source,
-                           fb_user_id, bucu_pct, app_usage_pct,
+                           fb_user_id, bucu_pct, app_usage_pct, error_subcode,
                            EXTRACT(EPOCH FROM ts) AS ts_epoch
                     FROM fb_throttle_events
                     ORDER BY ts DESC
@@ -7034,6 +7055,7 @@ async def get_engineering_fb_calls():
                         "fb_user_id": r["fb_user_id"] or "",
                         "bucu_pct": r["bucu_pct"],
                         "app_usage_pct": r["app_usage_pct"],
+                        "subcode": r["error_subcode"],
                     }
                 )
         except Exception:
@@ -7053,6 +7075,7 @@ async def get_engineering_fb_calls():
                         "fb_user_id": ev.get("fb_user_id") or "",
                         "bucu_pct": ev.get("bucu"),
                         "app_usage_pct": ev.get("app_usage"),
+                        "subcode": ev.get("subcode"),
                     }
                 )
         for ev in _global_throttle_events:
@@ -7067,6 +7090,7 @@ async def get_engineering_fb_calls():
                     "fb_user_id": ev.get("fb_user_id") or "",
                     "bucu_pct": ev.get("bucu"),
                     "app_usage_pct": ev.get("app_usage"),
+                    "subcode": ev.get("subcode"),
                 }
             )
         throttle_events.sort(key=lambda x: x["ts"], reverse=True)

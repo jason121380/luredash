@@ -2005,6 +2005,7 @@ function FbCallsPanel() {
                         )}
                       >
                         code={ev.code ?? "?"}
+                        {ev.subcode != null && `·${ev.subcode}`}
                       </span>
                       {who && (
                         <span
