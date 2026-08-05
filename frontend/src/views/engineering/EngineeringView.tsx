@@ -356,20 +356,44 @@ function RateLimitDocsPanel() {
           </p>
         </Card>
 
-        <Card title="為什麼 BUCU 只有 3–13% 卻爆 code 4?" collapsible defaultOpen={false}>
+        <Card
+          title="為什麼 BUCU 低、App 也 0% 卻爆 code 4?(subcode 1504022)"
+          subtitle="實測抓到 subcode 後確認:這是 Ads Insights 專屬限流,不是每小時 app 額度"
+          collapsible
+          defaultOpen={false}
+        >
           <div className="space-y-2 text-[13px] leading-relaxed text-gray-600">
             <p>
-              因為爆的不是「單帳號 BUCU」那桶,而是「
-              <span className="font-semibold text-ink">App 全域每小時總呼叫數</span>」那桶。
+              我們把 FB 的 <DocCode>error_subcode</DocCode> 記進戰情室後,抓到這些 code=4 幾乎都是{" "}
+              <DocCode>code=4·1504022</DocCode> ——{" "}
+              <span className="font-semibold text-ink">
+                Ads Insights API 的「來自這個 App 的 insights 呼叫太多」
+              </span>
+              (FB 官方文件用語)。
             </p>
             <p>
-              每個帳號自己的 BUCU 都很低(呼叫分散在很多帳號),但{" "}
-              <span className="font-semibold text-ink">全部同事 + 背景任務加起來</span>
-              的每小時呼叫總量,頂到了 App 層級上限 → FB 直接丟 <DocCode>code=4</DocCode>。
+              重點:這是<span className="font-semibold text-ink">第四個、insights 專屬的桶</span>,
+              跟前面三桶都不同 ——
             </p>
+            <ul className="ml-4 list-disc space-y-1 text-gray-500">
+              <li>
+                它<span className="font-semibold text-ink">不反映在 X-App-Usage</span>,所以那些事件
+                旁邊顯示 <DocCode>App 0%</DocCode> / <DocCode>App n/a</DocCode> 是正常的,不是矛盾。
+              </li>
+              <li>
+                它是<span className="font-semibold text-ink">全 App 共用</span>:一旦觸發,整個 App
+                的所有 insights 呼叫都被限(不分帳號、不分使用者)—— 這就是為什麼 scope 是「全域」、
+                Nana/Betty/Clare/Eunice 多人都中、且全在 <DocCode>/insights</DocCode> 路徑。
+              </li>
+              <li>
+                觸發原因是<span className="font-semibold text-ink">短時間內太多 insights 呼叫</span>
+                (並發 / 爆量),不是每小時額度慢慢累滿。
+              </li>
+            </ul>
             <p className="text-gray-500">
-              典型情境:多位同事同一小時各自開儀表板看同一批帳號、報告、LINE 推播、安全掃描,insights
-              呼叫在 App 層級加總後爆桶。所以這種事件 scope 一定是「全域」。
+              FB 官方的解法就是「
+              <span className="font-semibold text-ink">放慢 / 分散 insights 呼叫</span>
+              (pacing、降並發)」,不是提高額度 —— 見下一張卡我們做的。
             </p>
           </div>
         </Card>
@@ -434,6 +458,37 @@ function RateLimitDocsPanel() {
         </Card>
 
         <Card
+          title="Ads Insights 專屬限流(1504022)怎麼治"
+          subtitle="FB 的解法是「放慢 / 分散 insights 呼叫」;我們照做,分三招"
+          collapsible
+          defaultOpen={false}
+        >
+          <ol className="space-y-3">
+            <DocStep n={1} title="全 App 共用的 insights 並發上限">
+              後端加一道 <DocCode>_insights_semaphore</DocCode>(預設 4,env{" "}
+              <DocCode>FB_INSIGHTS_CONCURRENCY</DocCode>):
+              <span className="font-semibold text-ink">所有</span> insights-edge 呼叫(不分哪個請求、
+              哪個人)同時最多 4 個在飛,其餘排隊。把「一瞬間 N 發齊射」攤成穩定 trickle —— 直接對應
+              FB 說的「app-wide insights 限流」。快取命中不佔名額。
+            </DocStep>
+            <DocStep n={2} title="降低儀表板多帳號 insights 並發">
+              儀表板開一次會 fan-out 多個帳號的 insights;把每次的並發上限{" "}
+              <DocCode>OVERVIEW_ACCOUNT_CONCURRENCY</DocCode> 從 4 降到 2(env
+              可調)。觸發者最常是「儀表板資料載入」,這條最直接。
+            </DocStep>
+            <DocStep n={3} title="報告 breakdown 併發上限(前端)">
+              報告 / 分享頁自動展開所有廣告組合,<DocCode>limitFb()</DocCode>(FIFO semaphore,max
+              4)把跨組合的 breakdown + ads 呼叫攤開,不再一開就 N 發齊射。
+            </DocStep>
+          </ol>
+          <p className="mt-3 text-[12px] leading-relaxed text-gray-500">
+            這三招都是「壓低 insights
+            呼叫密度」,不影響數字正確性(只是稍慢一點,跨使用者共用快取會補回來)。
+            若壓到底仍常爆,才需考慮向 FB 申請更高存取層級把天花板抬高(非程式,FB 後台操作)。
+          </p>
+        </Card>
+
+        <Card
           title="排程 LINE 推播怎麼運作"
           subtitle="到點為什麼發 / 不發,以及失敗後的行為"
           collapsible
@@ -476,6 +531,14 @@ function RateLimitDocsPanel() {
             </li>
             <li>
               紅色標「<span className="font-semibold text-orange">最後爆</span>」= 最新一次事件。
+            </li>
+            <li>
+              <span className="font-semibold text-ink">subcode 怎麼讀</span>:code 後面的{" "}
+              <DocCode>·1504022</DocCode> 就是 FB 的 <DocCode>error_subcode</DocCode>
+              ,精準指出是哪個限制。
+              <DocCode>code=4·1504022</DocCode> = Ads Insights 專屬限流(見上方卡)—— 對策是降
+              insights 並發,不是提高額度。沒有 subcode(只有 <DocCode>code=4</DocCode>)才可能是一般
+              app 額度。
             </li>
             <li>
               <span className="font-semibold text-ink">App% 怎麼讀</span>:<DocCode>App N%</DocCode>{" "}

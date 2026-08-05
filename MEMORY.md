@@ -367,4 +367,15 @@ Two-day burst on `main`. ~50 commits, themed in three buckets:
 1. **報告 burst 併發上限(前端)** — 新 `frontend/src/lib/fbConcurrency.ts` 的 `limitFb()`(FIFO semaphore,MAX_CONCURRENT=4),包住 `useBreakdown`(breakdown strip)與 `useReportAds`(每組合 ads)的 queryFn。total 呼叫數不變,只把「一次 N 發齊射」攤成穩定 trickle,壓在 FB burst 門檻下。`PerformanceReportContent` 用單一批次呼叫(`/report-ads`),非 burst,不包。
 2. **限流診斷區分 `App 0%` vs `App n/a`** — 新 `_peak_app_usage_pct_or_none()`:X-App-Usage 快照 stale/沒讀到時回 `None`(不是 floor 成 0)。兩個 recorder 改用它;`_persist_throttle_event(app_usage: Optional[int])` → `None` 存 NULL。前端 `app_usage_pct == null` → 顯示 **`App n/a`**(灰,代表 FB 這次沒回報用量 = 瞬間 burst 的訊號),否則 `App N%`。`_peak_app_usage_pct` 本來就取 call_count/total_time/total_cputime 的 max,所以 CPU-bound throttle 也已涵蓋。
 
-**仍未做**:排程推播「限流類失敗不計入 auto-disable」(見上方殘留權衡);向 FB 申請更高流量層級(抬高 App 全域天花板,非程式)。
+## 2026-08-04 — 確認 code=4 subcode 1504022 = Ads Insights 專屬限流,對症降並發
+
+`#381` 把 `error_subcode` 記進 log 後,8/4 抓到 `code=4·1504022`。查 FB 官方文件確認:**subcode 1504022 = Ads Insights API「來自這個 App 的 insights 呼叫太多」**,是**第四個、insights 專屬、app-wide** 的桶 —— **不反映在 X-App-Usage**(所以那些列顯示 `App 0%`/`n/a`),一旦觸發整個 App 的所有 insights 呼叫全被限(不分帳號/使用者,故 scope 全域、多人都在 `/insights` 中招)。FB 官方解法就是 pacing/降並發,不是提高額度。
+
+對症三招(都在壓 insights 呼叫密度,不影響正確性):
+1. **全 App 共用的 insights 並發上限** — `_insights_semaphore`(`FB_INSIGHTS_CONCURRENCY`,預設 4)+ `_is_insights_path()`,在 `_fb_fetch_and_cache` / `_fb_get_paginated_fetch` 兩個實際 FB-fetch chokepoint 以「單行多 context」`async with insights_ctx, (acct_sem…): async with _fb_semaphore:` 套用(outermost,快取命中不佔名額)。把跨請求/跨使用者的 insights 呼叫攤成 trickle。
+2. **降儀表板 overview 並發** — `OVERVIEW_ACCOUNT_CONCURRENCY` 4→2(儀表板載入是最大觸發源)。
+3. **報告 breakdown burst 上限** — 前一天(#380)的 `limitFb()` 已在。
+
+工程模式「限流・推播說明」分頁大改:新增「為什麼 BUCU 低、App 也 0% 卻爆(subcode 1504022)」與「Ads Insights 專屬限流怎麼治」兩張卡,判讀卡補「subcode 怎麼讀」。CLAUDE.md / .env.example env 同步。
+
+**仍未做**:排程推播「限流類失敗不計入 auto-disable」(見上方殘留權衡);向 FB 申請更高流量層級(抬高天花板,非程式,壓到底仍常爆才需要)。
