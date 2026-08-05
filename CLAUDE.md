@@ -76,6 +76,8 @@ EZPAY_API_BASE  — ezPay API base (default TEST https://cinv.ezpay.com.tw; prod
 EZPAY_MOCK      — "1" prints the decrypted invoice payload instead of calling ezPay (dev)
 FB_HISTORICAL_CACHE_TTL_SECONDS — closed/historical insights 讀取快取 TTL (default 3600). 已封閉的日期區間(time_range 的 until < 今天、或固定過去 date_preset:yesterday/last_month/last_week_*/last_quarter/last_year)數字已定案,拉長 TTL 大幅減少對 App 全域(X-App-Usage / code 4)每小時呼叫額度的重複消耗。滾動區間(last_7d/this_month/maximum…)仍用預設 300s。
 FB_OFFPEAK_WARM_START_HOUR / FB_OFFPEAK_WARM_END_HOUR — 每月重型 fan-out(全帳號 history-warm + lurefin cost-center 自動重熱)只在此 SCHEDULER_TZ 當地離峰時段觸發 (default 2–6)。避免每月一次的尖峰疊在白天使用者流量的同一個 app-level 呼叫額度上。start==end 停用閘門(隨時可跑)。手動工程模式預熱不受此限。
+FB_INSIGHTS_CONCURRENCY — 全 App 共用的 /insights-edge FB 呼叫並發上限 (default 4)。針對 **Ads Insights 專屬限流 `code=4·1504022`**(insights-specific、app-wide、與 X-App-Usage 無關 → 那些 throttle 列顯示 `App 0%`/`n/a`),FB 官方解法是 pacing/降並發。`_insights_semaphore` 在兩個實際 FB-fetch chokepoint(`_fb_fetch_and_cache` / `_fb_get_paginated_fetch`)以 `_is_insights_path()` 判斷後套用,把跨請求/跨使用者的 insights 呼叫攤成 trickle;快取命中不佔名額。
+OVERVIEW_ACCOUNT_CONCURRENCY — 儀表板 overview 每次 fan-out 的帳號並發 (default 2,2026-08-04 從 4 降;儀表板載入是 1504022 的最大觸發源)。
 FB_SHARED_INSIGHTS_CACHE — insights GET 讀取快取是否跨使用者共用 (default "1"=on)。`_cache_key(..., shared=True)` 用固定 `shared` 取代 per-token hash,讓 N 位同事看同批帳號時同一份 insights 只打一次 FB(其餘吃快取 + single-flight 合併並發 miss)。**單一代理商全員共用帳號時安全**(LURE);若改成多租戶(不同代理商同站),設 `0`,否則不同租戶會共用 insights bytes。`_cache_invalidate` 以 path 比對(非 token 前綴)所以 mutation 仍正確清除共用項。只套在三個 insights helper + `/api/breakdown`。
 ```
 

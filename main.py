@@ -146,7 +146,21 @@ _fb_semaphore: asyncio.Semaphore = asyncio.Semaphore(_FB_GLOBAL_CONCURRENCY)
 # owns them and they're rarely the burst culprit.
 _PER_ACCOUNT_CONCURRENCY = _env_int("FB_PER_ACCOUNT_CONCURRENCY", 2)
 _per_account_semaphores: dict[str, asyncio.Semaphore] = {}
-_OVERVIEW_ACCOUNT_CONCURRENCY = _env_int("OVERVIEW_ACCOUNT_CONCURRENCY", 4)
+# Lowered 4→2 (2026-08-04): the dashboard's per-account insights fan-out was
+# the top trigger of the Ads-Insights app-level throttle (code=4 subcode
+# 1504022 — see the 限流・推播說明 tab). Fewer accounts fetched at once =
+# fewer concurrent /insights calls into that app-wide bucket.
+_OVERVIEW_ACCOUNT_CONCURRENCY = _env_int("OVERVIEW_ACCOUNT_CONCURRENCY", 2)
+# App-wide ceiling on CONCURRENT /insights-edge FB calls. The Ads Insights
+# API throttle (code=4 subcode 1504022) is app-global and insights-specific
+# — it is NOT reflected in X-App-Usage (that's why those throttle rows show
+# `App 0%`/`n/a`) — and once tripped it blocks EVERY insights call for the
+# whole app. FB's own guidance is to pace/spread insights queries. This
+# semaphore caps how many insights reads are in flight across ALL requests
+# and users at once, turning a wide burst into a steady trickle. Applied in
+# the two actual FB-fetch chokepoints; cache hits never consume a slot.
+_INSIGHTS_CONCURRENCY = _env_int("FB_INSIGHTS_CONCURRENCY", 4)
+_insights_semaphore: asyncio.Semaphore = asyncio.Semaphore(_INSIGHTS_CONCURRENCY)
 _CAMPAIGNS_PARALLEL_INSIGHTS = os.getenv("CAMPAIGNS_PARALLEL_INSIGHTS", "0") == "1"
 _OVERVIEW_PARALLEL_ACCOUNT_INSIGHTS = os.getenv("OVERVIEW_PARALLEL_ACCOUNT_INSIGHTS", "0") == "1"
 # Shared (cross-user) read cache for INSIGHTS GETs. The default per-token
@@ -183,6 +197,15 @@ class _NullAsyncContext:
 
 
 _NULL_CTX = _NullAsyncContext()
+
+
+def _is_insights_path(path: str) -> bool:
+    """True when `path` targets an `/insights` edge (campaign/adset/ad/
+    account level, breakdowns included). Used to gate insights reads
+    behind `_insights_semaphore` — the Ads Insights app-level throttle
+    (code=4 subcode 1504022) is triggered by too many concurrent
+    insights calls app-wide."""
+    return path.split("?", 1)[0].rstrip("/").endswith("/insights")
 
 
 def _extract_account_id_from_path(path: str) -> Optional[str]:
@@ -3122,10 +3145,18 @@ async def _fb_fetch_and_cache(
     # pool. Bypass per-account when path doesn't carry act_*.
     account_id = _account_id_for_path(path)
     acct_sem = _account_semaphore(account_id) if account_id else None
+    # App-wide insights concurrency cap (outermost) — acquire an insights
+    # slot BEFORE the account/global slots so a burst of /insights reads
+    # queues on this ceiling instead of all hitting FB's Ads-Insights
+    # app-level throttle (code=4 subcode 1504022) at once.
+    insights_ctx = _insights_semaphore if _is_insights_path(path) else _NULL_CTX
     started = time.monotonic()
     r = None
     try:
-        async with (acct_sem if acct_sem else _NULL_CTX):
+        # insights_ctx (app-wide insights cap) acquired alongside the
+        # per-account gate, both BEFORE the global slot. One `async with`
+        # so the body indentation below is unchanged.
+        async with insights_ctx, (acct_sem if acct_sem else _NULL_CTX):
             async with _fb_semaphore:
                 try:
                     if method == "GET":
@@ -3451,6 +3482,10 @@ async def _fb_get_paginated_fetch(
     page_params = {"access_token": token, **params}
     account_id = _account_id_for_path(path)
     acct_sem = _account_semaphore(account_id) if account_id else None
+    # App-wide insights concurrency cap (see _is_insights_path / the
+    # 限流・推播說明 tab). Bulk insights edges (level=campaign/adset/ad)
+    # come through here; gate them too so a wide fan-out staggers.
+    insights_ctx = _insights_semaphore if _is_insights_path(path) else _NULL_CTX
     pages_fetched = 0
     while next_url:
         if max_pages is not None and pages_fetched >= max_pages:
@@ -3473,7 +3508,7 @@ async def _fb_get_paginated_fetch(
             page_status = 200
             page_err_code: Optional[int] = None
             try:
-                async with (acct_sem if acct_sem else _NULL_CTX):
+                async with insights_ctx, (acct_sem if acct_sem else _NULL_CTX):
                     async with _fb_semaphore:
                         r = await _http_client.get(
                             next_url, params=page_params, timeout=_GET_TIMEOUT_BULK
