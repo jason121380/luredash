@@ -1,9 +1,10 @@
 import unittest
+from unittest.mock import patch
 
 import main
 
 
-class RateLimitHelperTests(unittest.TestCase):
+class RateLimitHelperTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         main._entity_account_map.clear()
 
@@ -51,6 +52,24 @@ class RateLimitHelperTests(unittest.TestCase):
 
         self.assertIsNone(main._account_id_for_path("camp_1/adsets"))
         self.assertNotIn("camp_1", main._entity_account_map)
+
+    async def test_account_insights_uses_shared_insights_cache_policy(self):
+        async def fake_fb_get(path, params, **kwargs):
+            return {"path": path, "params": params, "kwargs": kwargs}
+
+        with (
+            patch.object(main, "fb_get", side_effect=fake_fb_get) as fb_get_mock,
+            patch.object(main, "_insights_cache_ttl", return_value=4321.0) as ttl_mock,
+        ):
+            await main._fetch_account_insights("act_1", "last_month", None)
+
+        ttl_mock.assert_called_once_with("last_month", None)
+        _, _, kwargs = fb_get_mock.mock_calls[0]
+        self.assertTrue(kwargs["shared_cache"])
+        self.assertEqual(kwargs["cache_ttl"], 4321.0)
+
+    def test_default_insights_pace_is_conservative_for_ads_insights_bucket(self):
+        self.assertEqual(main._INSIGHTS_MIN_GAP_MS, 500)
 
 
 if __name__ == "__main__":

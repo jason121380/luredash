@@ -165,9 +165,9 @@ _insights_semaphore: asyncio.Semaphore = asyncio.Semaphore(_INSIGHTS_CONCURRENCY
 # The semaphore caps concurrency (bursts); this caps the sustained RATE —
 # the Ads Insights throttle (code=4·1504022) is triggered by too many
 # insights calls over time, and FB's own guidance is to "spread queries by
-# pacing them with wait time". 150ms ≈ max ~6-7 insights calls/sec app-wide.
+# pacing them with wait time". 500ms ≈ max ~2 insights calls/sec app-wide.
 # Set 0 to disable pacing.
-_INSIGHTS_MIN_GAP_MS = _env_int("FB_INSIGHTS_MIN_GAP_MS", 150)
+_INSIGHTS_MIN_GAP_MS = _env_int("FB_INSIGHTS_MIN_GAP_MS", 500)
 _insights_pace_lock: asyncio.Lock = asyncio.Lock()
 _insights_last_call_at: float = 0.0
 
@@ -8815,7 +8815,13 @@ async def _fetch_account_insights(
         params["time_range"] = time_range
     else:
         params["date_preset"] = date_preset
-    return await fb_get(f"{account_id}/insights", params, slow_ok=True)
+    return await fb_get(
+        f"{account_id}/insights",
+        params,
+        cache_ttl=_insights_cache_ttl(date_preset, time_range),
+        shared_cache=_SHARED_INSIGHTS_CACHE,
+        slow_ok=True,
+    )
 
 
 @app.get("/api/accounts/{account_id}/insights")

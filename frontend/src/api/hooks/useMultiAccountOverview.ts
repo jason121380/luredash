@@ -22,6 +22,7 @@ import { useEffect, useMemo } from "react";
 
 const SNAPSHOT_KEY = "fb-overview-snapshot";
 const SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60_000; // ignore anything older than 24h
+const SNAPSHOT_FULL_REFETCH_SUPPRESS_MS = 15 * 60_000;
 
 interface OverviewSnapshot {
   hash: string;
@@ -34,16 +35,14 @@ function snapshotHash(idsKey: string, date: DateConfig, includeArchived: boolean
   return `${idsKey}|${date.preset}|${date.from ?? ""}|${date.to ?? ""}|${includeArchived ? 1 : 0}`;
 }
 
-function readOverviewSnapshot(
-  hash: string,
-): Awaited<ReturnType<typeof api.overview.batch>> | undefined {
+function readOverviewSnapshotEntry(hash: string): OverviewSnapshot | undefined {
   try {
     const raw = localStorage.getItem(SNAPSHOT_KEY);
     if (!raw) return undefined;
     const parsed = JSON.parse(raw) as OverviewSnapshot;
     if (parsed.hash !== hash) return undefined;
     if (Date.now() - parsed.savedAt > SNAPSHOT_MAX_AGE_MS) return undefined;
-    return parsed.data;
+    return parsed;
   } catch {
     return undefined;
   }
@@ -137,16 +136,20 @@ export function useMultiAccountOverview(
 
   // Phase 2 (rate-limit reduction): when a localStorage snapshot is
   // already on hand for this exact (idsKey, date, archived) tuple,
-  // SKIP the lite call entirely. The snapshot already paints the
-  // UI; firing lite would only duplicate work the full query is
-  // about to redo. Cold-start (no snapshot) still gets the lite +
-  // full two-phase progressive render.
+  // SKIP the lite call entirely. When the snapshot is also recent,
+  // skip the full live refetch too; reopening the app within a short
+  // window should not burn Ads Insights quota just to repaint numbers
+  // the user already saw.
   //
   // Saves ~N FB calls per dashboard reload (one per selected account)
   // for the 99% case where the user has visited the same set of
   // accounts within the last 24h.
   const snapHash = snapshotHash(idsKey, date, !!opts.includeArchived);
-  const hasSnapshot = useMemo(() => !!readOverviewSnapshot(snapHash), [snapHash]);
+  const snapshot = useMemo(() => readOverviewSnapshotEntry(snapHash), [snapHash]);
+  const snapshotData = snapshot?.data;
+  const hasSnapshot = snapshotData !== undefined;
+  const hasFreshSnapshot =
+    snapshot !== undefined && Date.now() - snapshot.savedAt <= SNAPSHOT_FULL_REFETCH_SUPPRESS_MS;
 
   // Phase 1: lite (no insights — fast)
   const liteQuery = useQuery({
@@ -162,13 +165,10 @@ export function useMultiAccountOverview(
     gcTime: opts.gcTime,
   });
 
-  // Phase 2: full (with insights — slow). placeholderData seeds the
-  // query with the last-seen snapshot from localStorage so the UI
-  // renders instantly on hard refresh / app re-open. The live query
-  // still fires in the background; once it resolves the cards
-  // refresh in place. snapHash is recomputed when accounts or date
-  // change so a stale snapshot for a different combo is correctly
-  // ignored.
+  // Phase 2: full (with insights — slow). A stale-but-valid snapshot
+  // still seeds the query while the live request refreshes it. A fresh
+  // snapshot disables the full request entirely to avoid repeated
+  // hard-refresh / app-reopen bursts into the Ads Insights bucket.
   const fullQuery = useQuery({
     queryKey: ["overview", idsKey, date, !!opts.includeArchived, !!opts.includeAdsets],
     queryFn: async () => {
@@ -177,10 +177,10 @@ export function useMultiAccountOverview(
       }
       return api.overview.batch(sortedIds, date, opts);
     },
-    enabled: enabled && !opts.liteOnly,
+    enabled: enabled && !opts.liteOnly && !hasFreshSnapshot,
     staleTime: opts.staleTime ?? 5 * 60_000,
     gcTime: opts.gcTime,
-    placeholderData: () => readOverviewSnapshot(snapHash),
+    placeholderData: () => snapshotData,
   });
 
   // Persist successful responses — placeholder hits feel instant
@@ -193,16 +193,18 @@ export function useMultiAccountOverview(
   // success render commits, instead of blocking the main thread on
   // the very paint that's trying to show fresh data.
   useEffect(() => {
-    if (fullQuery.isSuccess && !fullQuery.isFetching && fullQuery.data) {
+    if (!hasFreshSnapshot && fullQuery.isSuccess && !fullQuery.isFetching && fullQuery.data) {
       const data = fullQuery.data;
       const handle = setTimeout(() => writeOverviewSnapshot(snapHash, data), 0);
       return () => clearTimeout(handle);
     }
     return undefined;
-  }, [fullQuery.isSuccess, fullQuery.isFetching, fullQuery.data, snapHash]);
+  }, [fullQuery.isSuccess, fullQuery.isFetching, fullQuery.data, snapHash, hasFreshSnapshot]);
 
   // Prefer full data when available, fall back to lite.
-  const activeData = opts.liteOnly ? liteQuery.data : (fullQuery.data ?? liteQuery.data);
+  const activeData = opts.liteOnly
+    ? liteQuery.data
+    : (fullQuery.data ?? snapshotData ?? liteQuery.data);
 
   const { campaigns, insights, errors } = useMemo(() => {
     const camps: FbCampaign[] = [];
@@ -232,7 +234,9 @@ export function useMultiAccountOverview(
   // `fullQuery.data` is populated either by a live success OR by
   // the localStorage placeholder. Either way we have insight numbers
   // to show — UI shouldn't shimmer when cached numbers are in hand.
-  const hasFullData = opts.liteOnly ? liteQuery.data !== undefined : fullQuery.data !== undefined;
+  const hasFullData = opts.liteOnly
+    ? liteQuery.data !== undefined
+    : fullQuery.data !== undefined || snapshotData !== undefined;
 
   // isLoading = nothing to show yet (no live data, no placeholder,
   // and lite is also still in flight).
