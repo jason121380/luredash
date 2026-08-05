@@ -1,11 +1,12 @@
-import { ApiError, type AgentCampaignDigest, type AgentMeta, api } from "@/api/client";
+import { type AgentCampaignDigest, type AgentMeta, ApiError, api } from "@/api/client";
 import { useAccounts } from "@/api/hooks/useAccounts";
-import { useBillingUsage } from "@/api/hooks/useSubscription";
 import { useMultiAccountOverview } from "@/api/hooks/useMultiAccountOverview";
+import { useBillingUsage } from "@/api/hooks/useSubscription";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { Button } from "@/components/Button";
 import { DatePicker } from "@/components/DatePicker";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadAllAccountsPrompt } from "@/components/LoadAllAccountsPrompt";
 import { LoadingState } from "@/components/LoadingState";
 import { Modal } from "@/components/Modal";
 import { Spinner } from "@/components/Spinner";
@@ -22,12 +23,13 @@ import {
   getCostPerAtc,
   getCostPerLinkClick,
   getCostPerPurchase,
+  getIns,
   getLinkClicks,
   getMsgCount,
   getPurchaseCount,
   getRoas,
-  getIns,
 } from "@/lib/insights";
+import { useAccountLoadGate } from "@/lib/useAccountLoadGate";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useFiltersStore } from "@/stores/filtersStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -76,7 +78,11 @@ export function OptimizationView() {
   const date = useFiltersStore((s) => s.date.optimization);
   const setDate = useFiltersStore((s) => s.setDate);
 
-  const overview = useMultiAccountOverview(visibleAll, date, {
+  // Confirm-before-load: don't auto-fan-out insights across a big account
+  // set on page open (Ads Insights burst). See useAccountLoadGate.
+  const loadGate = useAccountLoadGate(visibleAll);
+
+  const overview = useMultiAccountOverview(loadGate.queryAccounts, date, {
     includeArchived: false,
     source: "ai-staff",
   });
@@ -221,10 +227,7 @@ export function OptimizationView() {
   // non-null state counts. Used to short-circuit the
   // overview-loading gate so users with persisted runs don't see a
   // progress bar on every page open.
-  const hasAnyCards = useMemo(
-    () => agents.some((a) => cards[a.id] != null),
-    [agents, cards],
-  );
+  const hasAnyCards = useMemo(() => agents.some((a) => cards[a.id] != null), [agents, cards]);
   const usage = usageQuery.data;
   const adviceLimit = usage?.limits.agent_advice ?? 0;
   const adviceUsed = usage?.usage.agent_advice ?? 0;
@@ -346,6 +349,8 @@ export function OptimizationView() {
           />
         ) : visibleAll.length === 0 ? (
           <EmptyState>請先在設定中啟用廣告帳戶</EmptyState>
+        ) : loadGate.gated && !hasAnyCards ? (
+          <LoadAllAccountsPrompt count={loadGate.count} onConfirm={loadGate.confirm} />
         ) : !hasAnyCards && (overview.isLoading || overview.insightsPending) ? (
           // Only block the entire UI on the FB-API campaign fetch
           // when we have NOTHING to show — i.e. user has never run
@@ -362,6 +367,16 @@ export function OptimizationView() {
           <EmptyState>目前沒有正在進行中的行銷活動</EmptyState>
         ) : (
           <div className="flex flex-col gap-3 md:gap-4">
+            {loadGate.gated && (
+              // Cached AI cards are shown, but the live overview is still
+              // gated — offer to load it so the user can re-generate.
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-orange-border bg-orange-bg px-4 py-3 text-[12px] text-gray-600">
+                <span>帳戶較多,已暫停自動載入活動資料;載入後才能重新產生分析。</span>
+                <Button size="sm" onClick={loadGate.confirm}>
+                  載入全部 {loadGate.count} 個帳戶
+                </Button>
+              </div>
+            )}
             <ActionBar
               isFirstRun={isFirstRun}
               isStreaming={isStreaming}
@@ -480,9 +495,7 @@ function ActionBar({
             {accountsCount} 個帳戶{filterActive ? " (已篩選)" : ""}
           </button>{" "}
           下的 {campaignsCount} 個進行中活動,依帳戶輸出嚴重程度分級 to-do。
-          {!blockedByTier && (
-            <span className="ml-1 text-gray-400">每次點擊扣 1 次配額。</span>
-          )}
+          {!blockedByTier && <span className="ml-1 text-gray-400">每次點擊扣 1 次配額。</span>}
         </div>
       </div>
 
@@ -496,12 +509,7 @@ function ActionBar({
         >
           {blockedByTier ? "目前方案不含此功能" : quotaLabel}
         </span>
-        <Button
-          variant="primary"
-          size="sm"
-          disabled={!canGenerate}
-          onClick={onGenerate}
-        >
+        <Button variant="primary" size="sm" disabled={!canGenerate} onClick={onGenerate}>
           {isStreaming
             ? "分析中..."
             : isOverviewLoading
@@ -651,9 +659,7 @@ function AccountFilterModal({
             </li>
           ))}
           {filtered.length === 0 && (
-            <li className="px-3 py-4 text-center text-[12px] text-gray-400">
-              沒有符合的帳戶
-            </li>
+            <li className="px-3 py-4 text-center text-[12px] text-gray-400">沒有符合的帳戶</li>
           )}
         </ul>
         <div className="flex items-center justify-end gap-2">
@@ -709,11 +715,7 @@ const ENGAGEMENT_ACTION_TYPES = [
   "like",
   "link_click",
 ] as const;
-const APP_INSTALL_ACTION_TYPES = [
-  "mobile_app_install",
-  "app_install",
-  "omni_app_install",
-] as const;
+const APP_INSTALL_ACTION_TYPES = ["mobile_app_install", "app_install", "omni_app_install"] as const;
 
 function firstActionValue(
   items: { action_type: string; value: string }[] | undefined,

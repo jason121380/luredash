@@ -384,4 +384,8 @@ Two-day burst on `main`. ~50 commits, themed in three buckets:
 
 **誠實結論**:程式只能壓低用量;`1504022` 天花板由 FB 依 App 存取層級固定。壓到底仍常爆 = 真實 insights 用量(80+ 帳號 × 多人)逼近額度 → **治本是 FB 後台商業驗證 / Advanced Access 調高額度**(非程式)。
 
-**仍未做**:排程推播「限流類失敗不計入 auto-disable」(見上方殘留權衡)。
+## 2026-08-05 — P1.2 全帳號頁「確認後載入」(擋 1504022 最大爆源)
+
+費用中心以外,**優化中心 / 店家花費 / 電子發票**開頁就對「所有 visible 帳號」打 full overview → 80+ 帳號一次齊射 account-level `/insights` = `1504022` 最大單一觸發。新增 `useAccountLoadGate(accounts, max=8)`(`lib/useAccountLoadGate.ts`)+ `LoadAllAccountsPrompt`(`components/`):帳號數 > 8 時**不自動抓**,傳空陣列給 `useMultiAccountOverview`(其 `accounts.length>0` gate 自然關閉),改顯示「載入全部 N 個帳戶」按鈕,點了才 fetch。`confirmed` 是元件 local state → 離開再進來會重新 arm(每次進重頁都要按一次)。三頁都接:StoreExpenses / EInvoice 直接換 branch;OptimizationView 因有 localStorage 快取 AI 卡,`gated && !hasAnyCards` 才顯示 prompt、有快取卡時顯示卡片 + 一條「載入 N 個帳戶」inline banner(不藏已付費的分析)。
+
+**仍未做**:排程推播「限流類失敗不計入 auto-disable」;codex 建議清單 P1.1(LINE scheduler 降流)/ P1.3(1504022 專屬 cooldown)/ P2.4(每分鐘 insights 診斷)/ P3.7(materialized snapshot 治本)。
