@@ -149,12 +149,17 @@ export function DashboardView() {
     setBudgetTarget(target);
   }, []);
 
-  // Filter campaigns: in focus mode keep only starred campaigns, then
-  // apply the "only with spend" toggle.
+  // Filter campaigns: in focus mode keep only starred campaigns. The
+  // "only with spend" toggle is IGNORED in focus mode — you deliberately
+  // starred these, so they must always show (otherwise a starred campaign
+  // with no spend this month looks like it "disappeared").
   const filteredCampaigns = useMemo(() => {
     let list = overview.campaigns;
-    if (focusMode) list = list.filter((c) => focusIdSet.has(c.id));
-    if (activeOnly) list = list.filter((c) => Number(getIns(c).spend) > 0);
+    if (focusMode) {
+      list = list.filter((c) => focusIdSet.has(c.id));
+    } else if (activeOnly) {
+      list = list.filter((c) => Number(getIns(c).spend) > 0);
+    }
     return list;
   }, [overview.campaigns, focusMode, focusIdSet, activeOnly]);
 
@@ -407,6 +412,14 @@ export function DashboardView() {
                   loaded={overview.loadedCount}
                   total={overview.totalCount}
                 />
+              ) : focusMode && filteredCampaigns.length === 0 ? (
+                // Has stars but none loaded — the accounts errored (FB
+                // limit), the campaign was deleted, or it's outside the
+                // fetched set. Make it clear the stars aren't lost.
+                <EmptyState>
+                  已加星 {focusCampaigns.length} 個活動,但目前載入不到資料 ——
+                  可能是帳戶暫時載入失敗(FB 限流)或活動已不存在。稍後重新整理再試。
+                </EmptyState>
               ) : compareMode ? (
                 <Suspense fallback={<LoadingState title="載入比較檢視..." />}>
                   <ComparisonTable
