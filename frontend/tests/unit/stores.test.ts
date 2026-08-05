@@ -44,6 +44,7 @@ const resetStores = () => {
   useFinanceStore.setState({
     rowMarkups: {},
     pinnedIds: [],
+    focusCampaigns: [],
     defaultMarkup: 5,
     showNicknames: true,
   });
@@ -138,6 +139,7 @@ describe("financeStore — PG-backed shared settings", () => {
     useFinanceStore.getState().hydrateFromServer({
       rowMarkups: { cmp_1: 7.5 },
       pinnedIds: ["cmp_2"],
+      focusCampaigns: [],
       defaultMarkup: 10,
       showNicknames: false,
       reportFieldsByCampaign: { cmp_1: ["spend", "ctr"] },
@@ -174,6 +176,7 @@ describe("financeStore — PG-backed shared settings", () => {
     useFinanceStore.getState().hydrateFromServer({
       rowMarkups: {},
       pinnedIds: [],
+      focusCampaigns: [],
       defaultMarkup: 5,
       showNicknames: true,
       reportFieldsByCampaign: {},
@@ -199,6 +202,7 @@ describe("financeStore — PG-backed shared settings", () => {
     useFinanceStore.getState().hydrateFromServer({
       rowMarkups: {},
       pinnedIds: [],
+      focusCampaigns: [],
       defaultMarkup: 5,
       showNicknames: true,
       reportFieldsByCampaign: {},

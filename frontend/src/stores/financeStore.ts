@@ -22,9 +22,21 @@ const invalidateSharedSettings = () => {
  * localStorage for these fields.
  */
 
+/** A campaign the team has starred as「重點關注」. `accountId` is stored
+ *  so the 重點關注 dashboard view knows which accounts to fetch (starred
+ *  campaigns span accounts); `name` is a display fallback. Team-wide,
+ *  same as `pinnedIds` / `security_safe_campaigns`. */
+export interface FocusCampaign {
+  id: string;
+  accountId: string;
+  name: string;
+}
+
 export interface FinanceState {
   rowMarkups: Record<string, number>;
   pinnedIds: string[];
+  /** 重點關注 starred campaigns (team-wide, shared setting `focus_campaigns`). */
+  focusCampaigns: FocusCampaign[];
   defaultMarkup: number;
   showNicknames: boolean;
   /** Dashboard report KPI selection, **per campaign** (team-wide). The
@@ -41,6 +53,7 @@ export interface FinanceState {
   hydrateFromServer: (input: {
     rowMarkups: Record<string, number>;
     pinnedIds: string[];
+    focusCampaigns: FocusCampaign[];
     defaultMarkup: number;
     showNicknames: boolean;
     reportFieldsByCampaign: Record<string, string[]>;
@@ -49,6 +62,9 @@ export interface FinanceState {
 
   setRowMarkup: (campaignId: string, percent: number) => void;
   togglePin: (campaignId: string) => void;
+  /** Toggle a campaign's 重點關注 star. Adds `{id, accountId, name}` when
+   *  not starred, removes it when already starred. Persists team-wide. */
+  toggleFocus: (campaign: FocusCampaign) => void;
   setDefaultMarkup: (v: number) => void;
   setShowNicknames: (v: boolean) => void;
   /** Set (or clear with null) the ordered KPI selection for one
@@ -87,6 +103,12 @@ const postShowNicknames = (v: boolean) => {
     .then(invalidateSharedSettings)
     .catch(() => {});
 };
+const postFocusCampaigns = (list: FocusCampaign[]) => {
+  api.settings
+    .setShared("focus_campaigns", list)
+    .then(invalidateSharedSettings)
+    .catch(() => {});
+};
 const postReportFields = debounce((m: Record<string, string[]>) => {
   api.settings
     .setShared("report_selected_fields", m)
@@ -116,6 +138,7 @@ if (typeof window !== "undefined") {
 export const useFinanceStore = create<FinanceState>((set) => ({
   rowMarkups: {},
   pinnedIds: [],
+  focusCampaigns: [],
   defaultMarkup: 5,
   showNicknames: true,
   reportFieldsByCampaign: {},
@@ -124,6 +147,7 @@ export const useFinanceStore = create<FinanceState>((set) => ({
   hydrateFromServer: ({
     rowMarkups,
     pinnedIds,
+    focusCampaigns,
     defaultMarkup,
     showNicknames,
     reportFieldsByCampaign,
@@ -132,6 +156,7 @@ export const useFinanceStore = create<FinanceState>((set) => ({
     set({
       rowMarkups,
       pinnedIds,
+      focusCampaigns,
       defaultMarkup,
       showNicknames,
       reportFieldsByCampaign,
@@ -152,6 +177,16 @@ export const useFinanceStore = create<FinanceState>((set) => ({
         idx === -1 ? [...state.pinnedIds, campaignId] : state.pinnedIds.filter((_, i) => i !== idx);
       postPinnedIds(next);
       return { pinnedIds: next };
+    }),
+
+  toggleFocus: (campaign) =>
+    set((state) => {
+      const exists = state.focusCampaigns.some((f) => f.id === campaign.id);
+      const next = exists
+        ? state.focusCampaigns.filter((f) => f.id !== campaign.id)
+        : [...state.focusCampaigns, campaign];
+      postFocusCampaigns(next);
+      return { focusCampaigns: next };
     }),
 
   setDefaultMarkup: (v) => {
