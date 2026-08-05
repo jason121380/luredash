@@ -44,6 +44,13 @@ let _currentUserId: string | null = null;
 export function setAccountsUserId(id: string | null) {
   _currentUserId = id;
 }
+/** The fb user id currently registered for per-user setting writes.
+ *  Exposed so other stores (e.g. financeStore's 重點關注) can reuse the
+ *  SAME proven id — account-selection persistence uses it and works, so
+ *  it's a reliable fallback if a store's own registration ever lags. */
+export function getAccountsUserId(): string | null {
+  return _currentUserId;
+}
 
 // Dev-only logger — production builds tree-shake these calls away.
 const devLog = import.meta.env.DEV ? console.log.bind(console) : () => {};
