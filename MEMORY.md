@@ -378,4 +378,10 @@ Two-day burst on `main`. ~50 commits, themed in three buckets:
 
 工程模式「限流・推播說明」分頁大改:新增「為什麼 BUCU 低、App 也 0% 卻爆(subcode 1504022)」與「Ads Insights 專屬限流怎麼治」兩張卡,判讀卡補「subcode 怎麼讀」。CLAUDE.md / .env.example env 同步。
 
-**仍未做**:排程推播「限流類失敗不計入 auto-disable」(見上方殘留權衡);向 FB 申請更高流量層級(抬高天花板,非程式,壓到底仍常爆才需要)。
+## 2026-08-05 — 1504022 仍爆 → 加 insights 呼叫「速率」pacing(不只並發)
+
+#384 的並發上限(semaphore + overview 4→2)只擋 **burst**,但 8/5 又爆 `code=4·1504022`。因為 1504022 也看**速率**(一段時間內 insights 太多)—— 快速完成的一連串呼叫即使並發低仍可能累積超標。加 `_insights_pace()`(全域 lock,`FB_INSIGHTS_MIN_GAP_MS` 預設 150ms):強制 insights 呼叫「起跑」之間至少間隔 150ms → 全 App ~6-7 次/秒。在兩個 chokepoint(`_fb_fetch_and_cache` / `_fb_get_paginated_fetch`)的 GET 前、`is_insights` 時 `await`。這正是 FB 官方「pace with wait time」。說明分頁把「怎麼治」拆成 擋burst(semaphore)+ 擋速率(pace)+ 降 overview 並發 + 報告 limitFb,並強化「治本=向 FB 申請 Advanced Access」那段。
+
+**誠實結論**:程式只能壓低用量;`1504022` 天花板由 FB 依 App 存取層級固定。壓到底仍常爆 = 真實 insights 用量(80+ 帳號 × 多人)逼近額度 → **治本是 FB 後台商業驗證 / Advanced Access 調高額度**(非程式)。
+
+**仍未做**:排程推播「限流類失敗不計入 auto-disable」(見上方殘留權衡)。
