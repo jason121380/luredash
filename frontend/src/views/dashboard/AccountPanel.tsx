@@ -26,6 +26,13 @@ export interface AccountPanelProps {
   activeAccountId: string | null;
   isLoading: boolean;
   onSelect: (account: FbAccount) => void;
+  /** Whether the 重點關注 pseudo-account is the active selection. */
+  focusActive?: boolean;
+  /** Number of starred campaigns (shown as a chip on 重點關注). */
+  focusCount?: number;
+  /** Select the 重點關注 view. When omitted (e.g. 歷史花費), the 重點關注
+   *  row is not rendered at all. */
+  onSelectFocus?: () => void;
 }
 
 export function AccountPanel({
@@ -33,6 +40,9 @@ export function AccountPanel({
   activeAccountId,
   isLoading,
   onSelect,
+  focusActive = false,
+  focusCount = 0,
+  onSelectFocus,
 }: AccountPanelProps) {
   const collapsed = useUiStore((s) => s.acctSidebarCollapsed);
 
@@ -44,6 +54,47 @@ export function AccountPanel({
         <h4 className="text-[11px] font-bold uppercase tracking-[0.6px] text-gray-300">廣告帳戶</h4>
       </div>
       <div className="flex-1 overflow-y-auto">
+        {/* 重點關注 — always pinned first (starred campaigns across accounts).
+            Only rendered when the host wires onSelectFocus (Dashboard). */}
+        {onSelectFocus && (
+          <button
+            type="button"
+            onClick={onSelectFocus}
+            className={cn(
+              "flex w-full cursor-pointer select-none items-center gap-2 border-b border-border px-3 py-2 text-left",
+              focusActive ? "bg-orange-bg" : "hover:bg-orange-bg",
+            )}
+          >
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              className="shrink-0 text-orange"
+              aria-hidden="true"
+            >
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+            </svg>
+            <span
+              className={cn(
+                "flex-1 truncate text-xs font-medium",
+                focusActive ? "font-semibold text-orange" : "text-ink",
+              )}
+            >
+              重點關注
+            </span>
+            {focusCount > 0 && (
+              <span
+                className={cn(
+                  "shrink-0 rounded-full px-1.5 text-[10px] font-semibold leading-[16px]",
+                  focusActive ? "bg-orange text-white" : "bg-orange-bg text-orange",
+                )}
+              >
+                {focusCount}
+              </span>
+            )}
+          </button>
+        )}
         {isLoading ? (
           <Loading />
         ) : accounts.length === 0 ? (

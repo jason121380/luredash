@@ -8,6 +8,7 @@ import { FbCampaignLink } from "@/components/FbCampaignLink";
 import { Spinner } from "@/components/Spinner";
 import { toast } from "@/components/Toast";
 import { Toggle } from "@/components/Toggle";
+import { cn } from "@/lib/cn";
 import type { DateConfig } from "@/lib/datePicker";
 import { fM, fN, fP } from "@/lib/format";
 import { getIns, getMsgCount } from "@/lib/insights";
@@ -72,6 +73,8 @@ function CampaignRowInner({
   const rowMarkups = useFinanceStore((s) => s.rowMarkups);
   const defaultMarkup = useFinanceStore((s) => s.defaultMarkup);
   const markupPercent = markupFor(campaign.id, rowMarkups, defaultMarkup);
+  const isStarred = useFinanceStore((s) => s.focusCampaigns.some((f) => f.id === campaign.id));
+  const toggleFocus = useFinanceStore((s) => s.toggleFocus);
   const showSpendPlus = extras.includes("spend_plus");
   // 店家 · 設計師 nickname (falls back to raw campaign name) — threaded to
   // the creative preview so downloads are named「暱稱 廣告名稱」not the FB
@@ -120,7 +123,31 @@ function CampaignRowInner({
         onClick={onRowClick}
         aria-expanded={expanded}
       >
-        <td className="w-10 text-center text-xs text-gray-300">{index + 1}</td>
+        <td className="text-center text-xs text-gray-300">
+          <div className="flex items-center justify-center gap-1">
+            <span>{index + 1}</span>
+            <button
+              type="button"
+              aria-pressed={isStarred}
+              title={isStarred ? "取消重點關注" : "加入重點關注"}
+              aria-label={isStarred ? "取消重點關注" : "加入重點關注"}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleFocus({
+                  id: campaign.id,
+                  accountId: campaign._accountId ?? "",
+                  name: campaign.name,
+                });
+              }}
+              className={cn(
+                "cursor-pointer border-0 bg-transparent p-0.5 leading-none outline-none",
+                isStarred ? "text-orange" : "text-gray-300 hover:text-orange",
+              )}
+            >
+              <StarIcon filled={isStarred} />
+            </button>
+          </div>
+        </td>
         <td>
           <div className="flex max-w-[260px] items-center gap-1.5">
             <span
@@ -246,6 +273,25 @@ function CampaignRowInner({
 }
 
 export const CampaignRow = memo(CampaignRowInner);
+
+/** 重點關注 star — filled (orange) when starred, outline when not. */
+function StarIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill={filled ? "currentColor" : "none"}
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+    </svg>
+  );
+}
 
 function CampaignAdsets({
   query,

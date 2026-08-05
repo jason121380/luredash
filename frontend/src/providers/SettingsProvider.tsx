@@ -89,9 +89,28 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const reportFieldsByCampaign = parseFieldMap(s.report_selected_fields);
     const creativeFieldsByCampaign = parseFieldMap(s.report_creative_fields);
 
+    // 重點關注 starred campaigns: [{id, accountId, name}]. Anything
+    // malformed → dropped so a bad row can't crash hydration.
+    const focusCampaigns = Array.isArray(s.focus_campaigns)
+      ? (s.focus_campaigns as unknown[]).flatMap((raw) => {
+          if (!raw || typeof raw !== "object") return [];
+          const r = raw as Record<string, unknown>;
+          const id = typeof r.id === "string" ? r.id : "";
+          if (!id) return [];
+          return [
+            {
+              id,
+              accountId: typeof r.accountId === "string" ? r.accountId : "",
+              name: typeof r.name === "string" ? r.name : "",
+            },
+          ];
+        })
+      : [];
+
     useFinanceStore.getState().hydrateFromServer({
       rowMarkups,
       pinnedIds,
+      focusCampaigns,
       defaultMarkup,
       showNicknames,
       reportFieldsByCampaign,

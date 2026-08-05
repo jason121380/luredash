@@ -7,10 +7,12 @@ import { LoadingState } from "@/components/LoadingState";
 import { MobileAccountPicker } from "@/components/MobileAccountPicker";
 import { Topbar, TopbarSeparator } from "@/layout/Topbar";
 import { cn } from "@/lib/cn";
-import { getIns } from "@/lib/insights";
+import { getIns, getMsgCount } from "@/lib/insights";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useFiltersStore } from "@/stores/filtersStore";
+import { useFinanceStore } from "@/stores/financeStore";
 import { useUiStore } from "@/stores/uiStore";
+import type { FbAccount, FbInsights } from "@/types/fb";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
 import { AccountPanel } from "./AccountPanel";
 import type { BudgetModalTarget } from "./BudgetModal";
@@ -27,6 +29,11 @@ const BudgetModal = lazy(() => import("./BudgetModal").then((m) => ({ default: m
 const ComparisonTable = lazy(() =>
   import("./ComparisonTable").then((m) => ({ default: m.ComparisonTable })),
 );
+
+// Sentinel account id for the 重點關注 view. When it is the sole active
+// id, the dashboard fetches the accounts that contain starred campaigns
+// and filters the tree to just those campaigns.
+const FOCUS_ID = "__focus__";
 
 /**
  * Dashboard view — the most complex view in the app. Composes:
@@ -61,6 +68,11 @@ export function DashboardView() {
   const activeIds = useAccountsStore((s) => s.activeIds);
   const setActiveIds = useAccountsStore((s) => s.setActiveIds);
 
+  // 重點關注 (starred campaigns, team-wide)
+  const focusCampaigns = useFinanceStore((s) => s.focusCampaigns);
+  const focusMode = activeIds.length === 1 && activeIds[0] === FOCUS_ID;
+  const focusIdSet = useMemo(() => new Set(focusCampaigns.map((f) => f.id)), [focusCampaigns]);
+
   // Auto-select the first visible account as soon as the accounts
   // list resolves and the user has no selection yet. Without this,
   // a first-time user who's just saved their Settings would land on
@@ -79,6 +91,8 @@ export function DashboardView() {
   //   - The effect's only state-mutation is `setActiveIds`, which
   //     is a stable Zustand setter — no loop risk
   useEffect(() => {
+    // Never stomp the 重點關注 sentinel with an auto-selected account.
+    if (activeIds.length === 1 && activeIds[0] === FOCUS_ID) return;
     if (visibleAccounts.length === 0) return;
     // Auto-select the first visible account when EITHER:
     //   - activeIds is empty (first-time user / just saved settings), OR
@@ -94,11 +108,17 @@ export function DashboardView() {
     if (first) setActiveIds([first.id]);
   }, [activeIds, visibleAccounts, setActiveIds]);
 
-  const activeAccounts = useMemo(
-    () => visibleAccounts.filter((a) => activeIds.includes(a.id)),
-    [visibleAccounts, activeIds],
-  );
-  const activeAccountId = activeAccounts[0]?.id ?? null;
+  // In focus mode the "active accounts" are the distinct accounts that
+  // hold starred campaigns (so the overview fetch pulls the right ones);
+  // otherwise it's the user's selected accounts.
+  const activeAccounts = useMemo(() => {
+    if (focusMode) {
+      const accts = new Set(focusCampaigns.map((f) => f.accountId));
+      return visibleAccounts.filter((a) => accts.has(a.id));
+    }
+    return visibleAccounts.filter((a) => activeIds.includes(a.id));
+  }, [focusMode, focusCampaigns, visibleAccounts, activeIds]);
+  const activeAccountId = focusMode ? null : (activeAccounts[0]?.id ?? null);
 
   // Filters (date + activeOnly)
   const date = useFiltersStore((s) => s.date.shared);
@@ -129,13 +149,67 @@ export function DashboardView() {
     setBudgetTarget(target);
   }, []);
 
-  // Filter campaigns by "only with spend" + account-scope
+  // Filter campaigns: in focus mode keep only starred campaigns, then
+  // apply the "only with spend" toggle.
   const filteredCampaigns = useMemo(() => {
-    if (!activeOnly) return overview.campaigns;
-    return overview.campaigns.filter((c) => Number(getIns(c).spend) > 0);
-  }, [overview.campaigns, activeOnly]);
+    let list = overview.campaigns;
+    if (focusMode) list = list.filter((c) => focusIdSet.has(c.id));
+    if (activeOnly) list = list.filter((c) => Number(getIns(c).spend) > 0);
+    return list;
+  }, [overview.campaigns, focusMode, focusIdSet, activeOnly]);
 
-  const multiAcct = activeAccounts.length > 1;
+  // Focus view spans accounts → always show the 帳戶 column so it's clear
+  // which account each starred campaign belongs to.
+  const multiAcct = focusMode || activeAccounts.length > 1;
+
+  // StatsGrid totals must reflect ONLY the starred campaigns in focus
+  // mode (not the whole accounts). Synthesize a single-"account" insights
+  // aggregate summed from the filtered campaigns; otherwise pass the real
+  // per-account insights map.
+  const statsProps = useMemo((): {
+    accounts: FbAccount[];
+    insights: Record<string, FbInsights | null>;
+  } => {
+    if (!focusMode) return { accounts: activeAccounts, insights: overview.insights };
+    let spend = 0;
+    let impressions = 0;
+    let reach = 0;
+    let clicks = 0;
+    let purchase = 0;
+    let lead = 0;
+    let msg = 0;
+    for (const c of filteredCampaigns) {
+      const i = getIns(c);
+      spend += Number(i.spend) || 0;
+      impressions += Number(i.impressions) || 0;
+      reach += Number(i.reach) || 0;
+      clicks += Number(i.clicks) || 0;
+      msg += getMsgCount(c);
+      for (const a of i.actions ?? []) {
+        if (a.action_type === "purchase") purchase += Number(a.value) || 0;
+        else if (a.action_type === "lead") lead += Number(a.value) || 0;
+      }
+    }
+    const synthetic: FbInsights = {
+      spend: String(spend),
+      impressions: String(impressions),
+      reach: String(reach),
+      clicks: String(clicks),
+      ctr: impressions > 0 ? String((clicks / impressions) * 100) : undefined,
+      cpc: clicks > 0 ? String(spend / clicks) : undefined,
+      cpm: impressions > 0 ? String((spend / impressions) * 1000) : undefined,
+      frequency: reach > 0 ? String(impressions / reach) : undefined,
+      actions: [
+        { action_type: "purchase", value: String(purchase) },
+        { action_type: "lead", value: String(lead) },
+        { action_type: "messaging_conversation_started_7d", value: String(msg) },
+      ],
+    };
+    return {
+      accounts: [{ id: FOCUS_ID } as FbAccount],
+      insights: { [FOCUS_ID]: synthetic },
+    };
+  }, [focusMode, activeAccounts, overview.insights, filteredCampaigns]);
 
   const setTreeSort = useUiStore((s) => s.setTreeSort);
   const statsCollapsed = useUiStore((s) => s.statsCollapsed);
@@ -224,14 +298,17 @@ export function DashboardView() {
             activeAccountId={activeAccountId}
             isLoading={accountsQuery.isLoading}
             onSelect={(account) => setActiveIds([account.id])}
+            focusActive={focusMode}
+            focusCount={focusCampaigns.length}
+            onSelectFocus={() => setActiveIds([FOCUS_ID])}
           />
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col">
           {!statsCollapsed && (
             <StatsGrid
-              accounts={activeAccounts}
-              insights={overview.insights}
+              accounts={statsProps.accounts}
+              insights={statsProps.insights}
               isLoading={overview.isLoading || overview.insightsPending}
             />
           )}
@@ -317,6 +394,8 @@ export function DashboardView() {
                   loaded={overview.loadedCount}
                   total={overview.totalCount}
                 />
+              ) : focusMode && focusCampaigns.length === 0 ? (
+                <EmptyState>尚無重點關注活動。在活動列表點 No. 旁的星號 ☆ 即可加入。</EmptyState>
               ) : activeAccounts.length === 0 ? (
                 <EmptyState>從上方選擇廣告帳戶</EmptyState>
               ) : overview.isLoading || overview.insightsPending ? (
