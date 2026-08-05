@@ -464,27 +464,42 @@ function RateLimitDocsPanel() {
           defaultOpen={false}
         >
           <ol className="space-y-3">
-            <DocStep n={1} title="全 App 共用的 insights 並發上限">
+            <DocStep n={1} title="全 App 共用的 insights 並發上限(擋 burst)">
               後端加一道 <DocCode>_insights_semaphore</DocCode>(預設 4,env{" "}
               <DocCode>FB_INSIGHTS_CONCURRENCY</DocCode>):
               <span className="font-semibold text-ink">所有</span> insights-edge 呼叫(不分哪個請求、
-              哪個人)同時最多 4 個在飛,其餘排隊。把「一瞬間 N 發齊射」攤成穩定 trickle —— 直接對應
-              FB 說的「app-wide insights 限流」。快取命中不佔名額。
+              哪個人)同時最多 4 個在飛,其餘排隊。快取命中不佔名額。
             </DocStep>
-            <DocStep n={2} title="降低儀表板多帳號 insights 並發">
+            <DocStep n={2} title="insights 呼叫間最小間隔(擋持續高頻)">
+              <DocCode>_insights_pace()</DocCode>(預設 150ms,env{" "}
+              <DocCode>FB_INSIGHTS_MIN_GAP_MS</DocCode>):並發上限只擋「一瞬間爆量」,但{" "}
+              <DocCode>1504022</DocCode> 也看「一段時間內 insights 太多」—— 快速完成的一連串呼叫即使
+              並發低仍可能累積超標。所以再加一道全域最小間隔,把 insights 呼叫的「起跑」攤成穩定速率
+              (~6-7 次/秒)。這正是 FB 官方說的「pace with wait time」。
+            </DocStep>
+            <DocStep n={3} title="降低儀表板多帳號 insights 並發">
               儀表板開一次會 fan-out 多個帳號的 insights;把每次的並發上限{" "}
               <DocCode>OVERVIEW_ACCOUNT_CONCURRENCY</DocCode> 從 4 降到 2(env
               可調)。觸發者最常是「儀表板資料載入」,這條最直接。
             </DocStep>
-            <DocStep n={3} title="報告 breakdown 併發上限(前端)">
+            <DocStep n={4} title="報告 breakdown 併發上限(前端)">
               報告 / 分享頁自動展開所有廣告組合,<DocCode>limitFb()</DocCode>(FIFO semaphore,max
               4)把跨組合的 breakdown + ads 呼叫攤開,不再一開就 N 發齊射。
             </DocStep>
           </ol>
           <p className="mt-3 text-[12px] leading-relaxed text-gray-500">
-            這三招都是「壓低 insights
-            呼叫密度」,不影響數字正確性(只是稍慢一點,跨使用者共用快取會補回來)。
-            若壓到底仍常爆,才需考慮向 FB 申請更高存取層級把天花板抬高(非程式,FB 後台操作)。
+            這幾招都是「壓低 insights 呼叫密度」(降並發 + 限速率 +
+            快取),不影響數字正確性(只是稍慢一點,共用快取會補回來)。
+          </p>
+          <p className="mt-2 rounded-lg bg-orange-bg p-2.5 text-[12px] leading-relaxed text-gray-600">
+            <span className="font-semibold text-ink">治本(非程式)</span>:程式只能把用量壓低,
+            <DocCode>1504022</DocCode> 的天花板是 FB 依 App 存取層級固定的。若壓到底(降並發+限速率+
+            快取都上了)還是常爆,代表你們的真實 insights 用量(80+ 帳號 × 多位同事)已逼近 FB 給這個
+            App 的額度 —— 這時
+            <span className="font-semibold text-ink">
+              正解是去 FB 後台完成商業驗證 / 申請 Advanced Access 把額度調高
+            </span>
+            ,這是 FB 說的「scale back 或拿更多額度」的後者。
           </p>
         </Card>
 

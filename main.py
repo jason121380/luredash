@@ -161,6 +161,31 @@ _OVERVIEW_ACCOUNT_CONCURRENCY = _env_int("OVERVIEW_ACCOUNT_CONCURRENCY", 2)
 # the two actual FB-fetch chokepoints; cache hits never consume a slot.
 _INSIGHTS_CONCURRENCY = _env_int("FB_INSIGHTS_CONCURRENCY", 4)
 _insights_semaphore: asyncio.Semaphore = asyncio.Semaphore(_INSIGHTS_CONCURRENCY)
+# Minimum gap between consecutive /insights FB call STARTS, app-wide (ms).
+# The semaphore caps concurrency (bursts); this caps the sustained RATE —
+# the Ads Insights throttle (code=4·1504022) is triggered by too many
+# insights calls over time, and FB's own guidance is to "spread queries by
+# pacing them with wait time". 150ms ≈ max ~6-7 insights calls/sec app-wide.
+# Set 0 to disable pacing.
+_INSIGHTS_MIN_GAP_MS = _env_int("FB_INSIGHTS_MIN_GAP_MS", 150)
+_insights_pace_lock: asyncio.Lock = asyncio.Lock()
+_insights_last_call_at: float = 0.0
+
+
+async def _insights_pace() -> None:
+    """Block until at least `_INSIGHTS_MIN_GAP_MS` has elapsed since the
+    previous insights call start, then stamp now. Serialises the START of
+    insights FB calls into a steady trickle (rate limit), complementing
+    the concurrency cap. No-op when the gap is 0."""
+    if _INSIGHTS_MIN_GAP_MS <= 0:
+        return
+    global _insights_last_call_at
+    gap = _INSIGHTS_MIN_GAP_MS / 1000.0
+    async with _insights_pace_lock:
+        wait = _insights_last_call_at + gap - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _insights_last_call_at = time.monotonic()
 _CAMPAIGNS_PARALLEL_INSIGHTS = os.getenv("CAMPAIGNS_PARALLEL_INSIGHTS", "0") == "1"
 _OVERVIEW_PARALLEL_ACCOUNT_INSIGHTS = os.getenv("OVERVIEW_PARALLEL_ACCOUNT_INSIGHTS", "0") == "1"
 # Shared (cross-user) read cache for INSIGHTS GETs. The default per-token
@@ -3149,7 +3174,8 @@ async def _fb_fetch_and_cache(
     # slot BEFORE the account/global slots so a burst of /insights reads
     # queues on this ceiling instead of all hitting FB's Ads-Insights
     # app-level throttle (code=4 subcode 1504022) at once.
-    insights_ctx = _insights_semaphore if _is_insights_path(path) else _NULL_CTX
+    is_insights = _is_insights_path(path)
+    insights_ctx = _insights_semaphore if is_insights else _NULL_CTX
     started = time.monotonic()
     r = None
     try:
@@ -3160,6 +3186,9 @@ async def _fb_fetch_and_cache(
             async with _fb_semaphore:
                 try:
                     if method == "GET":
+                        # Pace insights calls (rate limit) — see _insights_pace.
+                        if is_insights:
+                            await _insights_pace()
                         params = {"access_token": token, **params}
                         r = await _http_client.get(url, params=params, timeout=get_timeout)
                     else:
@@ -3485,7 +3514,8 @@ async def _fb_get_paginated_fetch(
     # App-wide insights concurrency cap (see _is_insights_path / the
     # 限流・推播說明 tab). Bulk insights edges (level=campaign/adset/ad)
     # come through here; gate them too so a wide fan-out staggers.
-    insights_ctx = _insights_semaphore if _is_insights_path(path) else _NULL_CTX
+    is_insights = _is_insights_path(path)
+    insights_ctx = _insights_semaphore if is_insights else _NULL_CTX
     pages_fetched = 0
     while next_url:
         if max_pages is not None and pages_fetched >= max_pages:
@@ -3510,6 +3540,8 @@ async def _fb_get_paginated_fetch(
             try:
                 async with insights_ctx, (acct_sem if acct_sem else _NULL_CTX):
                     async with _fb_semaphore:
+                        if is_insights:
+                            await _insights_pace()
                         r = await _http_client.get(
                             next_url, params=page_params, timeout=_GET_TIMEOUT_BULK
                         )
