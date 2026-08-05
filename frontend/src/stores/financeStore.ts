@@ -103,10 +103,20 @@ const postShowNicknames = (v: boolean) => {
     .then(invalidateSharedSettings)
     .catch(() => {});
 };
+// 重點關注 is PER-USER (each person stars the campaigns they care about),
+// so it persists to `user_settings` — not the team-wide shared_settings
+// the rest of this store uses. SettingsProvider registers the fb user id
+// here on login; writes no-op until it lands.
+let _focusUserId: string | null = null;
+export function setFocusUserId(id: string | null) {
+  _focusUserId = id;
+}
 const postFocusCampaigns = (list: FocusCampaign[]) => {
+  if (!_focusUserId) return;
+  const uid = _focusUserId;
   api.settings
-    .setShared("focus_campaigns", list)
-    .then(invalidateSharedSettings)
+    .setUser(uid, "focus_campaigns", list)
+    .then(() => queryClient.invalidateQueries({ queryKey: ["settings", "user", uid] }))
     .catch(() => {});
 };
 const postReportFields = debounce((m: Record<string, string[]>) => {

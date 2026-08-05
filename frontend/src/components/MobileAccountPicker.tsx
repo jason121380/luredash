@@ -38,6 +38,13 @@ export interface MobileAccountPickerProps {
   /** Label for the field shown above the button. Defaults to "廣告帳戶". */
   label?: string;
   className?: string;
+  /** When provided, a「重點關注」row is rendered at the top (starred
+   *  campaigns across accounts). Omitted → no focus row (non-dashboard). */
+  onSelectFocus?: () => void;
+  /** Whether 重點關注 is the current selection. */
+  focusActive?: boolean;
+  /** Number of starred campaigns (chip on the 重點關注 row). */
+  focusCount?: number;
 }
 
 export function MobileAccountPicker({
@@ -47,6 +54,9 @@ export function MobileAccountPicker({
   includeAllOption = true,
   label = "廣告帳戶",
   className,
+  onSelectFocus,
+  focusActive = false,
+  focusCount = 0,
 }: MobileAccountPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -67,8 +77,9 @@ export function MobileAccountPicker({
   // they clearly want a specific account, not the aggregate view.
   const showAll = includeAllOption && query.trim() === "";
 
-  const currentName =
-    selectedId === null
+  const currentName = focusActive
+    ? "重點關注"
+    : selectedId === null
       ? includeAllOption
         ? "全部帳戶"
         : "請選擇帳戶"
@@ -113,6 +124,18 @@ export function MobileAccountPicker({
             bleed to the modal edge so the list reads as a list, not
             a set of inset cards. */}
         <div className="-mx-5 max-h-[58vh] overflow-y-auto md:-mx-6">
+          {onSelectFocus && query.trim() === "" && (
+            <PickerRow
+              active={focusActive}
+              star
+              count={focusCount}
+              label="重點關注"
+              onClick={() => {
+                onSelectFocus();
+                setOpen(false);
+              }}
+            />
+          )}
           {showAll && (
             <PickerRow
               active={selectedId === null}
@@ -143,12 +166,18 @@ export function MobileAccountPicker({
 
 function PickerRow({
   active,
-  dotState,
+  dotState = "on",
+  star = false,
+  count,
   label,
   onClick,
 }: {
   active: boolean;
-  dotState: "on" | "off";
+  dotState?: "on" | "off";
+  /** Render a star icon (重點關注 row) instead of the account status dot. */
+  star?: boolean;
+  /** Optional count chip (starred-campaign count on the 重點關注 row). */
+  count?: number;
   label: string;
   onClick: () => void;
 }) {
@@ -161,7 +190,20 @@ function PickerRow({
         active ? "bg-orange-bg" : "active:bg-orange-bg hover:bg-orange-bg/60",
       )}
     >
-      <StatusDot state={dotState} />
+      {star ? (
+        <svg
+          width="15"
+          height="15"
+          viewBox="0 0 24 24"
+          fill="currentColor"
+          className="shrink-0 text-orange"
+          aria-hidden="true"
+        >
+          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+        </svg>
+      ) : (
+        <StatusDot state={dotState} />
+      )}
       <span
         className={cn(
           "flex-1 truncate text-[14px] font-medium",
@@ -171,6 +213,16 @@ function PickerRow({
       >
         {label}
       </span>
+      {typeof count === "number" && count > 0 && (
+        <span
+          className={cn(
+            "shrink-0 rounded-full px-1.5 text-[11px] font-semibold leading-[18px]",
+            active ? "bg-orange text-white" : "bg-orange-bg text-orange",
+          )}
+        >
+          {count}
+        </span>
+      )}
       {active && (
         <span aria-hidden="true" className="text-base text-orange">
           ✓
