@@ -301,22 +301,26 @@ function RateLimitDocsPanel() {
       <header className="mb-3">
         <h2 className="text-[15px] font-bold text-ink">限流・推播說明</h2>
         <p className="mt-0.5 text-xs text-gray-400">
-          FB 呼叫量的限流機制、系統自我保護、降載措施,以及排程推播如何運作 —— 看戰情室時對照這裡。
+          用白話解釋 FB 為什麼會擋、系統怎麼自保、以及戰情室每個欄位該怎麼看。
         </p>
       </header>
 
       <div className="grid grid-cols-1 gap-4">
-        <Card title="一分鐘總結">
+        <Card title="先講結論">
           <div className="space-y-2 text-[13px] leading-relaxed text-gray-600">
             <p>
-              Facebook 限制的是「
-              <span className="font-semibold text-ink">單位時間的 API 呼叫次數</span>
-              」,不是流量大小。超過就回錯誤碼,系統會進入短暫冷卻。
+              這次一直爆的主因不是某一個帳號花太多錢,也不是圖片太大,而是{" "}
+              <span className="font-semibold text-ink">短時間內打太多 FB Ads Insights API</span>。
+              FB 看到同一個 App 一直問成效數字,就會暫時擋住。
             </p>
             <p>
-              為了盡量不爆、爆了也能自動恢復,系統做了{" "}
-              <span className="font-semibold text-orange">五層降載</span>{" "}
-              與多道自我保護閘門(下方各卡片說明)。戰情室的「限流事件全紀錄」就是每一次爆桶的完整歷史。
+              現在系統已經做了幾個最直接的降載:同一份成效資料會共用快取、15
+              分鐘內重開頁面不再自動重抓、<DocCode>/insights</DocCode> 呼叫改成最多約每秒 2
+              次起跑。這會明顯減少爆量,但如果很多人同時看很多帳號,仍可能碰到 FB 給 App 的硬上限。
+            </p>
+            <p>
+              戰情室的「限流事件全紀錄」就是每一次被 FB 擋住的紀錄。先看 <DocCode>code</DocCode> /{" "}
+              <DocCode>subcode</DocCode>,再看來源與路徑,不要只看 BUCU%。
             </p>
           </div>
         </Card>
@@ -349,10 +353,9 @@ function RateLimitDocsPanel() {
             />
           </div>
           <p className="mt-3 text-[12px] leading-relaxed text-gray-500">
-            戰情室每列事件旁的 <DocCode>BUCU %</DocCode> 只反映「第一桶(單帳號商業用途)」;對{" "}
-            <DocCode>code=4</DocCode>(App 全域)事件而言那不是關鍵指標 —— 別被它很低誤導。 旁邊的{" "}
-            <DocCode>App %</DocCode> 才是 App 全域桶(`X-App-Usage`)的用量,是 code-4 該看的數字, 所以
-            code-4 那列的 App% 會以紅色標出。
+            白話說:FB 不是只有一個水桶。某個帳號的 BUCU 很低,不代表整個 App 不會被擋。戰情室裡的{" "}
+            <DocCode>BUCU %</DocCode> 是單帳號桶;<DocCode>App %</DocCode> 才是一般{" "}
+            <DocCode>code=4</DocCode> 該看的 App 全域桶。
           </p>
         </Card>
 
@@ -364,43 +367,39 @@ function RateLimitDocsPanel() {
         >
           <div className="space-y-2 text-[13px] leading-relaxed text-gray-600">
             <p>
-              我們把 FB 的 <DocCode>error_subcode</DocCode> 記進戰情室後,抓到這些 code=4 幾乎都是{" "}
+              我們把 FB 的 <DocCode>error_subcode</DocCode> 記進戰情室後,確認這波主要是{" "}
               <DocCode>code=4·1504022</DocCode> ——{" "}
               <span className="font-semibold text-ink">
-                Ads Insights API 的「來自這個 App 的 insights 呼叫太多」
+                Ads Insights API 覺得這個 App 問成效數字問太快、問太多
               </span>
-              (FB 官方文件用語)。
+              。
             </p>
             <p>
-              重點:這是<span className="font-semibold text-ink">第四個、insights 專屬的桶</span>,
-              跟前面三桶都不同 ——
+              重點是:這個限制不等於 BUCU,也不一定等於 <DocCode>X-App-Usage</DocCode>。所以你會看到
+              BUCU 很低、App 0% 或 n/a,但還是爆。這不是紀錄錯,而是 FB 另有一個 insights 專用保護。
             </p>
             <ul className="ml-4 list-disc space-y-1 text-gray-500">
               <li>
-                它<span className="font-semibold text-ink">不反映在 X-App-Usage</span>,所以那些事件
-                旁邊顯示 <DocCode>App 0%</DocCode> / <DocCode>App n/a</DocCode> 是正常的,不是矛盾。
+                它是<span className="font-semibold text-ink">全 App 共用</span>:一個人打爆,所有人查
+                insights 都會受影響。
               </li>
               <li>
-                它是<span className="font-semibold text-ink">全 App 共用</span>:一旦觸發,整個 App
-                的所有 insights 呼叫都被限(不分帳號、不分使用者)—— 這就是為什麼 scope 是「全域」、
-                Nana/Betty/Clare/Eunice 多人都中、且全在 <DocCode>/insights</DocCode> 路徑。
+                它只針對 <DocCode>/insights</DocCode>:看花費、CTR、CPC、成效報表最容易踩到。
               </li>
               <li>
-                觸發原因是<span className="font-semibold text-ink">短時間內太多 insights 呼叫</span>
-                (並發 / 爆量),不是每小時額度慢慢累滿。
+                對策不是一直重試,而是
+                <span className="font-semibold text-ink">放慢、排隊、吃快取</span>。
               </li>
             </ul>
             <p className="text-gray-500">
-              FB 官方的解法就是「
-              <span className="font-semibold text-ink">放慢 / 分散 insights 呼叫</span>
-              (pacing、降並發)」,不是提高額度 —— 見下一張卡我們做的。
+              所以這次修正的方向是正確的:少打重複 call,把需要 live FB 的 call 排慢一點。
             </p>
           </div>
         </Card>
 
         <Card
           title="系統的自我保護(閘門與冷卻)"
-          subtitle="爆桶前先自我節流,爆桶後進冷卻;都會自然解除"
+          subtitle="爆桶前先少打,爆桶後先停一下;避免越打越糟"
           collapsible
           defaultOpen={false}
         >
@@ -423,13 +422,13 @@ function RateLimitDocsPanel() {
               <DocCode>4 / 17 / 32 / 613</DocCode> → 全站 FB 呼叫冷卻 ≥10 分鐘。
             </li>
             <li className="text-gray-500">
-              這些都會<span className="font-semibold text-ink">自然解除</span>:BUCU 快照 15
-              分鐘內沒有新呼叫就過期歸零,冷卻到期後自動放行。
+              這些都會<span className="font-semibold text-ink">自然解除</span>
+              :用量快照會過期,冷卻到期後自動放行。使用者不需要手動重啟服務。
             </li>
           </ul>
         </Card>
 
-        <Card title="我們做的五層降載" subtitle="從不同角度砍掉 FB 的原始呼叫數,彼此互補">
+        <Card title="現在已做的降載" subtitle="目標只有一個:少打重複 call,把必要 call 慢慢排出去">
           <ol className="space-y-3">
             <DocStep n={1} title="Per-account 歸戶">
               像 <DocCode>{"{adset}/ads"}</DocCode>、<DocCode>{"{campaign}/insights"}</DocCode>{" "}
@@ -442,16 +441,25 @@ function RateLimitDocsPanel() {
             </DocStep>
             <DocStep n={3} title="歷史區間長快取 + 跨使用者共用">
               已封閉的日期區間(過去月份、until &lt; 今天)數字已定案,快取拉長到 1 小時(預設),不再每 5
-              分鐘重抓。滾動區間(近 7 天、本月…)維持短快取。且 insights 快取
+              分鐘重抓。滾動區間(近 7 天、本月...)維持短快取。且 insights 快取
               <span className="font-semibold text-ink">跨使用者共用</span>
-              :多位同事看同批帳號時,同一份 insights 只打一次
-              FB、其餘人吃快取(這是對「多人各自抓」最直接的一刀)。
+              :多位同事看同批帳號時,同一份 insights 只打一次 FB、其餘人吃快取。
             </DocStep>
-            <DocStep n={4} title="離峰預熱">
+            <DocStep n={4} title="account insights 也納入共享快取">
+              之前只有 campaign/adset/ad insights 共享快取,帳號總成效{" "}
+              <DocCode>{"act_xxx/insights"}</DocCode> 仍會重複打 FB。現在這條也吃同一套 shared cache
+              + 歷史 TTL,overview 每個帳號少掉一個常見重複來源。
+            </DocStep>
+            <DocStep n={5} title="15 分鐘內重開不自動重抓">
+              前端 localStorage snapshot 以前只是先顯示舊資料,背後仍會 full
+              refetch。現在同帳號/日期的 snapshot 若在 15 分鐘內,畫面直接用快照,不再偷偷重打一輪
+              full overview。
+            </DocStep>
+            <DocStep n={6} title="離峰預熱">
               每月一次的全帳號重型預熱 fan-out,只在當地凌晨 2–6
               點跑,避開白天使用者流量的同一個小時額度。
             </DocStep>
-            <DocStep n={5} title="排程推播解鎖">
+            <DocStep n={7} title="排程推播解鎖">
               排程 LINE 推播不再被背景閘門整批跳過(見下一張卡),確保到點會發。
             </DocStep>
           </ol>
@@ -459,7 +467,7 @@ function RateLimitDocsPanel() {
 
         <Card
           title="Ads Insights 專屬限流(1504022)怎麼治"
-          subtitle="FB 的解法是「放慢 / 分散 insights 呼叫」;我們照做,分三招"
+          subtitle="這類問題不能硬衝,只能少打、排隊、放慢"
           collapsible
           defaultOpen={false}
         >
@@ -471,11 +479,11 @@ function RateLimitDocsPanel() {
               哪個人)同時最多 4 個在飛,其餘排隊。快取命中不佔名額。
             </DocStep>
             <DocStep n={2} title="insights 呼叫間最小間隔(擋持續高頻)">
-              <DocCode>_insights_pace()</DocCode>(預設 150ms,env{" "}
+              <DocCode>_insights_pace()</DocCode>(預設 500ms,env{" "}
               <DocCode>FB_INSIGHTS_MIN_GAP_MS</DocCode>):並發上限只擋「一瞬間爆量」,但{" "}
               <DocCode>1504022</DocCode> 也看「一段時間內 insights 太多」—— 快速完成的一連串呼叫即使
               並發低仍可能累積超標。所以再加一道全域最小間隔,把 insights 呼叫的「起跑」攤成穩定速率
-              (~6-7 次/秒)。這正是 FB 官方說的「pace with wait time」。
+              (~2 次/秒)。這正是 FB 官方說的「pace with wait time」。
             </DocStep>
             <DocStep n={3} title="降低儀表板多帳號 insights 並發">
               儀表板開一次會 fan-out 多個帳號的 insights;把每次的並發上限{" "}
@@ -485,6 +493,10 @@ function RateLimitDocsPanel() {
             <DocStep n={4} title="報告 breakdown 併發上限(前端)">
               報告 / 分享頁自動展開所有廣告組合,<DocCode>limitFb()</DocCode>(FIFO semaphore,max
               4)把跨組合的 breakdown + ads 呼叫攤開,不再一開就 N 發齊射。
+            </DocStep>
+            <DocStep n={5} title="近期 snapshot 不自動 full refetch">
+              使用者剛看過同一批帳號又重新整理頁面時,15 分鐘內直接用本機 snapshot,不再背景重打一整包
+              full overview。這是降低 dashboard 重複爆量最直接的一刀。
             </DocStep>
           </ol>
           <p className="mt-3 text-[12px] leading-relaxed text-gray-500">
@@ -528,6 +540,12 @@ function RateLimitDocsPanel() {
               不再受背景閘門整批
               跳過(改成逐一認領),即使背景在自我節流也照發;真的打不動時走單筆重試,而不是整批卡死。
             </p>
+            <p className="rounded-lg bg-orange-bg p-2.5 text-gray-600">
+              <span className="font-semibold text-ink">但要注意</span>
+              :推播為了準時,目前仍可能在白天打 insights。它不會整批卡死,但如果同時很多使用者在看
+              dashboard,兩邊還是會共用同一個
+              <DocCode>1504022</DocCode> 桶。後續若還爆,下一步要做推播 jitter / throttle 時延後。
+            </p>
           </div>
         </Card>
 
@@ -541,8 +559,10 @@ function RateLimitDocsPanel() {
               每列包含:<span className="font-semibold text-ink">scope</span>(全域 / 帳戶)、
               <span className="font-semibold text-ink">code</span>、
               <span className="font-semibold text-ink">觸發者</span>(哪位使用者的 token)、
-              <span className="font-semibold text-ink">頁面/路徑</span>、當下的{" "}
-              <DocCode>BUCU %</DocCode>。
+              <span className="font-semibold text-ink">來源</span>(dashboard / line-push /
+              finance...)、
+              <span className="font-semibold text-ink">路徑</span>、當下的 <DocCode>BUCU %</DocCode>{" "}
+              與 <DocCode>App %</DocCode>。
             </li>
             <li>
               紅色標「<span className="font-semibold text-orange">最後爆</span>」= 最新一次事件。
@@ -563,7 +583,8 @@ function RateLimitDocsPanel() {
               保護,而非每小時額度塞滿。
             </li>
             <li className="text-gray-500">
-              研判:<DocCode>code=4</DocCode>(全域)看的是「多人 + 背景在同一小時的總呼叫量」;
+              研判:<DocCode>code=4·1504022</DocCode> 看的是「短時間內 insights 太多」;
+              <DocCode>code=4</DocCode> 沒 subcode 時才偏向一般 App 額度;
               <DocCode>80004</DocCode>(帳戶)看的是「那一個帳號被戳太快」。此表為 DB
               持久化,重啟不遺失。
             </li>

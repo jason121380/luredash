@@ -137,7 +137,7 @@ uvicorn main:app --port 8001 --reload
 | `FB_HISTORICAL_CACHE_TTL_SECONDS` | 已封閉歷史區間 insights 快取 TTL(預設 `3600`);滾動區間維持 300s。降低對 FB App 全域每小時呼叫額度的重複消耗 |
 | `FB_OFFPEAK_WARM_START_HOUR` / `FB_OFFPEAK_WARM_END_HOUR` | 每月重型預熱 fan-out 只在此當地離峰時段觸發(預設 `2`–`6`);`start==end` 停用 |
 
-> FB 限流治理:系統以「五層降載」(per-account 歸戶、精準 invalidate、歷史區間長快取、離峰預熱、排程推播解鎖)降低對 Facebook API 每小時呼叫額度的消耗。細節見 **工程模式 →「限流・推播說明」分頁**。
+> FB 限流治理:系統以多層降載降低 Facebook Ads Insights 爆量風險,包含 per-account 歸戶、精準 invalidate、歷史/共享 insights 快取、15 分鐘內 snapshot 不重抓、全域 insights pacing、離峰預熱與排程推播保護。細節見 **工程模式 →「限流・推播說明」分頁**。
 
 ---
 
