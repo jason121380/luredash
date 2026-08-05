@@ -1,6 +1,8 @@
 import { api } from "@/api/client";
+import { toast } from "@/components/Toast";
 import { debounce } from "@/lib/debounce";
 import { queryClient } from "@/lib/queryClient";
+import { getAccountsUserId } from "@/stores/accountsStore";
 import { create } from "zustand";
 
 const invalidateSharedSettings = () => {
@@ -22,10 +24,11 @@ const invalidateSharedSettings = () => {
  * localStorage for these fields.
  */
 
-/** A campaign the team has starred as「重點關注」. `accountId` is stored
- *  so the 重點關注 dashboard view knows which accounts to fetch (starred
- *  campaigns span accounts); `name` is a display fallback. Team-wide,
- *  same as `pinnedIds` / `security_safe_campaigns`. */
+/** A campaign starred as「重點關注」. `accountId` is stored so the 重點關注
+ *  dashboard view knows which accounts to fetch (starred campaigns span
+ *  accounts); `name` is a display fallback. PER-USER (each person their
+ *  own list) → `user_settings.focus_campaigns`, unlike the rest of this
+ *  store which is team-wide. */
 export interface FocusCampaign {
   id: string;
   accountId: string;
@@ -35,7 +38,7 @@ export interface FocusCampaign {
 export interface FinanceState {
   rowMarkups: Record<string, number>;
   pinnedIds: string[];
-  /** 重點關注 starred campaigns (team-wide, shared setting `focus_campaigns`). */
+  /** 重點關注 starred campaigns (PER-USER, `user_settings.focus_campaigns`). */
   focusCampaigns: FocusCampaign[];
   defaultMarkup: number;
   showNicknames: boolean;
@@ -63,7 +66,7 @@ export interface FinanceState {
   setRowMarkup: (campaignId: string, percent: number) => void;
   togglePin: (campaignId: string) => void;
   /** Toggle a campaign's 重點關注 star. Adds `{id, accountId, name}` when
-   *  not starred, removes it when already starred. Persists team-wide. */
+   *  not starred, removes it when already starred. Persists per-user. */
   toggleFocus: (campaign: FocusCampaign) => void;
   setDefaultMarkup: (v: number) => void;
   setShowNicknames: (v: boolean) => void;
@@ -112,12 +115,24 @@ export function setFocusUserId(id: string | null) {
   _focusUserId = id;
 }
 const postFocusCampaigns = (list: FocusCampaign[]) => {
-  if (!_focusUserId) return;
-  const uid = _focusUserId;
+  // Reuse the account-selection user id as a fallback — it's the same
+  // per-user pipeline and provably persists, so a starred campaign can't
+  // silently no-op just because focus's own id registration lagged.
+  const uid = _focusUserId || getAccountsUserId();
+  if (!uid) {
+    // Was a SILENT `return` — which is exactly how a star could look saved
+    // (orange in-memory) yet vanish on reload. Surface it instead.
+    toast("重點關注儲存失敗:尚未取得使用者身分,請重新整理後再試", "error", 4000);
+    return;
+  }
   api.settings
     .setUser(uid, "focus_campaigns", list)
     .then(() => queryClient.invalidateQueries({ queryKey: ["settings", "user", uid] }))
-    .catch(() => {});
+    .catch((e) => {
+      // Was a SILENT `.catch(() => {})`. If the POST is rejected, the star
+      // never persists — the user must SEE that, not discover it on reload.
+      toast(`重點關注儲存失敗:${e instanceof Error ? e.message : "未知錯誤"}`, "error", 4500);
+    });
 };
 const postReportFields = debounce((m: Record<string, string[]>) => {
   api.settings
