@@ -1,7 +1,7 @@
 import { useSharedSettings, useUserSettings } from "@/api/hooks/useSettings";
 import { useFbAuth } from "@/auth/FbAuthProvider";
 import { setAccountsUserId, useAccountsStore } from "@/stores/accountsStore";
-import { useFinanceStore } from "@/stores/financeStore";
+import { setFocusUserId, useFinanceStore } from "@/stores/financeStore";
 import { type PaymentAccount, usePaymentStore } from "@/stores/paymentStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -37,7 +37,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // knows which user to POST under. Cleared on logout.
   useEffect(() => {
     setAccountsUserId(userId);
-    return () => setAccountsUserId(null);
+    setFocusUserId(userId);
+    return () => {
+      setAccountsUserId(null);
+      setFocusUserId(null);
+    };
   }, [userId]);
 
   useEffect(() => {
@@ -89,10 +93,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const reportFieldsByCampaign = parseFieldMap(s.report_selected_fields);
     const creativeFieldsByCampaign = parseFieldMap(s.report_creative_fields);
 
-    // 重點關注 starred campaigns: [{id, accountId, name}]. Anything
-    // malformed → dropped so a bad row can't crash hydration.
-    const focusCampaigns = Array.isArray(s.focus_campaigns)
-      ? (s.focus_campaigns as unknown[]).flatMap((raw) => {
+    // 重點關注 starred campaigns: [{id, accountId, name}]. PER-USER
+    // (each person's own list) → read from user settings `u`, not shared.
+    // Anything malformed → dropped so a bad row can't crash hydration.
+    const focusCampaigns = Array.isArray(u.focus_campaigns)
+      ? (u.focus_campaigns as unknown[]).flatMap((raw) => {
           if (!raw || typeof raw !== "object") return [];
           const r = raw as Record<string, unknown>;
           const id = typeof r.id === "string" ? r.id : "";

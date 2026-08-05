@@ -230,6 +230,9 @@ export function DashboardView() {
             }}
             includeAllOption={false}
             className="bg-transparent px-0 py-0"
+            onSelectFocus={() => setActiveIds([FOCUS_ID])}
+            focusActive={focusMode}
+            focusCount={focusCampaigns.length}
           />
           <TopbarSeparator />
           <label className="hidden cursor-pointer items-center gap-1.5 whitespace-nowrap text-[13px] text-gray-500 md:flex">
