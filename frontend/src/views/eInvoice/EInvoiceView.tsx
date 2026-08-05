@@ -16,6 +16,7 @@ import { useNicknames } from "@/api/hooks/useNicknames";
 import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadAllAccountsPrompt } from "@/components/LoadAllAccountsPrompt";
 import { LoadingState } from "@/components/LoadingState";
 import { Modal } from "@/components/Modal";
 import { toast } from "@/components/Toast";
@@ -24,6 +25,7 @@ import { cn } from "@/lib/cn";
 import type { DateConfig } from "@/lib/datePicker";
 import { fM } from "@/lib/format";
 import { spendOf } from "@/lib/insights";
+import { useAccountLoadGate } from "@/lib/useAccountLoadGate";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useFinanceStore } from "@/stores/financeStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -255,7 +257,11 @@ function IssueTab({ month }: { month: string }) {
   const date = useMemo(() => monthToDate(month), [month]);
   const settingsReady = useUiStore((s) => s.settingsReady);
 
-  const overview = useMultiAccountOverview(visible, date, {
+  // Confirm-before-load: don't auto-fan-out insights across a big account
+  // set on page open (Ads Insights burst). See useAccountLoadGate.
+  const loadGate = useAccountLoadGate(visible);
+
+  const overview = useMultiAccountOverview(loadGate.queryAccounts, date, {
     includeArchived: true,
     source: "finance",
   });
@@ -375,6 +381,8 @@ function IssueTab({ month }: { month: string }) {
               <LoadingState title="載入費用中心資料中..." />
             ) : visible.length === 0 ? (
               <EmptyState>請先在設定中啟用廣告帳戶</EmptyState>
+            ) : loadGate.gated ? (
+              <LoadAllAccountsPrompt count={loadGate.count} onConfirm={loadGate.confirm} />
             ) : rows.length === 0 ? (
               <EmptyState>此月份沒有有花費的行銷活動</EmptyState>
             ) : (

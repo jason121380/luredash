@@ -4,12 +4,14 @@ import { useNicknames } from "@/api/hooks/useNicknames";
 import { Button } from "@/components/Button";
 import { DatePicker } from "@/components/DatePicker";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadAllAccountsPrompt } from "@/components/LoadAllAccountsPrompt";
 import { LoadingState } from "@/components/LoadingState";
 import { toast } from "@/components/Toast";
 import { Topbar } from "@/layout/Topbar";
 import { cn } from "@/lib/cn";
 import { toLabel } from "@/lib/datePicker";
 import { fM } from "@/lib/format";
+import { useAccountLoadGate } from "@/lib/useAccountLoadGate";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useFiltersStore } from "@/stores/filtersStore";
 import { useFinanceStore } from "@/stores/financeStore";
@@ -65,9 +67,13 @@ export function StoreExpensesView() {
   const [hideZero, setHideZero] = useState(true);
   const [sort, setSort] = useState<StoreSortState>({ key: "plus", dir: "desc" });
 
+  // Confirm-before-load: don't auto-fan-out insights across a big account
+  // set on page open (Ads Insights burst). See useAccountLoadGate.
+  const loadGate = useAccountLoadGate(visible);
+
   // include_archived: true so historical spend rolls up correctly,
   // matching the Finance view's behaviour.
-  const overview = useMultiAccountOverview(visible, date, {
+  const overview = useMultiAccountOverview(loadGate.queryAccounts, date, {
     includeArchived: true,
     source: "store-expenses",
   });
@@ -187,6 +193,8 @@ export function StoreExpensesView() {
               <LoadingState title="載入店家花費中..." />
             ) : visible.length === 0 ? (
               <EmptyState>請先在設定中啟用廣告帳戶</EmptyState>
+            ) : loadGate.gated ? (
+              <LoadAllAccountsPrompt count={loadGate.count} onConfirm={loadGate.confirm} />
             ) : overview.isLoading || overview.insightsPending ? (
               <LoadingState title="載入店家花費中..." />
             ) : allRows.length === 0 ? (
@@ -246,7 +254,9 @@ export function StoreExpensesView() {
                             </span>
                           </div>
                         </td>
-                        <td className="whitespace-nowrap px-1.5 py-2 text-gray-500 md:px-3.5 md:py-2.5">{SUBJECT}</td>
+                        <td className="whitespace-nowrap px-1.5 py-2 text-gray-500 md:px-3.5 md:py-2.5">
+                          {SUBJECT}
+                        </td>
                         <td className="whitespace-nowrap px-1.5 py-2 text-gray-500 md:px-3.5 md:py-2.5">
                           {SUB_SUBJECT}
                         </td>
