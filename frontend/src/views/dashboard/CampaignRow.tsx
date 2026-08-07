@@ -172,7 +172,15 @@ function CampaignRowInner({
         </td>
         {multiAcct && (
           <td>
-            <span className="text-[11px] text-gray-500">{campaign._accountName}</span>
+            {/* truncate + nowrap so a long account name (esp. in 重點關注 /
+                on mobile where this column is narrow) doesn't wrap to one
+                character per line and blow the row height up. */}
+            <span
+              className="block max-w-[76px] truncate text-[11px] text-gray-500 md:max-w-[150px]"
+              title={campaign._accountName}
+            >
+              {campaign._accountName}
+            </span>
           </td>
         )}
         <td>
