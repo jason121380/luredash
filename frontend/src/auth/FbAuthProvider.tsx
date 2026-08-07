@@ -1,4 +1,11 @@
-import { ApiError, api, setApiSessionToken, setApiUserId } from "@/api/client";
+import {
+  ApiError,
+  type SessionInvalidReason,
+  api,
+  setApiSessionToken,
+  setApiUserId,
+  setSessionInvalidHandler,
+} from "@/api/client";
 import { useAccountsStore } from "@/stores/accountsStore";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -368,6 +375,44 @@ export function FbAuthProvider({ children }: { children: ReactNode }) {
     },
     [queryClient],
   );
+
+  // Force a clean logout when the api client detects that the live
+  // session went invalid mid-use (FB account switched in another tab,
+  // or the token expired). Without this the failing 401 refresh just
+  // leaves every query in an error state → blank dashboard. Flipping to
+  // "unauth" with a message renders <LoginView/> (see App.tsx AuthGate).
+  const forceInvalidSessionLogout = useCallback(
+    (reason: SessionInvalidReason) => {
+      try {
+        localStorage.removeItem("meta_dash_fb_token");
+        localStorage.removeItem("meta_dash_session_token");
+        localStorage.removeItem("meta_dash_session_expires_at");
+        localStorage.removeItem("meta_dash_fb_verified");
+        localStorage.removeItem(SESSION_UID_KEY);
+      } catch {
+        /* ignore */
+      }
+      clearPerUserUiState();
+      setApiUserId(null);
+      setApiSessionToken(null);
+      setUser(null);
+      // Drop the previous session's cached data entirely so nothing of
+      // the old account flashes behind the login screen.
+      queryClient.clear();
+      setStatus("unauth");
+      setError(
+        reason === "switched"
+          ? "偵測到 Facebook 已切換帳號,為避免資料錯置已自動登出,請重新登入。"
+          : "登入已過期,請重新登入 Facebook。",
+      );
+    },
+    [queryClient],
+  );
+
+  useEffect(() => {
+    setSessionInvalidHandler(forceInvalidSessionLogout);
+    return () => setSessionInvalidHandler(null);
+  }, [forceInvalidSessionLogout]);
 
   useEffect(() => {
     // Guard against React 18 Strict Mode double-invoke so we don't

@@ -371,6 +371,31 @@ export function setApiSessionToken(token: string | null): void {
   _apiSessionToken = token && token.trim() ? token.trim() : null;
 }
 
+// Reason a live session became invalid mid-use, detected inside the
+// 401 auto-refresh path:
+//   - "switched": the FB cookie now belongs to a DIFFERENT account than
+//     the one this app session was established under (user switched
+//     accounts on facebook.com in another tab).
+//   - "expired": the FB SDK reports no connected session at all (the
+//     long-lived token expired / the user logged out of Facebook).
+// Without a handler, a failed refresh just re-throws the 401 and every
+// query lands in an error state → blank dashboard with no explanation.
+// FbAuthProvider registers a handler that force-logs-out and shows a
+// clear login screen instead.
+export type SessionInvalidReason = "switched" | "expired";
+let _sessionInvalidHandler: ((reason: SessionInvalidReason) => void) | null = null;
+
+export function setSessionInvalidHandler(
+  fn: ((reason: SessionInvalidReason) => void) | null,
+): void {
+  _sessionInvalidHandler = fn;
+}
+
+// localStorage key holding the FB uid this app session was bound to.
+// Mirrors SESSION_UID_KEY in FbAuthProvider — kept as a literal here so
+// the low-level client has no import cycle with the auth provider.
+const SESSION_UID_STORAGE_KEY = "meta_dash_fb_uid";
+
 /**
  * Auth headers for the few call sites that must use raw `fetch()`
  * instead of `request()` — the NDJSON streaming endpoint and the
@@ -493,6 +518,24 @@ function refreshBackendToken(): Promise<void> {
               source: "auth",
             })
               .then((resp) => {
+                // FB account-switch detection on the silent-refresh
+                // path (mirrors exchangeToken's check). If the FB
+                // cookie now resolves to a DIFFERENT uid than the one
+                // this session was bound to, do NOT adopt the new
+                // token — hand off to the invalid-session handler so
+                // the app force-logs-out instead of quietly showing
+                // the wrong account's (empty) data.
+                let boundUid: string | null = null;
+                try {
+                  boundUid = localStorage.getItem(SESSION_UID_STORAGE_KEY);
+                } catch {
+                  /* ignore */
+                }
+                if (resp.id && boundUid && boundUid !== resp.id) {
+                  _sessionInvalidHandler?.("switched");
+                  reject(new Error("FB account switched"));
+                  return;
+                }
                 if (resp.id) setApiUserId(resp.id);
                 if (resp.sessionToken) {
                   setApiSessionToken(resp.sessionToken);
@@ -517,6 +560,11 @@ function refreshBackendToken(): Promise<void> {
                 reject(err);
               });
           } else {
+            // FB itself reports no connected session — the token
+            // expired or the user logged out of Facebook. Flip the app
+            // to a clean login screen instead of leaving queries to
+            // 401 into a blank dashboard.
+            _sessionInvalidHandler?.("expired");
             reject(new Error("FB session not connected"));
           }
         });
